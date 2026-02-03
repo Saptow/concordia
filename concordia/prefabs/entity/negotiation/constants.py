@@ -34,6 +34,8 @@ class ModuleType(str, Enum):
   SWARM_INTELLIGENCE = 'swarm_intelligence'
   UNCERTAINTY_AWARE = 'uncertainty_aware'
   STRATEGY_EVOLUTION = 'strategy_evolution'
+  UNCERTAIN_BUYER = 'uncertain_buyer'
+  UNCERTAIN_SELLER = 'uncertain_seller'
 
   @classmethod
   def all_modules(cls) -> list['ModuleType']:
@@ -69,6 +71,8 @@ MODULE_COMPONENT_NAMES = {
     ModuleType.SWARM_INTELLIGENCE: 'SwarmIntelligence',
     ModuleType.UNCERTAINTY_AWARE: 'UncertaintyAwareNegotiator',
     ModuleType.STRATEGY_EVOLUTION: 'StrategyEvolution',
+    ModuleType.UNCERTAIN_BUYER: 'UncertainBuyer',
+    ModuleType.UNCERTAIN_SELLER: 'UncertainSeller',
 }
 
 
@@ -103,4 +107,15 @@ DEFAULT_MODULE_CONFIGS = {
         'learning_rate': 0.1,
         'strategy_memory': 10,
     },
+    ModuleType.UNCERTAIN_BUYER: {
+        'confidence_threshold': 0.7,
+        'risk_tolerance': 0.5,
+        'ambiguity_aversion': 0.3,
+    },
+    ModuleType.UNCERTAIN_SELLER: {
+        'confidence_threshold': 0.7,
+        'risk_tolerance': 0.5,
+        'ambiguity_aversion': 0.3,
+    },
+
 }

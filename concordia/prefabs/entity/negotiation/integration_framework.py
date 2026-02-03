@@ -67,6 +67,11 @@ class NegotiationModuleIntegrator:
             'type': 'learning_under_uncertainty',
             'data': ['confidence_levels', 'information_gaps'],
             'bidirectional': True
+        },
+        ('uncertain_buyer', 'uncertain_seller'): {
+            'type': 'learning_under_uncertainty',
+            'data': ['confidence_levels', 'information_gaps'],
+            'bidirectional': True
         }
     }
 
@@ -75,6 +80,8 @@ class NegotiationModuleIntegrator:
         'theory_of_mind': set(),  # Base module - no dependencies
         'cultural_adaptation': set(),  # Base module
         'uncertainty_aware': set(),  # Base module
+        'uncertain_buyer': set(),  # Base module
+        'uncertain_seller': set(),  # Base module
         'temporal_strategy': {'theory_of_mind'},  # Benefits from emotional understanding
         'swarm_intelligence': {'theory_of_mind', 'uncertainty_aware'},  # Needs both
         'strategy_evolution': {'temporal_strategy', 'uncertainty_aware'}  # Learns from both
@@ -300,6 +307,8 @@ class ModuleCoordinator:
             module_input['emotional_context'] = self.get_shared_context('emotional_context')
         elif module_name == 'uncertainty_aware':
             module_input['belief_state'] = self.get_shared_context('belief_state')
+        elif module_name in ['uncertain_buyer', 'uncertain_seller']:
+            module_input['belief_state'] = self.get_shared_context('belief_state')
 
         return module_input
 
@@ -317,7 +326,8 @@ class ModuleCoordinator:
             self.update_shared_context('collective_analysis', module._last_analyses, module_name)
         elif module_name == 'strategy_evolution' and hasattr(module, '_current_strategy'):
             self.update_shared_context('current_strategy', module._current_strategy, module_name)
-
+        elif module_name in ['uncertain_buyer', 'uncertain_seller'] and hasattr(module, '_beliefs'):
+            self.update_shared_context('belief_state', module._beliefs, module_name)
 
 def create_optimal_module_configuration(
     available_modules: List[str],
@@ -352,6 +362,26 @@ def create_optimal_module_configuration(
     # Uncertainty handling for incomplete information
     if 'uncertainty_aware' in available_modules and negotiation_context.get('information_completeness', 1.0) < 0.7:
         configurations['uncertainty_aware'] = ModuleConfig(
+            enabled=True,
+            priority=80,
+            config_params={
+                'confidence_threshold': 0.7,
+                'risk_tolerance': negotiation_context.get('risk_tolerance', 0.3)
+            }
+        )
+    
+    if 'uncertain_buyer' in available_modules and negotiation_context.get('information_completeness', 1.0) < 0.7:
+        configurations['uncertain_buyer'] = ModuleConfig(
+            enabled=True,
+            priority=80,
+            config_params={
+                'confidence_threshold': 0.7,
+                'risk_tolerance': negotiation_context.get('risk_tolerance', 0.3)
+            }
+        )
+
+    if 'uncertain_seller' in available_modules and negotiation_context.get('information_completeness', 1.0) < 0.7:
+        configurations['uncertain_seller'] = ModuleConfig(
             enabled=True,
             priority=80,
             config_params={

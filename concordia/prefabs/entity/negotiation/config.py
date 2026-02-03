@@ -578,7 +578,17 @@ class ModuleDefaultsContinued:
       # Justification: 0.30 = mild ambiguity aversion, typical finding in research
       # Source: Ellsberg (1961), prospect theory extensions
       'ambiguity_aversion': 0.30,  # 0.10, 0.30, 0.50, 0.70
-  }
+  },
+  UNCERTAIN_BUYER = {
+      'confidence_threshold': 0.65,
+      'risk_tolerance': 0.55,
+      'ambiguity_aversion': 0.25,
+  },
+  UNCERTAIN_SELLER = {
+      'confidence_threshold': 0.75,
+      'risk_tolerance': 0.45,
+      'ambiguity_aversion': 0.35,
+  },
 
   # ---------------------------------------------------------------------------
   # Strategy Evolution
@@ -604,6 +614,8 @@ ModuleDefaults.TEMPORAL_STRATEGY = ModuleDefaultsContinued.TEMPORAL_STRATEGY
 ModuleDefaults.SWARM_INTELLIGENCE = ModuleDefaultsContinued.SWARM_INTELLIGENCE
 ModuleDefaults.UNCERTAINTY_AWARE = ModuleDefaultsContinued.UNCERTAINTY_AWARE
 ModuleDefaults.STRATEGY_EVOLUTION = ModuleDefaultsContinued.STRATEGY_EVOLUTION
+ModuleDefaults.UNCERTAIN_BUYER = ModuleDefaultsContinued.UNCERTAIN_BUYER
+ModuleDefaults.UNCERTAIN_SELLER = ModuleDefaultsContinued.UNCERTAIN_SELLER
 
 
 # =============================================================================
