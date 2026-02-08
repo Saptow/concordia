@@ -19,6 +19,7 @@ from collections.abc import Sequence
 import dataclasses
 import enum
 import functools
+import json
 from typing import Any
 
 
@@ -133,6 +134,10 @@ class ActionSpec:
         'options': list(self.options),
         'tag': self.tag,
     }
+
+  def __str__(self) -> str:
+    """Return a JSON representation for clearer logs and prompts."""
+    return json.dumps(self.to_dict())
 
 
 def action_spec_from_dict(action_spec_dict: dict[str, Any]) -> ActionSpec:
