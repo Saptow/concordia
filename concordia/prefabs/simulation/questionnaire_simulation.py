@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An adaptable simulation prefab that can be configured to run any simulation.
-"""
+"""An adaptable simulation prefab that can be configured to run any simulation."""
 
 from collections.abc import Callable, Mapping
 import copy
@@ -21,6 +20,7 @@ import functools
 import json
 import os
 from typing import Any
+
 from absl import logging
 from concordia.associative_memory import basic_associative_memory as associative_memory
 from concordia.environment.engines import parallel_questionnaire
@@ -30,8 +30,7 @@ from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 from concordia.typing import prefab as prefab_lib
 from concordia.typing import simulation as simulation_lib
-from concordia.utils import helper_functions as helper_functions_lib
-from concordia.utils import html as html_lib
+from concordia.utils import structured_logging
 import numpy as np
 
 
@@ -172,7 +171,7 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
     )
 
     if any(gm.name == game_master.name for gm in self.game_masters):
-      print(f"Game master {game_master.name} already exists.")
+      logging.info("Game master %s already exists.", game_master.name)
       return
 
     if state:
@@ -203,21 +202,27 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
     entity = entity_prefab.build(model=self._model, memory_bank=memory_bank)
 
     if any(e.name == entity.name for e in self.entities):
-      print(f"Entity {entity.name} already exists.")
+      logging.info("Entity %s already exists.", entity.name)
       return
 
     # Check if a pre-loaded memory state was passed in the entity's params.
     memory_state = instance_config.params.get("memory_state")
     if memory_state:
       if self._verbose:
-        print(f"Found pre-loaded memory state for {entity.name}. Setting it.")
+        logging.info(
+            "Found pre-loaded memory state for %s. Setting it.", entity.name
+        )
       try:
         memory_component = entity.get_component("__memory__")
         memory_component.set_state(memory_state)
         if self._verbose:
-          print(f"Successfully set pre-loaded memories for {entity.name}.")
+          logging.info(
+              "Successfully set pre-loaded memories for %s.", entity.name
+          )
       except (KeyError, TypeError, ValueError) as e:
-        print(f"Error setting pre-loaded memory for {entity.name}: {e}")
+        logging.error(
+            "Error setting pre-loaded memory for %s: %s", entity.name, e
+        )
 
     if state:
       entity.set_state(state)
@@ -237,22 +242,24 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
       raw_log: list[Mapping[str, Any]] | None = None,
       checkpoint_path: str | None = None,
       verbose: bool = False,
-  ) -> str:
+  ) -> structured_logging.SimulationLog:
     """Run the simulation.
 
     Args:
       premise: A string to use as the initial premise of the simulation.
       max_steps: The maximum number of steps to run the simulation for.
-      raw_log: A list to store the raw log of the simulation. This is used to
-        generate the HTML log. Data in the supplied raw_log will be appended
-        with the log from the simulation. If None, a new list is created.
+      raw_log: A list to store the raw log of the simulation. Data in the
+        supplied raw_log will be appended with the log from the simulation. If
+        None, a new list is created.
       checkpoint_path: The path to save the checkpoints. If None, no checkpoints
         are saved.
       verbose: Whether to print verbose output.
 
     Returns:
-      html_results_log: browseable log of the simulation in HTML format
+      SimulationLog object with structured data. Use .to_html() for HTML output
+      or .to_json() for JSON serialization.
     """
+
     logging.info("[QuestionnaireSimulation] Starting simulation.")
     if premise is None:
       premise = self._config.default_premise
@@ -296,51 +303,7 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
     finally:
       self._engine.shutdown()
     logging.info("[QuestionnaireSimulation] Simulation finished.")
-
-    player_logs = []
-    player_log_names = []
-
-    scores = helper_functions_lib.find_data_in_nested_structure(
-        raw_log, "Player Scores"
-    )
-
-    for player in self.entities:
-      if (
-          not isinstance(player, entity_component.EntityWithComponents)
-          or player.get_component("__memory__") is None
-      ):
-        continue
-
-      entity_memory_component = player.get_component("__memory__")
-      entity_memories = entity_memory_component.get_all_memories_as_text()
-      player_html = html_lib.PythonObjectToHTMLConverter(
-          entity_memories
-      ).convert()
-      player_logs.append(player_html)
-      player_log_names.append(f"{player.name}")
-
-    game_master_memories = (
-        self.game_master_memory_bank.get_all_memories_as_text()
-    )
-    game_master_html = html_lib.PythonObjectToHTMLConverter(
-        game_master_memories
-    ).convert()
-    player_logs.append(game_master_html)
-    player_log_names.append("Game Master Memories")
-    summary = ""
-    if scores:
-      summary = f"Player Scores: {scores[-1]}"
-    results_log = html_lib.PythonObjectToHTMLConverter(
-        copy.deepcopy(raw_log)
-    ).convert()
-    tabbed_html = html_lib.combine_html_pages(
-        [results_log, *player_logs],
-        ["Game Master log", *player_log_names],
-        summary=summary,
-        title="Simulation Log",
-    )
-    html_results_log = html_lib.finalise_html(tabbed_html)
-    return html_results_log
+    return structured_logging.SimulationLog.from_raw_log(raw_log)
 
   def save_checkpoint(self, step: int, checkpoint_path: str):
     """Saves the state of all entities at the current step."""
@@ -358,7 +321,7 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
         continue
       prefab_config = self.get_entity_prefab_config(entity.name)
       if not prefab_config:
-        print(f"Warning: Prefab config not found for entity {entity.name}")
+        logging.warning("Prefab config not found for entity %s", entity.name)
         continue
       entity_state = entity.get_state()
       save_data = {
@@ -374,7 +337,7 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
         continue
       prefab_config = self.get_entity_prefab_config(gm.name)
       if not prefab_config:
-        print(f"Warning: Prefab config not found for game master {gm.name}")
+        logging.warning("Prefab config not found for game master %s", gm.name)
         continue
       gm_state = gm.get_state()
       save_data = {
@@ -393,9 +356,9 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
       with open(checkpoint_file, "w") as f:
         json.dump(checkpoint_data, f, indent=2)
       if self._verbose:
-        print(f"Step {step}: Saved checkpoint to {checkpoint_file}")
+        logging.info("Step %s: Saved checkpoint to %s", step, checkpoint_file)
     except IOError as e:
-      print(f"Error saving checkpoint at step {step}: {e}")
+      logging.error("Error saving checkpoint at step %s: %s", step, e)
 
   def load_from_checkpoint(
       self,
@@ -419,9 +382,8 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
             else Role.GAME_MASTER
         )
       except KeyError:
-        print(
-            f"Warning: Invalid role {role_name} for {gm_name}, using"
-            " GAME_MASTER."
+        logging.warning(
+            "Invalid role %s for %s, using GAME_MASTER.", role_name, gm_name
         )
         role = Role.GAME_MASTER
       self._load_entity_from_state(gm_name, state, role)
@@ -447,13 +409,15 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
     entity_components_state = state.get("components")
 
     if not isinstance(prefab_type, str):
-      print(f"Warning: Prefab type is not a string for {entity_name}.")
+      logging.warning("Prefab type is not a string for %s.", entity_name)
       return
     if not prefab_type or prefab_type not in self._config.prefabs:
-      print(f"Warning: Prefab type {prefab_type} not found for {entity_name}.")
+      logging.warning(
+          "Prefab type %s not found for %s.", prefab_type, entity_name
+      )
       return
     if entity_params is None or entity_components_state is None:
-      print(f"Warning: Missing params or components state for {entity_name}.")
+      logging.warning("Missing params or components state for %s.", entity_name)
       return
 
     instance_config = prefab_lib.InstanceConfig(
@@ -468,10 +432,12 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
       )
       if existing_entity:
         if isinstance(existing_entity, entity_component.EntityWithComponents):
-          print(f"Updating existing entity {entity_name} from checkpoint.")
+          logging.info(
+              "Updating existing entity %s from checkpoint.", entity_name
+          )
           existing_entity.set_state(entity_components_state)
       else:
-        print(f"Adding new entity {entity_name} from checkpoint.")
+        logging.info("Adding new entity %s from checkpoint.", entity_name)
         self.add_entity(instance_config, state=entity_components_state)
     elif default_role in [Role.GAME_MASTER, Role.INITIALIZER]:
       existing_gm = next(
@@ -479,8 +445,10 @@ class QuestionnaireSimulation(simulation_lib.Simulation):
       )
       if existing_gm:
         if isinstance(existing_gm, entity_component.EntityWithComponents):
-          print(f"Updating existing game master {entity_name} from checkpoint.")
+          logging.info(
+              "Updating existing game master %s from checkpoint.", entity_name
+          )
           existing_gm.set_state(entity_components_state)
       else:
-        print(f"Adding new game master {entity_name} from checkpoint.")
+        logging.info("Adding new game master %s from checkpoint.", entity_name)
         self.add_game_master(instance_config, state=entity_components_state)

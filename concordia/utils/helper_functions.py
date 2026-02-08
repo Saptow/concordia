@@ -23,9 +23,9 @@ import types
 from typing import Any
 import enum
 
+from absl import logging
 from concordia.document import interactive_document
 from concordia.language_model import language_model
-from concordia.typing.deprecated import component
 from concordia.utils import concurrency
 import numpy as np
 import pandas as pd
@@ -135,7 +135,7 @@ def timedelta_to_readable_str(td: datetime.timedelta):
 
 
 def apply_recursively(
-    parent_component: component.Component,
+    parent_component: Any,
     function_name: str,
     function_arg: str | None = None,
     concurrent_child_calls: bool = False,
@@ -329,8 +329,8 @@ def deep_compare_components(comp1, comp2, test_case, skip_keys=None):
   d1 = comp1.__dict__
   d2 = comp2.__dict__
 
-  print(f'{comp1.__class__.__name__}-> {d1.keys()=}')
-  print(f'{comp2.__class__.__name__}-> {d2.keys()=}')
+  logging.debug('%s-> d1.keys=%s', comp1.__class__.__name__, d1.keys())
+  logging.debug('%s-> d2.keys=%s', comp2.__class__.__name__, d2.keys())
 
   test_case.assertEqual(d1.keys(), d2.keys())
 
