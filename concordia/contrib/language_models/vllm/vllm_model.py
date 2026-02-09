@@ -46,6 +46,7 @@ Example usage:
 """
 
 from collections.abc import Collection, Sequence
+import threading
 from typing import Any, Mapping, override
 
 from concordia.language_model import language_model
@@ -102,6 +103,7 @@ class VLLMLanguageModel(language_model.LanguageModel):
     self._enable_lora = enable_lora
     self._nbr_lora_adapters = 0  # Number of LoRA adapters used with this model.
     # Each adapter needs a unique ID which is why we keep count.
+    self._lock = threading.Lock()
 
     # Initialize vLLM model
     llm_kwargs = {
@@ -162,11 +164,12 @@ class VLLMLanguageModel(language_model.LanguageModel):
     )
 
     # Generate response
-    outputs = self._llm.generate(
-        prompts=[prompt],
-        sampling_params=sampling_params,
-        lora_request=lora_request,
-    )
+    with self._lock:
+      outputs = self._llm.generate(
+          prompts=[prompt],
+          sampling_params=sampling_params,
+          lora_request=lora_request,
+      )
 
     # Extract generated text
     generated_text = outputs[0].outputs[0].text
@@ -206,37 +209,38 @@ class VLLMLanguageModel(language_model.LanguageModel):
       prompts.append(prompt + response)
 
     # Generate to get logprobs (we'll use prompt_logprobs)
-    outputs = self._llm.generate(
-        prompts=prompts,
-        sampling_params=sampling_params,
-        lora_request=lora_request,
-    )
+    with self._lock:
+      outputs = self._llm.generate(
+          prompts=prompts,
+          sampling_params=sampling_params,
+          lora_request=lora_request,
+      )
 
-    logprobs = []
-    for i, output in enumerate(outputs):
-      if not output.prompt_logprobs:
-        raise ValueError('No prompt logprobs returned by vLLM.')
+      logprobs = []
+      for i, output in enumerate(outputs):
+        if not output.prompt_logprobs:
+          raise ValueError('No prompt logprobs returned by vLLM.')
 
-      # Find tokens corresponding to the response
-      tokenizer = self._llm.get_tokenizer()
-      prompt_tokens = tokenizer.encode(prompt)
-      full_tokens = tokenizer.encode(prompts[i])
+        # Find tokens corresponding to the response
+        tokenizer = self._llm.get_tokenizer()
+        prompt_tokens = tokenizer.encode(prompt)
+        full_tokens = tokenizer.encode(prompts[i])
 
-      # Response tokens are the difference
-      response_start_idx = len(prompt_tokens)
+        # Response tokens are the difference
+        response_start_idx = len(prompt_tokens)
 
-      # Sum logprobs for response tokens
-      total_logprob = 0.0
-      prompt_logprobs = output.prompt_logprobs
+        # Sum logprobs for response tokens
+        total_logprob = 0.0
+        prompt_logprobs = output.prompt_logprobs
 
-      for j in range(response_start_idx, len(full_tokens)):
-        if j < len(prompt_logprobs) and prompt_logprobs[j]:
-          # Get the token ID at this position
-          token_id = full_tokens[j]
-          if token_id in prompt_logprobs[j]:
-            total_logprob += prompt_logprobs[j][token_id].logprob
+        for j in range(response_start_idx, len(full_tokens)):
+          if j < len(prompt_logprobs) and prompt_logprobs[j]:
+            # Get the token ID at this position
+            token_id = full_tokens[j]
+            if token_id in prompt_logprobs[j]:
+              total_logprob += prompt_logprobs[j][token_id].logprob
 
-      logprobs.append(total_logprob)
+        logprobs.append(total_logprob)
 
     # Find the response with highest log probability
     best_idx = int(max(range(len(logprobs)), key=lambda i: logprobs[i]))
