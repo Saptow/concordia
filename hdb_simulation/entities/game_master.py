@@ -1,6 +1,6 @@
 import dataclasses
 from typing import List, Sequence, Optional, Dict
-from simulation.entities.agents import BuyerAgent, SellerAgent
+from concordia.hdb_simulation.entities.agents import BuyerAgent, SellerAgent
 
 from concordia.concordia.typing import entity as entity_lib
 from concordia.concordia.typing import entity_component

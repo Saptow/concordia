@@ -31,6 +31,16 @@ class SellerActions(StrEnum):
     DESCRIBE_FLAT = "Describe or show flat condition/features to buyer" 
 
 # Data Models
+class BaseBuyer(BaseModel):
+    id: str
+    name: str
+    role: RoleType = Field(default=RoleType.BUYER, description="Role of the entity.")
+
+class BaseSeller(BaseModel):
+    id: str
+    name: str
+    role: RoleType = Field(default=RoleType.SELLER, description="Role of the entity.")
+    
 class ActionDecision(BaseModel):
     action: BuyerActions | SellerActions = Field(description='Choose only one action.')
     

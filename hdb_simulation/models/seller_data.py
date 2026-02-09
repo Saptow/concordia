@@ -1,4 +1,4 @@
-from simulation.models.schemas import Flat
+from concordia.hdb_simulation.models.schemas import Flat
 '''
 Data module for seller configurations and metadata.
 TODO: Migrate to pydantic models for validation.

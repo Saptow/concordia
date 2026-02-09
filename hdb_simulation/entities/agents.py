@@ -2,7 +2,7 @@ import dataclasses
 from typing import Optional, List, Dict, Any
 
 from concordia.concordia.typing import prefab as prefab_lib
-from simulation.models.schemas import Flat
+from concordia.hdb_simulation.models.schemas import Flat
 
 dataclass = dataclasses.dataclass
 
