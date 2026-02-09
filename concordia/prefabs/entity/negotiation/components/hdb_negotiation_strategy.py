@@ -234,11 +234,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     def _initialise_strategy(self, uncertain_context: Union[UncertainBuyer, UncertainSeller]):
         '''Initialise strategy states and parameters.'''
         if self._role==RoleType.BUYER:
-            current_position = uncertain_context._beliefs['own_reservation'].get_expected_mean()
-            counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean()
+            current_position = uncertain_context._beliefs['own_reservation'].get_expected_mean
+            counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
+
         elif self._role==RoleType.SELLER:
             current_position = uncertain_context._own_reservation
-            counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean()
+            counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
 
         self._state = SimpleStrategyState(current_position=current_position, opponent_position=counterpart_position)
 
@@ -268,11 +269,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         """Provide simple strategy guidance before each action."""
         # Update state first
         if self._role==RoleType.BUYER:
-            self._state.current_position= self._uncertainty_context._beliefs['own_reservation'].get_expected_mean()
-            self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean()
+            self._state.current_position= self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
+            self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
         elif self._role==RoleType.SELLER:
             self._state.current_position = self._uncertainty_context._own_reservation
-            self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean()
+            self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
 
         # Decide whether to walk away
         walk_away = self.should_walk_away()
