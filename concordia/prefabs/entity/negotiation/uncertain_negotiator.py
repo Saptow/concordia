@@ -126,6 +126,7 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_buyer'
             uncertain_configs = module_configs.get('uncertain_buyer', {})
             uncertain_context = uncertain_buyer.UncertainBuyer(
+                model=model,
                 confidence =uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
                 risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5), # TODO: determine based on personality metadata
                 information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
@@ -149,6 +150,7 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_seller'
             uncertain_configs = module_configs.get('uncertain_seller', {})
             uncertain_context = uncertain_seller.UncertainSeller(
+                model=model,
                 confidence=uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
                 risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5),
                 information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
