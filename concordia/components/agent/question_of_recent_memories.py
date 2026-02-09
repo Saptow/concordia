@@ -520,4 +520,3 @@ class BestOptionPerceptionWithoutPreAct(QuestionOfRecentMemoriesWithoutPreAct):
         **kwargs,
     )
 
-c
