@@ -91,20 +91,9 @@ class NegotiationMemory(entity_component.ContextComponent):
 
     def remember_outcome(self, outcome: NegotiationOutcome) -> None:
         """Store negotiation outcome for learning."""
+        if outcome.agreement_reached:
+            return # there should not exist any outcomes where agreement is reached within memory 
         self._negotiation_outcomes.append(outcome)
-
-        # Store in associative memory
-        outcome_text = (
-            f"Negotiation outcome: {'Agreement' if outcome.agreement_reached else 'No agreement'}. "
-            f"Participants: {', '.join(outcome.participants)}. "
-            f"Rounds: {outcome.rounds_taken}. "
-            f"{outcome.summary}"
-        )
-
-        # Basic associative memory doesn't support metadata
-        self._memory.add(text=outcome_text)
-
-        # Learn patterns from outcome
         self._extract_patterns(outcome)
 
     def _extract_patterns(self, outcome: NegotiationOutcome) -> None:

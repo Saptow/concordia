@@ -50,7 +50,7 @@ class Entity(prefab_lib.Prefab):
         'reservation_value': '0.0',
         'ethical_constraints': 'Be honest and fair. Respect cultural differences.',
         'modules': '',  # Comma-separated list of module names
-        'module_configs': '{}',  # JSON string of module configurations
+        'modules_config': '{}',  # JSON string of module configurations
         'extra_components': {},
     })
 
@@ -73,18 +73,18 @@ class Entity(prefab_lib.Prefab):
         modules = [m.strip() for m in modules_str.split(',') if m.strip()]
 
         # Parse module configs from JSON string
-        module_configs_str = self.params.get('module_configs', '{}')
+        modules_config_str = self.params.get('modules_config', '{}')
         try:
-            module_configs = json.loads(module_configs_str)
+            modules_config = json.loads(modules_config_str)
         except json.JSONDecodeError:
-            module_configs = {}
+            modules_config = {}
 
         # Build extra components for selected modules
         extra_components = {}
 
         # Add selected modules
         if 'cultural_adaptation' in modules:
-            config = module_configs.get('cultural_adaptation', {})
+            config = modules_config.get('cultural_adaptation', {})
             cultural = cultural_adaptation.CulturalAdaptation(
                 model=model,
                 own_culture=config.get('own_culture', 'western_business'),
@@ -94,7 +94,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['CulturalAdaptation'] = cultural
 
         if 'temporal_strategy' in modules:
-            config = module_configs.get('temporal_strategy', {})
+            config = modules_config.get('temporal_strategy', {})
             temporal = temporal_strategy.TemporalStrategy(
                 model=model,
                 discount_factor=config.get('discount_factor', 0.9),
@@ -104,7 +104,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['TemporalStrategy'] = temporal
 
         if 'swarm_intelligence' in modules:
-            config = module_configs.get('swarm_intelligence', {})
+            config = modules_config.get('swarm_intelligence', {})
             swarm = swarm_intelligence.SwarmIntelligence(
                 model=model,
                 consensus_threshold=config.get('consensus_threshold', 0.7),
@@ -114,7 +114,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['SwarmIntelligence'] = swarm
 
         if 'uncertainty_aware' in modules:
-            config = module_configs.get('uncertainty_aware', {})
+            config = modules_config.get('uncertainty_aware', {})
             uncertainty = uncertainty_aware.UncertaintyAware(
                 model=model,
                 confidence_threshold=config.get('confidence_threshold', 0.7),
@@ -124,7 +124,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['UncertaintyAware'] = uncertainty
 
         if 'strategy_evolution' in modules:
-            config = module_configs.get('strategy_evolution', {})
+            config = modules_config.get('strategy_evolution', {})
             evolution = strategy_evolution.StrategyEvolution(
                 model=model,
                 population_size=config.get('population_size', 20),
@@ -135,7 +135,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['StrategyEvolution'] = evolution
 
         if 'theory_of_mind' in modules:
-            config = module_configs.get('theory_of_mind', {})
+            config = modules_config.get('theory_of_mind', {})
             tom = theory_of_mind.TheoryOfMind(
                 model=model,
                 max_recursion_depth=config.get('max_recursion_depth', 3),
@@ -145,7 +145,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['TheoryOfMind'] = tom
 
         if 'uncertain_buyer' in modules:
-            config = module_configs.get('uncertain_buyer', {})
+            config = modules_config.get('uncertain_buyer', {})
             uncertain_buyer_comp = uncertain_buyer.UncertainBuyer(
                 model=model,
                 confidence_threshold=config.get('confidence_threshold', 0.7),
@@ -162,7 +162,7 @@ class Entity(prefab_lib.Prefab):
             extra_components['UncertainBuyer'] = uncertain_buyer_comp
 
         if 'uncertain_seller' in modules:
-            config = module_configs.get('uncertain_seller', {})
+            config = modules_config.get('uncertain_seller', {})
             uncertain_seller_comp = uncertain_seller.UncertainSeller(
                 model=model,
                 confidence_threshold=config.get('confidence_threshold', 0.7),
@@ -196,7 +196,7 @@ def build_agent(
     reservation_value: float = 0.0,
     ethical_constraints: str = 'Be honest and fair. Respect cultural differences.',
     modules: list = None,
-    module_configs: dict = None,
+    modules_config: dict = None,
     **kwargs
 ) -> entity_agent_with_logging.EntityAgentWithLogging:
     """Convenience function to build an advanced negotiation agent.
@@ -210,7 +210,7 @@ def build_agent(
         reservation_value: Minimum acceptable value
         ethical_constraints: Ethical guidelines for negotiation
         modules: List of module names to enable (e.g., ['cultural_adaptation', 'theory_of_mind'])
-        module_configs: Dictionary of module-specific configurations
+        modules_config: Dictionary of module-specific configurations
         **kwargs: Additional parameters for the agent
         
     Returns:
@@ -232,7 +232,7 @@ def build_agent(
             name="Sophie",
             goal="Negotiate international trade agreement",
             modules=['cultural_adaptation', 'theory_of_mind'],
-            module_configs={
+            modules_config={
                 'cultural_adaptation': {'own_culture': 'western_business'},
                 'theory_of_mind': {'max_recursion_depth': 2}
             }
@@ -241,8 +241,8 @@ def build_agent(
     """
     if modules is None:
         modules = []
-    if module_configs is None:
-        module_configs = {}
+    if modules_config is None:
+        modules_config = {}
     
     params = {
         'name': name,
@@ -251,7 +251,7 @@ def build_agent(
         'reservation_value': str(reservation_value),
         'ethical_constraints': ethical_constraints,
         'modules': ','.join(modules),
-        'module_configs': json.dumps(module_configs),
+        'modules_config': json.dumps(modules_config),
     }
     params.update(kwargs)
     
@@ -283,7 +283,7 @@ def build_cultural_agent(
         memory_bank=memory_bank,
         name=name,
         modules=['cultural_adaptation', 'theory_of_mind'],
-        module_configs={
+        modules_config={
             'cultural_adaptation': {'own_culture': own_culture},
             'theory_of_mind': {'emotion_sensitivity': 0.8}
         },
@@ -315,7 +315,7 @@ def build_temporal_agent(
         memory_bank=memory_bank,
         name=name,
         modules=['temporal_strategy', 'theory_of_mind'],
-        module_configs={
+        modules_config={
             'temporal_strategy': {'discount_factor': discount_factor},
         },
         **kwargs
@@ -344,7 +344,7 @@ def build_collective_agent(
         memory_bank=memory_bank,
         name=name,
         modules=['swarm_intelligence', 'uncertainty_aware'],
-        module_configs={
+        modules_config={
             'swarm_intelligence': {'consensus_threshold': 0.7},
         },
         **kwargs
@@ -375,7 +375,7 @@ def build_adaptive_agent(
         memory_bank=memory_bank,
         name=name,
         modules=['strategy_evolution', 'uncertainty_aware'],
-        module_configs={
+        modules_config={
             'strategy_evolution': {'learning_rate': learning_rate},
         },
         **kwargs

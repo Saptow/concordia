@@ -16,6 +16,8 @@
 
 from collections.abc import Callable, Collection, Sequence
 import datetime
+from typing import override
+from pydantic import BaseModel
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
@@ -201,7 +203,100 @@ class QuestionOfRecentMemories(
       if 'num_memories_to_retrieve' in state:
         self._num_memories_to_retrieve = state['num_memories_to_retrieve']
 
+# QuestionOfRecentMemories component with structured outputs
+class QuestionOfRecentMemoriesStructured(
+    QuestionOfRecentMemories
+):
+  """A QuestionOfRecentMemories component with structured outputs.
+  """
+  def __init__(
+      self, 
+      model: language_model.LanguageModel,
+      pre_act_label: str,
+      question: str,
+      add_to_memory: bool,
+      answer_prefix: str = '',
+      memory_tag: str = '',
+      memory_component_key: str = (
+          memory_component.DEFAULT_MEMORY_COMPONENT_KEY
+      ),
+      components: Sequence[str] = (),
+      terminators: Collection[str] = ('\n',),
+      clock_now: Callable[[], datetime.datetime] | None = None,
+      num_memories_to_retrieve: int = 25,
+      output_schema: BaseModel = None,
+    ):
+    """Initializes the QuestionOfRecentMemories component.
 
+    Args:
+      model: The language model to use.
+      pre_act_label: Prefix to add to the value of the component when called in
+        `pre_act`.
+      question: The question to ask.
+      answer_prefix: The prefix to add to the answer.
+      add_to_memory: Whether to add the answer to the memory.
+      memory_tag: The tag to use when adding the answer to the memory.
+      memory_component_key: The name of the memory component from which to
+        retrieve recent memories.
+      components: Keys of components to condition the answer on.
+      terminators: strings that must not be present in the model's response. If
+        emitted by the model the response will be truncated before them.
+      clock_now: time callback to use.
+      num_memories_to_retrieve: The number of recent memories to retrieve.
+    """
+    super().__init__(model, pre_act_label, question, answer_prefix,
+                     add_to_memory, memory_tag, memory_component_key, components,
+                     terminators, clock_now, num_memories_to_retrieve)
+    self._output_schema = output_schema
+
+    @override
+    def _make_pre_act_value(self) -> str:
+      """Returns the answer to the question in a structured format."""
+      agent_name = self.get_entity().name
+
+      memory = self.get_entity().get_component(
+          self._memory_component_key, type_=memory_component.Memory
+      )
+      mems = '\n'.join([
+          mem
+          for mem in memory.retrieve_recent(limit=self._num_memories_to_retrieve)
+      ])
+      prompt = interactive_document.InteractiveDocument(self._model)
+      component_states = '\n'.join(
+          [self._component_pre_act_display(key) for key in self._components]
+      )
+      prompt.statement(component_states)
+
+      prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
+
+      if self._clock_now is not None:
+        prompt.statement(f'Current time: {self._clock_now()}.\n')
+      
+      question = self._question.format(agent_name=agent_name)
+      result = prompt.structured_question(
+          question,
+          answer_prefix=self._answer_prefix.format(agent_name=agent_name),
+          max_tokens=1000,
+          terminators=self._terminators,
+          output_schema=self._output_schema
+      )
+      result_str = self._answer_prefix.format(agent_name=agent_name) + result
+      if self._add_to_memory:
+        memory.add(f'{self._memory_tag} {result_str}')
+      
+      log = {
+          'Key': self.get_pre_act_label(),
+          'Summary': question,
+          'State': result_str,
+          'Chain of thought': prompt.view().text().splitlines(),
+      }
+      if self._clock_now is not None:
+        log['Time'] = self._clock_now()
+      
+      self._logging_channel(log)
+
+      return result_str
+      
 class QuestionOfRecentMemoriesWithoutPreAct(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
 ):
@@ -424,3 +519,5 @@ class BestOptionPerceptionWithoutPreAct(QuestionOfRecentMemoriesWithoutPreAct):
         add_to_memory=False,
         **kwargs,
     )
+
+c

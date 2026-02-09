@@ -16,6 +16,7 @@
 """Utilities for chain-of-thought prompting."""
 
 from collections.abc import Collection, Iterable, Iterator, Sequence
+from pydantic import BaseModel
 import contextlib
 import random
 import re
@@ -336,6 +337,47 @@ class InteractiveDocument(document.Document):
     self.debug(f'[{debug}]')
     return original_indices[idx]
 
+  def structured_question(
+      self, 
+      question: str, 
+      output_schema: BaseModel,
+      answer_prefix: str = '',
+      answer_label: str = 'Answer',
+      max_tokens: int = DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = ('\n',),
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K
+    ) -> str:
+    """Asks a question expecting a structured response."""
+    self._question(f'Question: {question}\n')
+    self._response(f'{answer_label}: {answer_prefix}')
+
+    
+    response = self._model.sample_text(
+        prompt=self._model_view.text(),
+        max_tokens=max_tokens,
+        terminators=terminators,
+        json_schema=output_schema.model_json_schema(),
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+    )
+
+    # validate response
+    try:
+        parsed_response = output_schema.model_validate_json(response)
+        response_str = parsed_response.model_dump_json()
+        
+        # Update history with the CLEAN JSON, not the raw model output
+        self._model_response(response_str)
+        self._response('\n')
+        
+        return response_str
+            
+    except:
+        self._model_response(response) # Log what we got anyway
+        return response
   def yes_no_question(self, question: str) -> bool:
     """Presents a yes/no question to the agent.
 

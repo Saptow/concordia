@@ -3,6 +3,7 @@
 # Base components
 from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import negotiation_instructions
+from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import negotiation_strategy
 
 # Advanced modules
@@ -20,6 +21,7 @@ from concordia.prefabs.entity.negotiation.components import uncertain_seller
 __all__ = [
     'negotiation_memory',
     'negotiation_instructions',
+    'hdb_negotiation_instructions',
     'negotiation_strategy',
     'cultural_adaptation',
     'temporal_strategy',

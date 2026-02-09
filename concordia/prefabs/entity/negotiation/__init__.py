@@ -34,6 +34,7 @@ Available Modules:
 
 from . import advanced_negotiator
 from . import base_negotiator
+from . import uncertain_negotiator
 
 from concordia.prefabs.entity.negotiation.constants import (
     DEFAULT_MODULE_CONFIGS,
@@ -56,21 +57,27 @@ from concordia.prefabs.entity.negotiation.config import (
 # Convenience aliases for common operations
 build_agent = base_negotiator.build_agent
 build_advanced_agent = advanced_negotiator.build_agent
+build_custom_agent = uncertain_negotiator.build_agent
 
 # Prefab dataclasses for Entity pattern
 BaseNegotiator = base_negotiator.Entity
 AdvancedNegotiator = advanced_negotiator.Entity
+CustomNegotiator = uncertain_negotiator.Entity
 
 __all__ = [
     # Modules
     'base_negotiator',
     'advanced_negotiator',
+    'uncertain_negotiator',
+    ''
     # Builder functions
     'build_agent',
     'build_advanced_agent',
+    'build_custom_agent',
     # Prefab classes
     'BaseNegotiator',
     'AdvancedNegotiator',
+    'CustomNegotiator',
     # Constants
     'ModuleType',
     'MODULE_COMPONENT_NAMES',
