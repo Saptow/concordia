@@ -119,17 +119,19 @@ class Entity(prefab_lib.Prefab):
             verbose=True,
         )
         # Setup uncertainty context if specified (should only be one of buyer/seller)
+        # TODO: revise negotiation strategy to include strategy evolution based on past failed negotiations, if any
         uncertain_key, uncertain_context = None, None
         strategy_key = 'NegotiationStrategy'
         if 'uncertain_buyer' in self.params.get('modules', ''):
             uncertain_key = 'uncertain_buyer'
             uncertain_configs = module_configs.get('uncertain_buyer', {})
             uncertain_context = uncertain_buyer.UncertainBuyer(
+                confidence =uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
+                risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5), # TODO: determine based on personality metadata
+                information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
                 preferences=uncertain_configs.get('preferences', {}),
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
                 own_reservation_std=uncertain_configs.get('own_reservation_std', 1000.0),
-                cp_reservation_=uncertain_configs.get('cp_reservation_', 0.0),
-                cp_reservation_std=uncertain_configs.get('cp_reservation_std', 1000.0),
                 lambda_=uncertain_configs.get('lambda', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
@@ -147,10 +149,10 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_seller'
             uncertain_configs = module_configs.get('uncertain_seller', {})
             uncertain_context = uncertain_seller.UncertainSeller(
+                confidence=uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
+                risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5),
+                information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
-                own_reservation_std=uncertain_configs.get('own_reservation_std', 1000.0),
-                cp_reservation_=uncertain_configs.get('cp_reservation_', 0.0),
-                cp_reservation_std=uncertain_configs.get('cp_reservation_std', 1000.0),
                 lambda_=uncertain_configs.get('lambda', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
@@ -163,7 +165,6 @@ class Entity(prefab_lib.Prefab):
                 description=description,
                 verbose=True,
             )
-        # TODO: Create negotiation strategy (should be in consideration w/ uncertainty module)
     
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
