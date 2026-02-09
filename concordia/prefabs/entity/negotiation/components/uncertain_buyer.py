@@ -660,7 +660,98 @@ class UncertainBuyer(entity_component.ContextComponent):
             if name in self._beliefs:
                 self._beliefs[name].confidence = belief_data.get('confidence', self._beliefs[name].confidence)
                 self._beliefs[name].evidence_count = belief_data.get('evidence_count', self._beliefs[name].evidence_count)
+    
+    def get_action_attempt(
+            self,
+            context: Any, 
+            action_spec: entity_lib.ActionSpec
+        ) -> str:
+        """Generate action attempt with uncertainty considerations."""
+        situation = action_spec.call_to_action
 
+        self._update_counterpart_reservation_from_context(situation)
+        self._update_own_reservation_from_context(situation)
+
+        uncertainty_analysis = self._analyze_uncertainty_context(situation)
+
+        scenarios = self._generate_scenarios()
+
+        info_values = self._calculate_information_values(situation, uncertainty_analysis)
+
+        # generate average uncertainty level
+        avg_uncertainty = np.mean([1 - confidence_level for info in uncertainty_analysis.uncertainty_sources for confidence_level in [info.confidence_level]])
+
+        should_gather_info = avg_uncertainty > (1 - self._confidence_threshold and info_values and info_values[0].net_value > 0)
+
+        if should_gather_info:
+            # generate info gathering action
+            top_info = info_values[0]
+            prompt = f""" Based on uncertainty analysis, generate an information gathering action towards the counterpart. 
+
+            Situation: {situation}
+
+            Uncertainty Analysis: {uncertainty_analysis.model_dump_json()}
+
+            Most Valuable Information to Gather:
+            Question: {top_info.question}
+            Priority Score: {top_info.priority_score}
+            Cost Factor: {top_info.cost_factor}
+
+            Generate a negotiation action that:
+            1. Asks the most valuable information-gathering question
+            2. Explains why this information would help both parties
+            3. Demonstrates thoughtful preparation and analysis
+            4. Maintains negotiation momentum while reducing uncertainty
+            5. Shows professional competence despite information gaps
+
+            Action:"""
+        else:
+            # generate based on scenarios
+            best_scenario = max(scenarios, key=lambda x: x.likelihood * x.value)
+            worst_scenario = min(scenarios, key=lambda x: x.likelihood * x.value)
+
+            # get confidence intervals of counterpart
+            cp_belief=self._beliefs['counterpart_reservation']
+            cp_ci = cp_belief.get_confidence_interval()
+            prompt = f""" Based on uncertainty analysis, generate a robust negotiation action towards the counterpart.
+
+            Situation: {situation}
+
+            Current Belief of counterpart State:
+            • {cp_belief.name}: Mean = {cp_belief.get_expected_mean:.1f}, Variance = {cp_belief.get_expected_variance:.1f}
+            • 95% CI: [{cp_ci[0]:.1f}, {cp_ci[1]:.1f}]
+
+            Scenario Analysis:
+            Best Case: {best_scenario.scenario_name} (Value: {best_scenario.value:.0f}, Likelihood: {best_scenario.likelihood:.1%})
+            Worst Case: {worst_scenario.scenario_name} (Value: {worst_scenario.value:.0f}, Likelihood: {worst_scenario.likelihood:.1%})
+
+            Risk Management: 
+            - Risk Tolerance Level: {self._risk_tolerance:.2f}
+            - Key Uncertainties: {', '.join([info.claim for info in uncertainty_analysis.uncertainty_sources])}
+
+            Generate a negotiation action that:
+            1. Makes a robust proposal that works across scenarios
+            2. Acknowledges and manages key uncertainties
+            3. Includes contingencies for different outcomes  
+            4. Demonstrates analytical sophistication
+            5. Balances confidence with appropriate caution given uncertainty level
+
+            Action:"""
+
+            response = self._model.sample_text(prompt)
+
+                # Clean up response
+        action = response.strip()
+        if action.lower().startswith('action:'):
+            action = action[7:].strip()
+        
+        # Add uncertainty framing based on confidence level
+        if should_gather_info:
+            action = f"To make the best decision for both of us, {action.lower()}"
+
+        return action
+            
+        
     def update(self) -> None:
         """Update uncertainty-aware component state."""
         # Gradually decay confidence over time if no new evidence
