@@ -4,7 +4,7 @@
 from typing import Optional
 
 from concordia.typing import entity_component
-from hdb_simulation.models.schemas import RoleType
+from concordia.hdb_simulation.models.schemas import RoleType
 
 # TODO: This should be the part to inject government policies and HDB-specific constraints
 # into the negotiation instructions for agents negotiating HDB resale flats.
