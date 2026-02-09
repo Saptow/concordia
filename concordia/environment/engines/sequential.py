@@ -255,7 +255,7 @@ class Sequential(engine_lib.Engine):
           entity.name: functools.partial(_entity_observation, entity)
           for entity in entities
       }
-      concurrency.run_tasks(tasks)
+      concurrency.run_tasks(tasks, max_workers=1)
 
       next_entity, entity_spec_to_use = self.next_acting(
           game_master, entities, log_entry=log_entry, log=log)
