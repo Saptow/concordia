@@ -17,7 +17,7 @@
 from collections.abc import Callable, Collection, Sequence
 import datetime
 from typing import override
-from pydantic import BaseModel
+from pydantic import BaseModel,RootModel
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
@@ -224,7 +224,7 @@ class QuestionOfRecentMemoriesStructured(
       terminators: Collection[str] = ('\n',),
       clock_now: Callable[[], datetime.datetime] | None = None,
       num_memories_to_retrieve: int = 25,
-      output_schema: BaseModel = None,
+      output_schema: RootModel = None,
     ):
     """Initializes the QuestionOfRecentMemories component.
 

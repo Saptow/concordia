@@ -1,6 +1,6 @@
 from enum import StrEnum
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, RootModel
+from typing import List, Literal, Optional, Annotated, Union
 
 # Enums
 class RoleType(StrEnum):
@@ -16,21 +16,49 @@ class FlatType(StrEnum):
     FIVE_ROOM = "5-Room"
     EXECUTIVE = "Executive"
 
-class BuyerActions(StrEnum):
-    ACCEPT_OFFER = "Accept Offer"
-    REJECT_OFFER = "Reject Offer"
-    REVISE_OFFER = "Revise Offer"
-    INQUIRE_DETAILS_COUNTERPART = "Inquire Details on counterpart's information/intentions/reservation value"
-    INQUIRE_DETAILS_FLAT = "Inquire Details on flat condition/features" # this is on exploration
 
-class SellerActions(StrEnum):
-    ACCEPT_OFFER = "Accept Offer"
-    REJECT_OFFER = "Reject Offer"
-    REVISE_OFFER = "Revise Offer"
-    INQUIRE_DETAILS_COUNTERPART = "Inquire Details on counterpart's information/intentions/reservation value"
-    DESCRIBE_FLAT = "Describe or show flat condition/features to buyer" 
 
 # Data Models
+# Decisions
+class AcceptOffer(BaseModel):
+    type: Literal['ACCEPT_OFFER']
+    price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
+
+class RejectOffer(BaseModel):
+    type: Literal['REJECT_OFFER']
+
+class MakeCounteroffer(BaseModel):
+    type: Literal['MAKE_COUNTEROFFER']
+    counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
+
+class BuyerInquiry(BaseModel):
+    type: Literal['INQUIRE_BUYER']
+    inquiry_details: str = Field(..., description="Details of the buyer's inquiry about the flat's conditions/details.")
+
+class BuyerQuestion(BaseModel):
+    type: Literal['QUESTION_BUYER']
+    question_details: str = Field(..., description="Specific question posed by the buyer regarding flexibility and urgency of the negotiation.")
+
+# Seller Decisions
+class SellerInquiry(BaseModel):
+    type: Literal['INQUIRE_SELLER']
+    inquiry_details: str = Field(..., description="Details of the seller's inquiry about the buyer's preferences or constraints.")
+
+BuyerActionTypes=Annotated[
+    Union[AcceptOffer, RejectOffer, MakeCounteroffer, BuyerInquiry, BuyerQuestion],
+    Field(discriminator='type')
+]
+
+class BuyerActions(RootModel[BuyerActionTypes]):
+    pass
+
+SellerActionTypes=Annotated[
+    Union[AcceptOffer, RejectOffer, MakeCounteroffer, SellerInquiry],
+    Field(discriminator='type')
+]
+class SellerActions(RootModel[SellerActionTypes]):
+    pass
+
 class BaseBuyer(BaseModel):
     id: str
     name: str
@@ -40,9 +68,7 @@ class BaseSeller(BaseModel):
     id: str
     name: str
     role: RoleType = Field(default=RoleType.SELLER, description="Role of the entity.")
-    
-class ActionDecision(BaseModel):
-    action: BuyerActions | SellerActions = Field(description='Choose only one action.')
+
     
 class Flat(BaseModel):
     # TODO: revise flat attributes should more data be given 

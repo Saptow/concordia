@@ -16,7 +16,7 @@
 """Utilities for chain-of-thought prompting."""
 
 from collections.abc import Collection, Iterable, Iterator, Sequence
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 import contextlib
 import random
 import re
@@ -340,7 +340,7 @@ class InteractiveDocument(document.Document):
   def structured_question(
       self, 
       question: str, 
-      output_schema: BaseModel,
+      output_schema: BaseModel | RootModel,
       answer_prefix: str = '',
       answer_label: str = 'Answer',
       max_tokens: int = DEFAULT_MAX_TOKENS,
