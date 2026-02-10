@@ -253,7 +253,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
 
         response = self._model.sample_text(
             prompt=prompt,
-            output_schema=UrgencyLevel.model_json_schema(),
+            json_schema=UrgencyLevel.model_json_schema(),
             max_tokens=100,
         )
 
