@@ -742,7 +742,7 @@ class UncertainBuyer(entity_component.ContextComponent):
     def update(self) -> None:
         """Update uncertainty-aware component state."""
         # Gradually decay confidence over time if no new evidence
-        for belief in self._beliefs.values():
-            if belief.evidence_count == 0:
-                belief.confidence *= 0.99  # Slow decay
-                belief.std = min(belief.std * 1.01, belief.std * 2)  # Increase uncertainty
+        # for belief in self._beliefs.values():
+        #     if belief.evidence_count == 0:
+        #         belief.confidence *= 0.99  # Slow decay
+        #         belief.std = min(belief.std * 1.01, belief.std * 2)  # Increase uncertainty
