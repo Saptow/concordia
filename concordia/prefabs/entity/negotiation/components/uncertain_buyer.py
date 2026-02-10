@@ -276,7 +276,8 @@ class UncertainBuyer(entity_component.ContextComponent):
         # Initialize common negotiation beliefs
         self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_, own_reservation_std)
 
-
+    def get_pre_act_label(self) -> str:
+            return "uncertain_buyer"
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0):
         """Initialize default beliefs about negotiation parameters."""
         # Counterpart's reservation value (start with high uncertainty)

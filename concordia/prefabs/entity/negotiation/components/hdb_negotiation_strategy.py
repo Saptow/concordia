@@ -329,6 +329,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     def update(self) -> None:
         """Periodic updates if needed."""
         pass
+    def get_pre_act_label(self) -> str:
+        return 'NegotiationStrategy'
 
     def get_state(self)-> str:
         '''Get component state for saving /restoring.'''
