@@ -190,7 +190,7 @@ class Entity(prefab_lib.Prefab):
             components = [uncertain_key, neg_memory.name]
         )
 
-        question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
+        question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
             model=model,
             pre_act_label=f'Next action',
             question=f'Given the negotiation context, what should {agent_name} do?',
