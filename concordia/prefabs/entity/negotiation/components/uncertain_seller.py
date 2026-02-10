@@ -286,6 +286,7 @@ class UncertainSeller(entity_component.ContextComponent):
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = own_reservation_ # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
+        self._pre_act_value: Optional[str] = None
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
@@ -297,6 +298,9 @@ class UncertainSeller(entity_component.ContextComponent):
 
     def get_pre_act_label(self) -> str:
         return "uncertain_seller"
+    
+    def get_pre_act_value(self) -> str:
+        return self._pre_act_value if self._pre_act_value else ""
     
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0):
         """Initialize default beliefs about negotiation parameters."""
@@ -586,7 +590,7 @@ class UncertainSeller(entity_component.ContextComponent):
 
         # Generate uncertainty-aware guidance
         guidance = self._generate_uncertainty_guidance(context)
-
+        self._pre_act_value=guidance
         return f"\n{guidance}"
 
     def post_act(self, action_attempt: str) -> str:

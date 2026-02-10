@@ -267,6 +267,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         self._risk_tolerance = risk_tolerance
         self._preferences = preferences
         self._info_budget = information_gathering_budget
+        self._last_pre_act_value: Optional[str] = None
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
@@ -278,6 +279,10 @@ class UncertainBuyer(entity_component.ContextComponent):
 
     def get_pre_act_label(self) -> str:
             return "uncertain_buyer"
+    
+    def get_pre_act_value(self) -> str:
+        return self._last_pre_act_value if self._last_pre_act_value else ""
+    
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0):
         """Initialize default beliefs about negotiation parameters."""
         # Counterpart's reservation value (start with high uncertainty)
@@ -572,6 +577,7 @@ class UncertainBuyer(entity_component.ContextComponent):
             guidance += f"Expected value {scenario.value:.0f}, "
 
         guidance += f"\n**Information Gathering Opportunities:**\n"
+        frac_of_budget = self._info_budget
         for info in info_values[:3]:  # Top 3 opportunities
             frac_of_budget -= info.cost_factor
             if frac_of_budget > 0:
@@ -610,6 +616,7 @@ class UncertainBuyer(entity_component.ContextComponent):
 
         # Generate uncertainty-aware guidance
         guidance = self._generate_uncertainty_guidance(context)
+        self._last_pre_act_value = guidance
 
         return f"\n{guidance}"
 
