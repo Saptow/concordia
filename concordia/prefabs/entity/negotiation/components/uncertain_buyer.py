@@ -572,7 +572,8 @@ class UncertainBuyer(entity_component.ContextComponent):
 
         guidance += f"\n**Information Gathering Opportunities:**\n"
         for info in info_values[:3]:  # Top 3 opportunities
-            if info.net_value > 0:
+            frac_of_budget -= info.cost_factor
+            if frac_of_budget > 0:
                 guidance += f"• \"{info.question[:50]}...\"\n"
                 guidance += f"  Priority Score: ${info.priority_score:.0f}, Cost Factor: +{info.cost_factor:.2f}\n"
 
