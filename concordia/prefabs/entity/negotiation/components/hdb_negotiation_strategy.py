@@ -331,6 +331,9 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         pass
     def get_pre_act_label(self) -> str:
         return 'NegotiationStrategy'
+    
+    def get_pre_act_value(self) -> str:
+        return f"CurrentPosition:{self._state.current_position}|OpponentPosition:{self._state.opponent_position}|RoundsElapsed:{self._state.rounds_elapsed}|UrgencyLevel:{self._urgency_level}"
 
     def get_state(self)-> str:
         '''Get component state for saving /restoring.'''
