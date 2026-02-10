@@ -56,6 +56,7 @@ class NegotiationMemory(entity_component.ContextComponent):
         self._agent_name = agent_name
         self._memory = memory_bank
         self._verbose = verbose
+        self._last_pre_act_value: Optional[str] = None
 
         # Negotiation-specific tracking
         self._offer_history: List[Offer] = []
@@ -68,6 +69,12 @@ class NegotiationMemory(entity_component.ContextComponent):
         self._concessions_made: List[float] = []
         self._value_discovered: float = 0.0
 
+    def get_pre_act_label(self) -> str:
+        return self.name
+    
+    def get_pre_act_value(self) -> str:
+        return self._last_pre_act_value if self._last_pre_act_value else ""
+    
     def remember_offer(self, offer: Offer) -> None:
         """Store an offer in structured memory."""
         self._offer_history.append(offer)
@@ -177,7 +184,7 @@ class NegotiationMemory(entity_component.ContextComponent):
             context += "Similar past negotiations:\n"
             for s in similar:
                 context += f"- {s}\n"
-
+        self._last_pre_act_value = context
         return context
 
     def post_act(self, action_attempt: str) -> str:

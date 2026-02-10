@@ -453,7 +453,7 @@ class UncertainSeller(entity_component.ContextComponent):
         # TODO: we assume independence for now (i.e. covariance = 0) but assumption is weak since we are talking about the same product. 
         # However, it is fine for now, since we assume maximum variance between the differences => more conservative estimates for ZOPA. 
         zopa_dist = NormalDist(mu_diff, math.sqrt(var_cp + 0)) # variance of own reservation is 0 since we assume full knowledge
-        p_upper = 0.5 + (1-self._risk_tolerance / 2.0)
+        p_upper = 0.5 + ((1 - self._risk_tolerance) / 2.0)
         
         z_width = NormalDist(mu=0, sigma=1).inv_cdf(p_upper)
         
