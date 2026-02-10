@@ -249,53 +249,53 @@ class QuestionOfRecentMemoriesStructured(
                      terminators, clock_now, num_memories_to_retrieve)
     self._output_schema = output_schema
 
-    @override
-    def _make_pre_act_value(self) -> str:
-      """Returns the answer to the question in a structured format."""
-      agent_name = self.get_entity().name
+  @override
+  def _make_pre_act_value(self) -> str:
+    """Returns the answer to the question in a structured format."""
+    agent_name = self.get_entity().name
 
-      memory = self.get_entity().get_component(
-          self._memory_component_key, type_=memory_component.Memory
-      )
-      mems = '\n'.join([
-          mem
-          for mem in memory.retrieve_recent(limit=self._num_memories_to_retrieve)
-      ])
-      prompt = interactive_document.InteractiveDocument(self._model)
-      component_states = '\n'.join(
-          [self._component_pre_act_display(key) for key in self._components]
-      )
-      prompt.statement(component_states)
+    memory = self.get_entity().get_component(
+        self._memory_component_key, type_=memory_component.Memory
+    )
+    mems = '\n'.join([
+        mem
+        for mem in memory.retrieve_recent(limit=self._num_memories_to_retrieve)
+    ])
+    prompt = interactive_document.InteractiveDocument(self._model)
+    component_states = '\n'.join(
+        [self._component_pre_act_display(key) for key in self._components]
+    )
+    prompt.statement(component_states)
 
-      prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
+    prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
 
-      if self._clock_now is not None:
-        prompt.statement(f'Current time: {self._clock_now()}.\n')
-      
-      question = self._question.format(agent_name=agent_name)
-      result = prompt.structured_question(
-          question,
-          answer_prefix=self._answer_prefix.format(agent_name=agent_name),
-          max_tokens=1000,
-          terminators=self._terminators,
-          output_schema=self._output_schema
-      )
-      result_str = self._answer_prefix.format(agent_name=agent_name) + result
-      if self._add_to_memory:
-        memory.add(f'{self._memory_tag} {result_str}')
-      
-      log = {
-          'Key': self.get_pre_act_label(),
-          'Summary': question,
-          'State': result_str,
-          'Chain of thought': prompt.view().text().splitlines(),
-      }
-      if self._clock_now is not None:
-        log['Time'] = self._clock_now()
-      
-      self._logging_channel(log)
+    if self._clock_now is not None:
+      prompt.statement(f'Current time: {self._clock_now()}.\n')
+    
+    question = self._question.format(agent_name=agent_name)
+    result = prompt.structured_question(
+        question,
+        answer_prefix=self._answer_prefix.format(agent_name=agent_name),
+        max_tokens=1000,
+        terminators=self._terminators,
+        output_schema=self._output_schema
+    )
+    result_str = self._answer_prefix.format(agent_name=agent_name) + result
+    if self._add_to_memory:
+      memory.add(f'{self._memory_tag} {result_str}')
+    
+    log = {
+        'Key': self.get_pre_act_label(),
+        'Summary': question,
+        'State': result_str,
+        'Chain of thought': prompt.view().text().splitlines(),
+    }
+    if self._clock_now is not None:
+      log['Time'] = self._clock_now()
+    
+    self._logging_channel(log)
 
-      return result_str
+    return result_str
       
 class QuestionOfRecentMemoriesWithoutPreAct(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
