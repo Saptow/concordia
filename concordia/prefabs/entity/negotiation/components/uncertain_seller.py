@@ -83,13 +83,16 @@ class NormalInverseGamma:
     
     def get_confidence_interval(self, confidence: float = 0.95) -> Tuple[float, float]:
         '''Calculate the predictive mean range for a given confidence level.'''
+        confidence = max(0.90, min(0.99, confidence))
         df = 2 * self.a
         scale = np.sqrt(self.b * (self.lambda_ + 1) / (self.lambda_ * self.a))
 
         t_value = self._get_t_critical(confidence, df)
         margin = t_value * scale
 
-        return (self.mu - margin, self.mu + margin)
+        lower = max(0.0, self.mu - margin)
+        upper = max(lower, self.mu + margin)
+        return (lower, upper)
     
     def sample(self, n: int = 1) -> Union[float, List[float]]:
         '''Sample from the Normal-Inverse-Gamma distribution.'''
@@ -100,6 +103,9 @@ class NormalInverseGamma:
     
     def update_with_evidence(self, observation: float, reliability: float = 1.0):
         '''Update the distribution with new evidence using standard Bayesian update.'''
+        reliability = max(0.0, min(1.0, reliability))
+        observation = max(0.0, observation)
+
         # Update mean and lambda
         new_lambda = self.lambda_ + reliability
         new_mu = (self.lambda_ * self.mu + reliability * observation) / new_lambda
@@ -181,9 +187,13 @@ class BeliefDistribution:
 
     def update_with_evidence(self, observation: float, reliability: float = 1.0):
         """Bayesian update with new evidence."""
+        reliability = max(0.0, min(1.0, reliability))
+        observation = max(0.0, observation)
+        std = max(0.01, self.std)
+
         # Simple Bayesian updating assuming normal distributions (both prior and likelihood are normal)
-        prior_precision = 1 / (self.std ** 2)
-        evidence_precision = reliability / (self.std ** 2)  # Reliability affects precision
+        prior_precision = 1 / (std ** 2)
+        evidence_precision = reliability / (std ** 2)  # Reliability affects precision
 
         # Update mean (weighted average)
         total_precision = prior_precision + evidence_precision
@@ -196,14 +206,16 @@ class BeliefDistribution:
         self.evidence_count += 1
         self.confidence = min(0.95, self.confidence + 0.05 * reliability)
 
-        self.mean = new_mean
+        self.mean = max(0.0, new_mean)
         self.std = max(0.01, new_std)  # Prevent std from becoming too small
 
     def get_confidence_interval(self, level: float = 0.95) -> Tuple[float, float]:
         """Get confidence interval for the belief."""
         z_score = 1.96 if level == 0.95 else 2.58  # 95% or 99%
         margin = z_score * self.std
-        return (self.mean - margin, self.mean + margin)
+        lower = max(0.0, self.mean - margin)
+        upper = max(lower, self.mean + margin)
+        return (lower, upper)
 
 
 # Dataclasses for structured analysis outputs
@@ -240,8 +252,8 @@ class InformationValueResponse(BaseModel):
 
 class UpdateOwnBeliefInfoMetadata(BaseModel):
     '''Metadata for belief info updates during negotiations.'''
-    estimate: float
-    confidence: float
+    estimate: float = Field(ge=0.0)
+    confidence: float = Field(ge=0.0, le=1.0)
 
 class UpdateOwnBeliefInfo(BaseModel):
     '''Information to update belief during negotiations.'''
@@ -249,8 +261,8 @@ class UpdateOwnBeliefInfo(BaseModel):
 
 class UpdateOpposingBeliefInfoMetadata(BaseModel):
     '''Metadata for belief info updates during negotiations.'''
-    estimate: float
-    confidence: float
+    estimate: float = Field(ge=0.0)
+    confidence: float = Field(ge=0.0, le=1.0)
 
 class UpdateOpposingBeliefInfo(BaseModel):
     '''Information to update belief during negotiations.'''
@@ -284,7 +296,7 @@ class UncertainSeller(entity_component.ContextComponent):
         self._confidence = confidence
         self._risk_tolerance = risk_tolerance
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
-        self._own_reservation = own_reservation_ # for seller, we first assume that they are sure of their reservation price
+        self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
         self._pre_act_value: Optional[str] = None
 
@@ -307,10 +319,10 @@ class UncertainSeller(entity_component.ContextComponent):
         # Counterpart's reservation value (start with high uncertainty)
         self._beliefs['counterpart_reservation'] = NormalInverseGamma(
             name="Counterpart's Reservation Value",
-            mu=mu, #TODO: to determine based on initial logs before initialisation of negotiation
-            lambda_=lambda_,
-            a=a,
-            b=b
+            mu=max(0.0, mu), #TODO: to determine based on initial logs before initialisation of negotiation
+            lambda_=max(1e-6, lambda_),
+            a=max(1e-6, a),
+            b=max(1e-6, b)
         )
 
     def _analyze_uncertainty_context(self, context: str) -> UncertaintyContext:

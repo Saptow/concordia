@@ -7,6 +7,7 @@ import json
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
+from concordia.concordia.prefabs.entity.negotiation.components import hdb_acting_component
 from concordia.prefabs.entity.negotiation.components import uncertain_buyer, uncertain_seller
 from concordia.hdb_simulation.models.schemas import BuyerActions, RoleType, SellerActions
 from concordia.language_model import language_model
@@ -122,7 +123,7 @@ class Entity(prefab_lib.Prefab):
         # TODO: revise negotiation strategy to include strategy evolution based on past failed negotiations, if any
         uncertain_key, uncertain_context = None, None
         strategy_key = 'NegotiationStrategy'
-        if 'uncertain_buyer' in self.params.get('modules', ''):
+        if 'uncertain_buyer' in modules:
             uncertain_key = 'uncertain_buyer'
             uncertain_configs = module_configs.get('uncertain_buyer', {})
             uncertain_context = uncertain_buyer.UncertainBuyer(
@@ -133,7 +134,7 @@ class Entity(prefab_lib.Prefab):
                 preferences=uncertain_configs.get('preferences', {}),
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
                 own_reservation_std=uncertain_configs.get('own_reservation_std', 1000.0),
-                lambda_=uncertain_configs.get('lambda', 1.0),
+                lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
             )
@@ -146,7 +147,7 @@ class Entity(prefab_lib.Prefab):
                 verbose=True,
             )
 
-        elif 'uncertain_seller' in self.params.get('modules', ''):
+        elif 'uncertain_seller' in modules:
             uncertain_key = 'uncertain_seller'
             uncertain_configs = module_configs.get('uncertain_seller', {})
             uncertain_context = uncertain_seller.UncertainSeller(
@@ -155,7 +156,7 @@ class Entity(prefab_lib.Prefab):
                 risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5),
                 information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
-                lambda_=uncertain_configs.get('lambda', 1.0),
+                lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
             )
@@ -194,7 +195,7 @@ class Entity(prefab_lib.Prefab):
             model=model,
             pre_act_label=f'Next action',
             question=f'Given the negotiation context, what should {agent_name} do?',
-            answer_prefix=f'{agent_name} should ',
+            answer_prefix=f'',
             add_to_memory=False,
             memory_tag='[action reasoning]',
             output_schema=BuyerActions if role == RoleType.BUYER else SellerActions,
@@ -249,14 +250,15 @@ class Entity(prefab_lib.Prefab):
                 if name not in component_order
             ])
 
-        # Create the acting component
-        act_component = agent_components.concat_act_component.ConcatActComponent(
+        # Custom acting component for uncertain negotiator that can handle structured outputs for actions
+        act_component = hdb_acting_component.HDBStructuredActComponent(
             model=model,
+            role=role,  # RoleType.BUYER or RoleType.SELLER
+            structured_component_key='action_reasoning',
             component_order=component_order,
-            prefix_entity_name=True,
+            fallback_to_llm_for_free=False,
         )
-
-        # Create the agent
+                # Create the agent
         agent = entity_agent_with_logging.EntityAgentWithLogging(
             agent_name=agent_name,
             act_component=act_component,
@@ -265,52 +267,3 @@ class Entity(prefab_lib.Prefab):
 
         return agent
 
-
-def build_agent(
-    model: language_model.LanguageModel,
-    memory_bank: basic_associative_memory.AssociativeMemoryBank,
-    name: str = 'Negotiator',
-    goal: str = 'Reach a mutually beneficial agreement',
-    negotiation_style: str = 'integrative',
-    reservation_value: float = 0.0,
-    ethical_constraints: str = 'Be honest and fair. Do not deceive or manipulate.',
-    **kwargs
-) -> entity_agent_with_logging.EntityAgentWithLogging:
-    """Convenience function to build a base negotiation agent.
-    
-    Args:
-        model: Language model for reasoning
-        memory_bank: Memory bank for storing experiences
-        name: Name of the negotiation agent
-        goal: Primary negotiation goal
-        negotiation_style: Style of negotiation ('cooperative', 'competitive', 'integrative')
-        reservation_value: Minimum acceptable value
-        ethical_constraints: Ethical guidelines for negotiation
-        **kwargs: Additional parameters for the agent
-        
-    Returns:
-        Configured base negotiation agent
-        
-    Example:
-        ```python
-        agent = build_agent(
-            model=my_model,
-            memory_bank=my_memory,
-            name="Alice",
-            goal="Secure the best possible deal for my company",
-            negotiation_style="competitive",
-            reservation_value=1000.0
-        )
-        ```
-    """
-    params = {
-        'name': name,
-        'goal': goal,
-        'negotiation_style': negotiation_style,
-        'reservation_value': str(reservation_value),
-        'ethical_constraints': ethical_constraints,
-    }
-    params.update(kwargs)
-    
-    prefab = Entity(params=params)
-    return prefab.build(model=model, memory_bank=memory_bank)

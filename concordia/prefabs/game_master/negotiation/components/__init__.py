@@ -27,6 +27,9 @@ from concordia.prefabs.game_master.negotiation.components import gm_uncertainty_
 from concordia.prefabs.game_master.negotiation.components import gm_collective_intelligence
 from concordia.prefabs.game_master.negotiation.components import gm_strategy_evolution
 
+# Custom HDB negotiation game master components
+from concordia.prefabs.game_master.negotiation.components import hdb_negotiation_state
+
 __all__ = [
     'negotiation_state',
     'negotiation_validation',
@@ -37,4 +40,5 @@ __all__ = [
     'gm_uncertainty_management',
     'gm_collective_intelligence',
     'gm_strategy_evolution',
+    'hdb_negotiation_state',
 ]
