@@ -267,3 +267,11 @@ class Entity(prefab_lib.Prefab):
 
         return agent
 
+def build_agent(
+    model: language_model.LanguageModel,
+    memory_bank: basic_associative_memory.AssociativeMemoryBank,
+    params: Mapping[str, str],
+) -> entity_agent_with_logging.EntityAgentWithLogging:
+    """Convenience function to build the uncertain negotiator agent."""
+    prefab = Entity(params=params)
+    return prefab.build(model=model, memory_bank=memory_bank)
