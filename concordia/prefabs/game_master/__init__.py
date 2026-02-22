@@ -26,3 +26,4 @@ from . import psychology_experiment
 from . import scripted
 from . import situated
 from . import situated_in_time_and_place
+from . import negotiation
