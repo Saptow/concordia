@@ -464,15 +464,82 @@ class HDBStructuredActComponent(
                 )
             except ValueError as error:
                 retry_reason = str(error).strip()
-                if (
-                    offer_intent_non_offer_error in retry_reason
-                    and attempt < 2
-                ):
-                    continue
+                if offer_intent_non_offer_error in retry_reason:
+                    return self._regenerate_offer_only_action(
+                        contexts=contexts,
+                        action_spec=action_spec,
+                        has_active_offer=has_active_offer,
+                        allowed_types=allowed_types,
+                        retry_reason=retry_reason,
+                    )
                 raise
 
         raise ValueError(
             "Failed to regenerate a valid structured action after repeated attempts."
+        )
+
+    def _regenerate_offer_only_action(
+        self,
+        contexts: entity_component.ComponentContextMapping,
+        action_spec: entity_lib.ActionSpec,
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str],
+        retry_reason: str,
+    ) -> str:
+        """Regenerate specifically as an executable offer/counteroffer action."""
+        target_offer_type = self._preferred_offer_action_type(
+            allowed_types=allowed_types,
+            has_active_offer=has_active_offer,
+        )
+        if not target_offer_type:
+            raise ValueError(
+                "Offer intent was detected, but no offer action type is allowed this turn."
+            )
+
+        call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
+        allowed_hint = (
+            f"\nAllowed action types: {', '.join(allowed_types)}."
+            if allowed_types
+            else ""
+        )
+        strict_retry_reason = retry_reason
+        for _ in range(5):
+            prompt = interactive_document.InteractiveDocument(self._model)
+            prompt.statement(self._context_for_action(contexts) + "\n")
+            prompt.statement(
+                "Previous output was invalid. "
+                f"{strict_retry_reason} "
+                f"You MUST output type {target_offer_type} with its numeric price field.\n"
+            )
+            generated = prompt.structured_question(
+                question=(
+                    f"{call_to_action}{allowed_hint}\n"
+                    "Rules:\n"
+                    f"- Return exactly one executable action JSON with type {target_offer_type}.\n"
+                    "- Do not output QUESTION/INQUIRE/NORMAL_ANSWER for this response.\n"
+                    "- Include a valid positive numeric price field."
+                ),
+                output_schema=self._schema_for_turn(has_active_offer),
+                max_tokens=2200,
+                terminators=(),
+            )
+            try:
+                canonical = self._validate_action_for_turn(
+                    generated,
+                    has_active_offer=has_active_offer,
+                    allowed_types=allowed_types,
+                )
+                action_type = str(json.loads(canonical).get("type", "")).strip().upper()
+                if action_type != target_offer_type:
+                    raise ValueError(
+                        f"Expected {target_offer_type}, got {action_type or '<missing>'}."
+                    )
+                return canonical
+            except ValueError as error:
+                strict_retry_reason = str(error).strip()
+
+        raise ValueError(
+            "Failed to regenerate a valid offer/counteroffer action after repeated attempts."
         )
 
     @staticmethod
