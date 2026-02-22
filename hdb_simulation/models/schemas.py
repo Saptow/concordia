@@ -28,6 +28,12 @@ class ActionReasoningFields(BaseModel):
             "tracing only. Must never be shown to counterparties."
         ),
     )
+
+
+# Decisions (actions) that buyers and sellers can take during the negotiation process when no offer is on the table. 
+class MakeOffer(ActionReasoningFields):
+    type: Literal['MAKE_OFFER']
+    offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
     verbal_explanation: str = Field(
         ...,
         validation_alias='explanation',
@@ -37,44 +43,76 @@ class ActionReasoningFields(BaseModel):
         ),
     )
 
-
-# Decisions (actions) that buyers and sellers can take during the negotiation process when no offer is on the table. 
-class MakeOffer(ActionReasoningFields):
-    type: Literal['MAKE_OFFER']
-    offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
-
 class NormalAnswer(ActionReasoningFields):
     type: Literal['NORMAL_ANSWER']
-    answer_details: str = Field(..., description="Detailed public answer to counterpart's question. Keep aligned with verbal_explanation and avoid private information.")
+    answer_details: str = Field(..., 
+                                validation_alias="explanation",
+                                description="Detailed public answer to counterpart's question. Keep aligned with verbal_explanation and avoid private information.")
 
 # Buyer-specific actions when no offer is on the table
 class BuyerInquiry(ActionReasoningFields):
     type: Literal['INQUIRE_BUYER']
-    inquiry_details: str = Field(..., description="Public inquiry details to counterpart. Must not include private information.")
+    inquiry_details: str = Field(..., 
+                                 validation_alias="explanation",
+                                 description="Public inquiry details to counterpart. Must not include private information.")
 
 class BuyerQuestion(ActionReasoningFields):
     type: Literal['QUESTION_BUYER']
-    question_details: str = Field(..., description="Specific public question to counterpart regarding negotiation context.")
+    question_details: str = Field(..., validation_alias="explanation",
+                                  description="Specific public question to counterpart regarding negotiation context.")
 
 # Seller-specific actions when no offer is on the table
 class SellerInquiry(ActionReasoningFields):
     type: Literal['INQUIRE_SELLER']
-    inquiry_details: str = Field(..., description="Public inquiry details to counterpart. Must not include private information.")
+    inquiry_details: str = Field(..., validation_alias="explanation",
+                                 description="Public inquiry details to counterpart. Must not include private information.")
 
 # Decisions (actions) that can be taken by buyers and sellers when there is an active offer on the table.
 class AcceptOffer(ActionReasoningFields):
     type: Literal['ACCEPT_OFFER']
     price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
+    verbal_explanation: str = Field(
+        ...,
+        validation_alias='explanation',
+        description=(
+            "Public-facing explanation safe to share with counterparties. "
+            "Do not include hidden thresholds, private beliefs, or strategy internals."
+        ),
+    )
 
 class RejectOffer(ActionReasoningFields):
     type: Literal['REJECT_OFFER']
+    verbal_explanation: str = Field(
+        ...,
+        validation_alias='explanation',
+        description=(
+            "Public-facing explanation safe to share with counterparties. "
+            "Do not include hidden thresholds, private beliefs, or strategy internals."
+        ),
+    )
 
 class MakeCounteroffer(ActionReasoningFields):
     type: Literal['MAKE_COUNTEROFFER']
     counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
+    verbal_explanation: str = Field(
+        ...,
+        validation_alias='explanation',
+        description=(
+            "Public-facing explanation safe to share with counterparties. "
+            "Do not include hidden thresholds, private beliefs, or strategy internals."
+        ),
+    )
 
 class BuyerWalkAway(ActionReasoningFields):
     type: Literal['WALK_AWAY']
+    verbal_explanation: str = Field(
+        ...,
+        validation_alias='explanation',
+        description=(
+            "Public-facing explanation safe to share with counterparties. "
+            "Do not include hidden thresholds, private beliefs, or strategy internals."
+        ),
+    )
 
 
 # Union types for buyer and seller actions with discriminators for parsing
