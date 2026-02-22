@@ -32,6 +32,13 @@ HDB_ACTION_DOMAIN_GUARDRAILS = (
     "- If the conversation drifts to an unrelated asset/domain, steer it back to the flat negotiation context.\n"
     "- Keep prices in SGD.\n"
 )
+HDB_CONTEXT_ANCHOR = (
+    "CONTEXT ANCHOR:\n"
+    "- You are in an HDB resale negotiation for exactly one flat in Singapore.\n"
+    "- Ignore and discard any off-domain prior context (for example: cars, mileage, vehicle servicing, electronics).\n"
+    "- If any text conflicts with this domain, treat that conflicting text as irrelevant noise and continue in HDB-flat context.\n"
+    "- Keep all pricing and monetary references in SGD.\n"
+)
 @dataclasses.dataclass
 class Entity(prefab_lib.Prefab):
     """
@@ -179,7 +186,8 @@ class Entity(prefab_lib.Prefab):
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
             pre_act_label=f'Self-perception as {role}:',
-            question=(f'Agent description: {description}\n'
+            question=(f'{HDB_CONTEXT_ANCHOR}'
+            f'Agent description: {description}\n'
             f'What kind of {role} is {agent_name}? Respond in 1-5 sentences.'
             ),
             answer_prefix=f'{agent_name} is a {role} who ',
@@ -191,7 +199,11 @@ class Entity(prefab_lib.Prefab):
         question_about_situation = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
             pre_act_label=f'Current negotiation situation:',
-            question=f'What is the current negotiation situation that {agent_name} is in? Respond in 1-5 sentences.',
+            question=(
+                f'{HDB_CONTEXT_ANCHOR}'
+                f'What is the current negotiation situation that {agent_name} is in? '
+                'Respond in 1-5 sentences.'
+            ),
             answer_prefix=f'{agent_name} is currently ',
             add_to_memory=False,
             memory_tag='[situation perception]',
@@ -208,6 +220,7 @@ class Entity(prefab_lib.Prefab):
             model=model,
             pre_act_label=f'Next action',
             question=(
+                f'{HDB_CONTEXT_ANCHOR}'
                 f'Given the negotiation context, what should {agent_name} do?\n'
                 'Rules:\n'
                 '- Return exactly one executable action JSON object, not advice about what to say.\n'

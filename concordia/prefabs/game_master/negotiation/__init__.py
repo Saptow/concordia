@@ -14,14 +14,19 @@
 
 """Negotiation game master prefab and components."""
 
-from concordia.prefabs.game_master.negotiation import negotiation
-from concordia.prefabs.game_master.negotiation import hdb_negotiation
+from . import negotiation
+from . import hdb_negotiation
 
 # Export the main negotiation game master
 NegotiationGameMaster = negotiation.NegotiationGameMaster
-HDBNegotiationGameMaster = hdb_negotiation.HDBNegotiationGameMaster
+HDBNegotiationGameMaster = hdb_negotiation.GameMaster
 
 __all__ = [
+    # Modules
+    'negotiation',
+    'hdb_negotiation',
+
+    # Prefabs
     'NegotiationGameMaster',
     'HDBNegotiationGameMaster',
 ]

@@ -308,22 +308,11 @@ class Sequential(engine_lib.Engine):
       # Define a function to make an entity's observation and send it to them.
       def _entity_observation(entity: entity_lib.Entity) -> None:
         observation = self.make_observation(game_master, entity)
-        if log is not None and hasattr(game_master, 'get_last_log'):
-          assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
-          log_entry['make_observation'][entity.name] = (
-              game_master.get_last_log())
         # Only observe if the observation is not an empty or whitespace string
         if observation and observation.strip():
           tagged_observation = observation.strip()
           if not tagged_observation.startswith('[OBSERVED]'):
             tagged_observation = f'[OBSERVED] {tagged_observation}'
-          if verbose:
-            print(
-                termcolor.colored(
-                    tagged_observation,
-                    _PRINT_COLOR,
-                )
-            )
           entity.observe(tagged_observation)
 
       tasks = {

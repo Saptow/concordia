@@ -28,7 +28,7 @@ from concordia.typing import prefab as prefab_lib
 
 
 @dataclasses.dataclass
-class HDBNegotiationGameMaster(prefab_lib.Prefab):
+class GameMaster(prefab_lib.Prefab):
   """Prefab for a scheduler-first negotiation game master.
 
   This GM is intentionally minimal:
