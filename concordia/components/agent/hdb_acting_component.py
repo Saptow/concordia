@@ -34,10 +34,10 @@ class HDBStructuredActComponent(
     def __init__(
         self,
         model: language_model.LanguageModel,
-        role: RoleType | str,
+        role: RoleType,
         structured_component_key: str = "action_reasoning",
         component_order: Sequence[str] | None = None,
-        randomize_choices: bool = True,
+        randomize_choices: bool = False,
         fallback_to_llm_for_free: bool = False,
     ):
         """Initialize the HDB structured acting component.
@@ -57,7 +57,7 @@ class HDBStructuredActComponent(
         self._component_order = tuple(component_order) if component_order else None
         self._randomize_choices = randomize_choices
         self._fallback_to_llm_for_free = fallback_to_llm_for_free
-        self._role = RoleType(role)
+        self._role = role
 
     def _ordered_keys(self, contexts: entity_component.ComponentContextMapping) -> Sequence[str]:
         """Return context keys in deterministic order for prompt assembly."""

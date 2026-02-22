@@ -7,7 +7,7 @@ import json
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
-from concordia.concordia.prefabs.entity.negotiation.components import hdb_acting_component
+from concordia.components.agent import hdb_acting_component
 from concordia.prefabs.entity.negotiation.components import uncertain_buyer, uncertain_seller
 from concordia.hdb_simulation.models.schemas import BuyerActions, RoleType, SellerActions
 from concordia.language_model import language_model
