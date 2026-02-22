@@ -359,6 +359,14 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
         'pair': f'{first} <-> {second}',
     }
 
+  def get_pair_members_for_player(self, player_name: str) -> tuple[str, str] | None:
+    """Return (buyer_name, seller_name) for the player's negotiation pair."""
+    self._ensure_initialized()
+    pair_key = self._player_to_pair.get(player_name)
+    if not pair_key:
+      return None
+    return self._pair_members.get(pair_key)
+
   def _make_pre_act_value(self) -> str:
     self._ensure_initialized()
     lines = []
@@ -522,7 +530,25 @@ class PassthroughResolution(entity_component.ContextComponent):
           self._make_observation_component_key,
           type_=make_observation_component.MakeObservation,
       )
-      make_observation.add_to_queue('all', event)
+      actor, sep, _ = event.partition(':')
+      actor_name = actor.strip() if sep else ''
+      if not actor_name:
+        scheduler = self.get_entity().get_component(
+            next_acting_component.DEFAULT_NEXT_ACTING_COMPONENT_KEY,
+            type_=PairRoundRobinNextActing,
+        )
+        actor_name = scheduler.get_currently_active_player() or ''
+      pair_members = (
+          offer_tracker.get_pair_members_for_player(actor_name)
+          if actor_name
+          else None
+      )
+
+      if pair_members:
+        make_observation.add_to_queue(pair_members[0], event)
+        make_observation.add_to_queue(pair_members[1], event)
+      elif actor_name:
+        make_observation.add_to_queue(actor_name, event)
     return event
 
   def get_state(self) -> entity_component.ComponentState:
