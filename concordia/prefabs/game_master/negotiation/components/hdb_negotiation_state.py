@@ -58,7 +58,10 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     self._id_to_name = dict(zip(self._player_ids, player_names))
     self._name_to_id = dict(zip(player_names, self._player_ids))
     self._pair_queue = self._build_pair_queue(negotiation_pairs)
+    # Pair-specific round counters. Each pair starts at round 1.
+    self._pair_round_numbers = [1 for _ in self._pair_queue]
 
+    # Global scheduler cycle counter retained for compatibility/debugging.
     self._round_number = 1
     self._pair_index = 0
     self._turn_in_pair = 0
@@ -129,8 +132,10 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
       self._turn_in_pair = 1
       return
 
+    completed_pair_index = self._pair_index
     self._turn_in_pair = 0
     self._pair_index += 1
+    self._pair_round_numbers[completed_pair_index] += 1
     if self._pair_index >= len(self._pair_queue):
       self._pair_index = 0
       self._round_number += 1
@@ -144,9 +149,13 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
   def get_scheduler_snapshot(self) -> dict[str, int | str]:
     active_pair = self._pair_queue[self._pair_index]
     next_actor_id = self._peek_next_actor_id()
+    pair_round_number = self._pair_round_numbers[self._pair_index]
     max_rounds = self._max_rounds if self._max_rounds is not None else 0
     return {
-        'round_number': self._round_number,
+        # Keep `round_number` as pair-local round for active pair.
+        'round_number': pair_round_number,
+        # Preserve global cycle visibility for diagnostics.
+        'global_round_number': self._round_number,
         'pair_index': self._pair_index,
         'turn_in_pair': self._turn_in_pair,
         'next_actor_name': self._id_to_name[next_actor_id],
@@ -176,6 +185,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
         'turn_in_pair': self._turn_in_pair,
         'total_turns': self._total_turns,
         'pair_queue': [list(pair) for pair in self._pair_queue],
+        'pair_round_numbers': list(self._pair_round_numbers),
         'player_ids': list(self._player_ids),
         'max_rounds': self._max_rounds if self._max_rounds is not None else 0,
     }
@@ -192,6 +202,17 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
       self._pair_queue = [
           (str(pair[0]), str(pair[1])) for pair in pair_queue_state  # type: ignore[index]
       ]
+    pair_round_numbers_state = state.get('pair_round_numbers')
+    if pair_round_numbers_state:
+      restored_pair_rounds = [
+          int(x) for x in pair_round_numbers_state  # type: ignore[index]
+      ]
+      expected = len(self._pair_queue)
+      if len(restored_pair_rounds) < expected:
+        restored_pair_rounds.extend([1] * (expected - len(restored_pair_rounds)))
+      self._pair_round_numbers = restored_pair_rounds[:expected]
+    else:
+      self._pair_round_numbers = [1 for _ in self._pair_queue]
 
     max_rounds = int(state.get('max_rounds', 0))
     self._max_rounds = max_rounds if max_rounds > 0 else None
@@ -215,8 +236,6 @@ class TurnOrderStateTracker(action_spec_ignored.ActionSpecIgnored):
         self._scheduler_component_key, type_=PairRoundRobinNextActing
     )
     snapshot = scheduler.get_scheduler_snapshot()
-    queue = scheduler.get_pair_queue_names()
-    queue_str = ', '.join([f'({a} <-> {b})' for a, b in queue])
 
     return (
         f"Round: {snapshot['round_number']}\n"
@@ -225,8 +244,7 @@ class TurnOrderStateTracker(action_spec_ignored.ActionSpecIgnored):
         f"{snapshot['active_pair_second_name']}\n"
         f"Current turn in pair: {snapshot['turn_in_pair']}\n"
         f"Next actor: {snapshot['next_actor_name']}\n"
-        f"Total actor turns dispatched: {snapshot['total_turns']}\n"
-        f'Pair queue: {queue_str}'
+        f"Total actor turns dispatched: {snapshot['total_turns']}"
     )
 
   def get_state(self) -> entity_component.ComponentState:
@@ -369,18 +387,23 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
 
   def _make_pre_act_value(self) -> str:
     self._ensure_initialized()
-    lines = []
-    for pair_key in self._pair_order:
-      first, second = self._pair_members[pair_key]
-      active_offer = self._active_offers.get(pair_key)
-      if active_offer:
-        lines.append(
-            f'{first} <-> {second}: ACTIVE '
-            f"({active_offer.get('action_type')} by {active_offer.get('offerer')})"
-        )
-      else:
-        lines.append(f'{first} <-> {second}: NO_ACTIVE_OFFER')
-    return '\n'.join(lines) if lines else 'No negotiation pairs configured.'
+    scheduler = self.get_entity().get_component(
+        self._scheduler_component_key, type_=PairRoundRobinNextActing
+    )
+    active_player = scheduler.get_currently_active_player()
+    if not active_player:
+      return 'No active player.'
+    pair_key = self._player_to_pair.get(active_player)
+    if not pair_key:
+      return f'No pair found for active player: {active_player}'
+    first, second = self._pair_members[pair_key]
+    active_offer = self._active_offers.get(pair_key)
+    if active_offer:
+      return (
+          f'{first} <-> {second}: ACTIVE '
+          f"({active_offer.get('action_type')} by {active_offer.get('offerer')})"
+      )
+    return f'{first} <-> {second}: NO_ACTIVE_OFFER'
 
   def get_state(self) -> entity_component.ComponentState:
     return {

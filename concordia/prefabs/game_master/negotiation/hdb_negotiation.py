@@ -154,16 +154,12 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
     make_observation = gm_components.make_observation.MakeObservation(
         model=model,
         player_names=player_names,
-        components=[
-            instructions_key,
-            player_characters_key,
-            scheduler_state_key,
-            offer_state_key,
-            display_events_key,
-        ],
-        # Resolution queues exact events to players, while fallback keeps
-        # initial premise and context visible when queue is empty.
-        allow_llm_fallback=True,
+        # Keep entity-facing observations strictly event-queue driven to avoid
+        # leaking scheduler/global state across independent negotiation pairs.
+        components=[],
+        # Resolution queues exact events to players and disables free-form
+        # fallback when queue is empty to preserve pair isolation.
+        allow_llm_fallback=False,
     )
 
     # Deterministic next action spec (no LLM decision needed here).
