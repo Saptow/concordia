@@ -56,7 +56,7 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
           # reference IDs instead of names.
           'player_ids': (),
           # Action spec behavior for the active entity.
-          'action_mode': 'free',  # "free" or "choice"
+          'action_mode': 'choice',  # "free" or "choice"
           'action_prompt': 'What should {name} do next?',
           'action_options': (),
           # Kept for compatibility with prior callers.
@@ -93,7 +93,7 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
     player_ids = self.params.get('player_ids') or None
     max_rounds = int(self.params.get('max_rounds', 0) or 0)
 
-    action_mode = str(self.params.get('action_mode', 'free')).strip().lower()
+    action_mode = str(self.params.get('action_mode', 'choice')).strip().lower()
     action_prompt = str(self.params.get('action_prompt', 'What should {name} do next?'))
     action_options = self.params.get('action_options', ())
     if isinstance(action_options, str):
@@ -137,6 +137,10 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
     scheduler_state = hdb_negotiation_state.TurnOrderStateTracker(
         scheduler_component_key=next_actor_key,
     )
+    offer_state_key = 'pair_offer_state'
+    offer_state = hdb_negotiation_state.PairActiveOfferTracker(
+        scheduler_component_key=next_actor_key,
+    )
 
     display_events_key = 'display_events'
     display_events = gm_components.event_resolution.DisplayEvents(
@@ -154,6 +158,7 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
             instructions_key,
             player_characters_key,
             scheduler_state_key,
+            offer_state_key,
             display_events_key,
         ],
         # Resolution queues exact events to players, while fallback keeps
@@ -169,6 +174,7 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
         call_to_action=action_prompt,
         choice_options=tuple(action_options),
         next_acting_component_key=next_actor_key,
+        offer_tracker_component_key=offer_state_key,
     )
 
     # Pass-through event resolution to keep GM lightweight.
@@ -176,6 +182,7 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
     event_resolution = hdb_negotiation_state.PassthroughResolution(
         memory_component_key=memory_component_key,
         make_observation_component_key=make_observation_key,
+        offer_tracker_component_key=offer_state_key,
         notify_players=True,
     )
 
@@ -191,6 +198,7 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
         observation_to_memory_key: observation_to_memory,
         observation_component_key: observation,
         scheduler_state_key: scheduler_state,
+        offer_state_key: offer_state,
         display_events_key: display_events,
         make_observation_key: make_observation,
         next_actor_key: next_actor,

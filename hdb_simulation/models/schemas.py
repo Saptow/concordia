@@ -19,18 +19,16 @@ class FlatType(StrEnum):
 
 
 # Data Models
-# Decisions
-class AcceptOffer(BaseModel):
-    type: Literal['ACCEPT_OFFER']
-    price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
+# Decisions (actions) that buyers and sellers can take during the negotiation process when no offer is on the table. 
+class MakeOffer(BaseModel):
+    type: Literal['MAKE_OFFER']
+    offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
 
-class RejectOffer(BaseModel):
-    type: Literal['REJECT_OFFER']
+class NormalAnswer(BaseModel):
+    type: Literal['NORMAL_ANSWER']
+    answer_details: str = Field(..., description="Details of the buyer's/seller's answer to inquiries or questions.")
 
-class MakeCounteroffer(BaseModel):
-    type: Literal['MAKE_COUNTEROFFER']
-    counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
-
+# Buyer-specific actions when no offer is on the table
 class BuyerInquiry(BaseModel):
     type: Literal['INQUIRE_BUYER']
     inquiry_details: str = Field(..., description="Details of the buyer's inquiry about the flat's conditions/details.")
@@ -39,25 +37,127 @@ class BuyerQuestion(BaseModel):
     type: Literal['QUESTION_BUYER']
     question_details: str = Field(..., description="Specific question posed by the buyer regarding flexibility and urgency of the negotiation.")
 
-# Seller Decisions
+# Seller-specific actions when no offer is on the table
 class SellerInquiry(BaseModel):
     type: Literal['INQUIRE_SELLER']
     inquiry_details: str = Field(..., description="Details of the seller's inquiry about the buyer's preferences or constraints.")
 
-BuyerActionTypes=Annotated[
-    Union[AcceptOffer, RejectOffer, MakeCounteroffer, BuyerInquiry, BuyerQuestion],
+# Decisions (actions) that can be taken by buyers and sellers when there is an active offer on the table.
+class AcceptOffer(BaseModel):
+    type: Literal['ACCEPT_OFFER']
+    price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
+
+class RejectOffer(BaseModel):
+    type: Literal['REJECT_OFFER']
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the rejection of the offer.")
+
+class MakeCounteroffer(BaseModel):
+    type: Literal['MAKE_COUNTEROFFER']
+    counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the counteroffer.")
+
+
+# Union types for buyer and seller actions with discriminators for parsing
+BuyerNonOfferActionTypes=Annotated[
+    Union[MakeOffer,BuyerInquiry, BuyerQuestion, NormalAnswer],
+    Field(discriminator='type')
+]
+BuyerOfferActionTypes=Annotated[
+    Union[AcceptOffer, RejectOffer, MakeCounteroffer],
+    Field(discriminator='type')
+]
+class BuyerNonOfferActions(RootModel[BuyerNonOfferActionTypes]):
+    pass
+class BuyerOfferActions(RootModel[BuyerOfferActionTypes]):
+    pass
+
+SellerNonOfferActionTypes=Annotated[
+    Union[MakeOffer,SellerInquiry, NormalAnswer],
+    Field(discriminator='type')
+]
+SellerOfferActionTypes=Annotated[
+    Union[AcceptOffer, RejectOffer, MakeCounteroffer],
+    Field(discriminator='type')
+]
+class SellerNonOfferActions(RootModel[SellerNonOfferActionTypes]):
+    pass
+class SellerOfferActions(RootModel[SellerOfferActionTypes]):
+    pass
+
+# Backward-compatible "all actions" schemas.
+# These are intentionally broad and can be narrowed dynamically at runtime
+# using the helper selectors below.
+BuyerActionTypes = Annotated[
+    Union[
+        MakeOffer,
+        BuyerInquiry,
+        BuyerQuestion,
+        NormalAnswer,
+        AcceptOffer,
+        RejectOffer,
+        MakeCounteroffer,
+    ],
+    Field(discriminator='type')
+]
+
+SellerActionTypes = Annotated[
+    Union[
+        MakeOffer,
+        SellerInquiry,
+        NormalAnswer,
+        AcceptOffer,
+        RejectOffer,
+        MakeCounteroffer,
+    ],
     Field(discriminator='type')
 ]
 
 class BuyerActions(RootModel[BuyerActionTypes]):
     pass
 
-SellerActionTypes=Annotated[
-    Union[AcceptOffer, RejectOffer, MakeCounteroffer, SellerInquiry],
-    Field(discriminator='type')
-]
 class SellerActions(RootModel[SellerActionTypes]):
     pass
+
+
+BUYER_NON_OFFER_ACTIONS = (
+    'MAKE_OFFER',
+    'INQUIRE_BUYER',
+    'QUESTION_BUYER',
+    'NORMAL_ANSWER',
+)
+BUYER_OFFER_ACTIONS = (
+    'ACCEPT_OFFER',
+    'REJECT_OFFER',
+    'MAKE_COUNTEROFFER',
+)
+SELLER_NON_OFFER_ACTIONS = (
+    'MAKE_OFFER',
+    'INQUIRE_SELLER',
+    'NORMAL_ANSWER',
+)
+SELLER_OFFER_ACTIONS = (
+    'ACCEPT_OFFER',
+    'REJECT_OFFER',
+    'MAKE_COUNTEROFFER',
+)
+
+
+def get_action_model(role: RoleType, has_active_offer: bool) -> type[RootModel]:
+    """Return the role-constrained action model for current offer state."""
+    if role == RoleType.BUYER:
+        return BuyerOfferActions if has_active_offer else BuyerNonOfferActions
+    if role == RoleType.SELLER:
+        return SellerOfferActions if has_active_offer else SellerNonOfferActions
+    raise ValueError(f'No action model for role: {role}')
+
+
+def get_allowed_action_types(role: RoleType, has_active_offer: bool) -> tuple[str, ...]:
+    """Return allowed action type literals for prompt/policy use."""
+    if role == RoleType.BUYER:
+        return BUYER_OFFER_ACTIONS if has_active_offer else BUYER_NON_OFFER_ACTIONS
+    if role == RoleType.SELLER:
+        return SELLER_OFFER_ACTIONS if has_active_offer else SELLER_NON_OFFER_ACTIONS
+    raise ValueError(f'No action set for role: {role}')
 
 class BaseBuyer(BaseModel):
     id: str
@@ -93,6 +193,5 @@ class Flat(BaseModel):
 
 
     
-
 
 

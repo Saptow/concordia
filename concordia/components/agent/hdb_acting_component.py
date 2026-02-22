@@ -5,7 +5,7 @@ from typing import Any, override
 from pydantic import BaseModel, RootModel
 
 from concordia.document import interactive_document
-from concordia.hdb_simulation.models.schemas import BuyerActions, RoleType, SellerActions
+from concordia.hdb_simulation.models import schemas as hdb_schemas
 from concordia.language_model import language_model
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -34,7 +34,7 @@ class HDBStructuredActComponent(
     def __init__(
         self,
         model: language_model.LanguageModel,
-        role: RoleType,
+        role: hdb_schemas.RoleType,
         structured_component_key: str = "action_reasoning",
         component_order: Sequence[str] | None = None,
         randomize_choices: bool = False,
@@ -108,15 +108,93 @@ class HDBStructuredActComponent(
                     return candidate[: idx + 1]
         raise ValueError("Unterminated JSON object in structured action.")
 
-    def _validate_action_for_role(self, raw: Any) -> str:
-        """Validate extracted JSON against BuyerActions/SellerActions schema."""
+    def _infer_offer_state_from_options(self, options: Sequence[str]) -> bool | None:
+        """Infer whether there is an active offer from action-type options."""
+        if not options:
+            return None
+        normalized = {str(opt).strip().upper() for opt in options if str(opt).strip()}
+        if not normalized:
+            return None
+        if self._role == hdb_schemas.RoleType.BUYER:
+            offer_set = set(hdb_schemas.BUYER_OFFER_ACTIONS)
+            non_offer_set = set(hdb_schemas.BUYER_NON_OFFER_ACTIONS)
+        else:
+            offer_set = set(hdb_schemas.SELLER_OFFER_ACTIONS)
+            non_offer_set = set(hdb_schemas.SELLER_NON_OFFER_ACTIONS)
+        if normalized <= offer_set:
+            return True
+        if normalized <= non_offer_set:
+            return False
+        return None
+
+    def _schema_for_turn(self, has_active_offer: bool | None) -> type[RootModel]:
+        """Pick role schema for this turn; fallback to broad schema if unknown."""
+        if has_active_offer is None:
+            if self._role == hdb_schemas.RoleType.BUYER:
+                return hdb_schemas.BuyerActions
+            return hdb_schemas.SellerActions
+        return hdb_schemas.get_action_model(self._role, has_active_offer)
+
+    def _validate_action_for_turn(
+        self,
+        raw: Any,
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str] = (),
+    ) -> str:
+        """Validate extracted JSON against role+offer state (+optional allowed types)."""
         normalized = self._normalize_structured_action(raw)
         json_str = self._extract_json(normalized)
-        if self._role == RoleType.BUYER:
-            validated = BuyerActions.model_validate_json(json_str)
-        else:
-            validated = SellerActions.model_validate_json(json_str)
-        return validated.model_dump_json()
+        validated = self._schema_for_turn(has_active_offer).model_validate_json(json_str)
+        canonical = validated.model_dump_json()
+        if not allowed_types:
+            return canonical
+        payload = json.loads(canonical)
+        action_type = str(payload.get("type", "")).strip().upper()
+        allowed = {str(x).strip().upper() for x in allowed_types}
+        if action_type not in allowed:
+            raise ValueError(
+                f"Action type {action_type!r} not in allowed options {sorted(allowed)}."
+            )
+        return canonical
+
+    def _regenerate_structured_action(
+        self,
+        contexts: entity_component.ComponentContextMapping,
+        action_spec: entity_lib.ActionSpec,
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str] = (),
+    ) -> str:
+        """Generate a repaired structured action under current constraints."""
+        prompt = interactive_document.InteractiveDocument(self._model)
+        prompt.statement(self._context_for_action(contexts) + "\n")
+        call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
+        allowed_hint = (
+            f"\nAllowed action types: {', '.join(allowed_types)}."
+            if allowed_types
+            else ""
+        )
+        generated = prompt.structured_question(
+            question=(
+                f"{call_to_action}{allowed_hint}\n"
+                "Return exactly one JSON object matching the expected schema."
+            ),
+            output_schema=self._schema_for_turn(has_active_offer),
+            max_tokens=2200,
+            terminators=(),
+        )
+        return self._validate_action_for_turn(
+            generated,
+            has_active_offer=has_active_offer,
+            allowed_types=allowed_types,
+        )
+
+    @staticmethod
+    def _is_action_type_choice(action_spec: entity_lib.ActionSpec) -> bool:
+        """True when CHOICE options look like action-type literals."""
+        if action_spec.output_type not in entity_lib.CHOICE_ACTION_TYPES:
+            return False
+        options = tuple(str(opt).strip() for opt in action_spec.options)
+        return bool(options) and all(opt and ("_" in opt) and (opt.upper() == opt) for opt in options)
 
     @override
     def get_action_attempt(
@@ -125,10 +203,28 @@ class HDBStructuredActComponent(
         action_spec: entity_lib.ActionSpec,
     ) -> str:
         """Produce an action attempt, enforcing structured schema on FREE types."""
-        if action_spec.output_type in entity_lib.FREE_ACTION_TYPES:
+        use_structured = (
+            action_spec.output_type in entity_lib.FREE_ACTION_TYPES
+            or self._is_action_type_choice(action_spec)
+        )
+        if use_structured:
+            allowed_types = tuple(str(opt).strip().upper() for opt in action_spec.options)
+            has_active_offer = self._infer_offer_state_from_options(allowed_types)
             raw = contexts.get(self._structured_component_key)
             if raw:
-                out = self._validate_action_for_role(raw)
+                try:
+                    out = self._validate_action_for_turn(
+                        raw,
+                        has_active_offer=has_active_offer,
+                        allowed_types=allowed_types,
+                    )
+                except Exception:
+                    out = self._regenerate_structured_action(
+                        contexts=contexts,
+                        action_spec=action_spec,
+                        has_active_offer=has_active_offer,
+                        allowed_types=allowed_types,
+                    )
                 self._logging_channel({
                     "Summary": f"Using structured output from {self._structured_component_key}",
                     "Value": out,
@@ -139,6 +235,17 @@ class HDBStructuredActComponent(
                 raise ValueError(
                     f'Missing structured action in "{self._structured_component_key}".'
                 )
+            out = self._regenerate_structured_action(
+                contexts=contexts,
+                action_spec=action_spec,
+                has_active_offer=has_active_offer,
+                allowed_types=allowed_types,
+            )
+            self._logging_channel({
+                "Summary": "Regenerated structured output from action spec context",
+                "Value": out,
+            })
+            return out
 
         prompt = interactive_document.InteractiveDocument(self._model)
         prompt.statement(self._context_for_action(contexts) + "\n")
@@ -177,7 +284,7 @@ class HDBStructuredActComponent(
     def set_state(self, state: entity_component.ComponentState) -> None:
         """Restores component state from a dictionary."""
         if 'role' in state:
-            self._role = RoleType(state['role'])
+            self._role = hdb_schemas.RoleType(state['role'])
         if 'structured_component_key' in state:
             self._structured_component_key = state['structured_component_key']
         if 'component_order' in state:
