@@ -366,7 +366,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         """Update own reservation belief based on new context information."""
         prompt = f"""
         You are looking from the perspective of a buyer in a negotiation with imperfect information. The counterpart has full information about their own budget and flexibility.
-        Given a context and your own preferences, your task is to extract any relevant information that might affect your own reservation value of the house (in dollars), if there is any:
+        Given a context and your own preferences, your task is to extract any relevant information that might affect your own reservation value of the HDB flat (in dollars), if there is any:
         
         Preferences: {self._preferences}
         Context: {context}

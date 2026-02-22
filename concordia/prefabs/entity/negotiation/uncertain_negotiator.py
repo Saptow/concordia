@@ -25,6 +25,13 @@ DEFAULT_ETHICS = (
     f'- Treat inferences as hypotheses; ask clarifying questions instead of asserting unverified claims.'
     f'- No coercion/harassment or exploitation of vulnerability; keep a clear written record of offers and key terms.'
 )
+HDB_ACTION_DOMAIN_GUARDRAILS = (
+    "DOMAIN CONSTRAINTS:\n"
+    "- This negotiation is ONLY about one HDB resale flat in Singapore.\n"
+    "- Keep all questions/answers tied to the flat condition, lease, location, transaction terms, or timeline.\n"
+    "- If the conversation drifts to an unrelated asset/domain, steer it back to the flat negotiation context.\n"
+    "- Keep prices in SGD.\n"
+)
 @dataclasses.dataclass
 class Entity(prefab_lib.Prefab):
     """
@@ -210,13 +217,14 @@ class Entity(prefab_lib.Prefab):
                 '- If you are rejecting the current offer, use REJECT_OFFER.\n'
                 '- If you want a different price from the current offer, use MAKE_COUNTEROFFER.\n'
                 f'{walk_away_rule}'
+                f'{HDB_ACTION_DOMAIN_GUARDRAILS}'
                 '- Keep fields concise and action-oriented.'
             ),
             answer_prefix=f'',
             add_to_memory=False,
             memory_tag='[action reasoning]',
             output_schema=BuyerActions if role == RoleType.BUYER else SellerActions,
-            components = ['situation_perception', 'self_perception', strategy_key]
+            components = ['situation_perception', 'self_perception', strategy_key, instructions.name]
         )
 
         # # Recent memories for context 

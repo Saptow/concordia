@@ -331,7 +331,7 @@ class UncertainSeller(entity_component.ContextComponent):
             [f"{name}: mean={belief.get_expected_mean:.2f}, std={math.sqrt(belief.get_expected_variance):.2f}" for name, belief in self._beliefs.items()] # TODO: might need to add confidence for NIG, but decide later on
         )
         prompt = f"""
-        You are looking from the perspective of a seller in a negotiation with perfect information of your house that you plan to sell. The counterpart has imperfect information about your own reservation price and flexibility.
+        You are looking from the perspective of a seller in a negotiation with perfect information of your HDB flat that you plan to sell. The counterpart has imperfect information about your own reservation price and flexibility.
         However, there is uncertainty about the buyer's reservation value and flexibility.
         Based off your current beliefs given below, analyze this negotiation context for uncertainty and missing information:
         Beliefs: {formatted_beliefs}
@@ -368,7 +368,7 @@ class UncertainSeller(entity_component.ContextComponent):
     def _update_counterpart_reservation_from_context(self, context: str):
         """Update beliefs based on new context information."""
         # prompt = f"""
-        # You are looking from the perspective of a seller in a negotiation with perfect information. The counterpart has imperfect information about your own budget and flexibility regarding the house. However, there is uncertainty about the buyer's budget and flexibility.
+        # You are looking from the perspective of a seller in a negotiation with perfect information. The counterpart has imperfect information about your own budget and flexibility regarding the HDB flat. However, there is uncertainty about the buyer's budget and flexibility.
         # Given a context, your task is to extract information regarding the counterpart's budget and flexibility in the negotiation, if there is any:
         
         # Context: {context}
@@ -385,7 +385,7 @@ class UncertainSeller(entity_component.ContextComponent):
         # """
 
         prompt = f"""
-        You are looking from the perspective of a seller in a negotiation with perfect information. The counterpart has imperfect information about your own budget and flexibility regarding the house. However, there is uncertainty about the buyer's budget and flexibility.
+        You are looking from the perspective of a seller in a negotiation with perfect information. The counterpart has imperfect information about your own budget and flexibility regarding the HDB flat. However, there is uncertainty about the buyer's budget and flexibility.
         Given a context, your task is to extract information regarding the counterpart's budget and flexibility in the negotiation, if there is any:
         
         Context: {context}
@@ -515,7 +515,7 @@ class UncertainSeller(entity_component.ContextComponent):
 
         # Determine the info_opportunities using a LLM. 
         prompt = f"""
-        You are looking from the perspective of a seller in a negotiation with perfect information of your house that you plan to sell. The counterpart has imperfect information about your own reservation price and flexibility.
+        You are looking from the perspective of a seller in a negotiation with perfect information of your HDB flat that you plan to sell. The counterpart has imperfect information about your own reservation price and flexibility.
         However, there is uncertainty about the counterpart's reservation value and flexibility. Given the negotiation context and uncertainty analysis below, identify up to 10 specific questions that can be asked to gather valuable information that affects the counterpart's reservation value and flexibility.
 
         Context: {context}
