@@ -410,9 +410,10 @@ class Sequential(engine_lib.Engine):
         continue
 
       if verbose:
+        choices_text = ', '.join(entity_spec_to_use.options) if entity_spec_to_use.options else ''
         print(termcolor.colored(
             f'Entity {next_entity.name} is next to act. They must respond '
-            f' with the choices: "{entity_spec_to_use.get("choices", "")}".', _PRINT_COLOR))
+            f' with the choices: "{choices_text}".', _PRINT_COLOR))
       raw_action = next_entity.act(entity_spec_to_use)
       actor_prefix = f'{next_entity.name}:'
       stripped_action = raw_action.strip()
