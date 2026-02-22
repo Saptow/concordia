@@ -28,6 +28,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         negotiation_style: str = 'competitive',
         reservation_value: float = 0.0,
         ethical_constraints: Optional[str] = None,
+        pre_act_label: str = 'Negotiation instructions',
         verbose: bool = False,
     ):
         """Initialize negotiation instructions.
@@ -46,6 +47,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         self._style = negotiation_style
         self._reservation_value = reservation_value
         self._ethics = ethical_constraints or 'Be honest and fair. Do not deceive.'
+        self._pre_act_label = pre_act_label
         self._verbose = verbose
 
         # Track negotiation state
@@ -123,8 +125,12 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                 '- Preserve relationship for future\n'
             )
 
-    def pre_act(self, action_spec) -> str:
-        """Provide negotiation instructions before action."""
+    def get_pre_act_label(self) -> str:
+        """Label used when other components reference this pre-act context."""
+        return self._pre_act_label
+
+    def get_pre_act_value(self) -> str:
+        """Pre-act instruction body used by dependent components."""
         # Update phase based on rounds
         if self._rounds_completed < 3:
             self._negotiation_phase = 'opening'
@@ -156,6 +162,11 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             instructions += '- Look for ways to expand value for both parties\n'
 
         return instructions
+
+    def pre_act(self, action_spec) -> str:
+        """Provide negotiation instructions before action."""
+        del action_spec
+        return self.get_pre_act_value()
 
     def post_act(self, action_attempt: str) -> str:
         """Update state after action."""
