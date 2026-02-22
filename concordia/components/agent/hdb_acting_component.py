@@ -429,7 +429,7 @@ class HDBStructuredActComponent(
             "Detected offer/counteroffer language inside a non-offer action."
         )
         retry_reason = ""
-        for attempt in range(3):
+        for attempt in range(8):
             prompt = interactive_document.InteractiveDocument(self._model)
             prompt.statement(self._context_for_action(contexts) + "\n")
             if retry_reason:
@@ -503,7 +503,7 @@ class HDBStructuredActComponent(
             else ""
         )
         strict_retry_reason = retry_reason
-        for _ in range(5):
+        for _ in range(20):
             prompt = interactive_document.InteractiveDocument(self._model)
             prompt.statement(self._context_for_action(contexts) + "\n")
             prompt.statement(
