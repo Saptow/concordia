@@ -20,3 +20,8 @@ from concordia.prefabs.game_master.negotiation import hdb_negotiation
 # Export the main negotiation game master
 NegotiationGameMaster = negotiation.NegotiationGameMaster
 HDBNegotiationGameMaster = hdb_negotiation.HDBNegotiationGameMaster
+
+__all__ = [
+    'NegotiationGameMaster',
+    'HDBNegotiationGameMaster',
+]
