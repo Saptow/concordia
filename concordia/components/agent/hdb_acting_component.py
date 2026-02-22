@@ -19,6 +19,13 @@ class ReasoningIntentJudgement(BaseModel):
     explanation: str
 
 
+class OfferIntentJudgement(BaseModel):
+    """LLM-as-a-judge output for offer/counteroffer detection in prose."""
+
+    contains_offer_intent: bool
+    explanation: str
+
+
 class HDBStructuredActComponent(
     entity_component.ActingComponent, entity_component.ComponentWithLogging
 ):
@@ -156,24 +163,37 @@ class HDBStructuredActComponent(
         chunks = [str(payload.get(k, "")).strip() for k in keys if str(payload.get(k, "")).strip()]
         return "\n".join(chunks)
 
-    @staticmethod
-    def _contains_offer_intent(text: str) -> bool:
-        """Heuristic for prose that describes a price proposal/negotiation move."""
+    def _contains_offer_intent(self, text: str) -> bool:
+        """Use LLM-as-a-judge to detect offer/counteroffer intent in prose."""
         if not text:
             return False
-        has_price = bool(
-            re.search(r"\$\s*\d[\d,]*(?:\.\d+)?", text)
-            or re.search(r"\b\d{5,}(?:\.\d+)?\b", text)
+        prompt = interactive_document.InteractiveDocument(self._model)
+        prompt.statement(
+            "You are a strict negotiation-action judge.\n"
+            "Determine whether the text semantically contains an OFFER or COUNTEROFFER intent.\n"
+            "OFFER/COUNTEROFFER intent means proposing or suggesting a concrete price level/change,\n"
+            "even if currency format is unusual (e.g., 850,000 SGD without '$').\n"
+            "Do not mark pure questions, pure inquiries, or pure factual answers as offer intent."
         )
-        has_offer_phrase = bool(
-            re.search(
-                r"\b(offer|counteroffer|counter-offer|counter offer|price|meet you|meet me|"
-                r"willing to|accept|reject|settle|finalize)\b",
-                text,
-                flags=re.IGNORECASE,
-            )
+        prompt.statement(f"Text to judge:\n{text}\n")
+        verdict = prompt.structured_question(
+            question=(
+                "Does this text contain offer/counteroffer intent? "
+                "Return only the schema."
+            ),
+            output_schema=OfferIntentJudgement,
+            max_tokens=220,
+            terminators=(),
         )
-        return has_price and has_offer_phrase
+        if isinstance(verdict, (BaseModel, RootModel)):
+            verdict_payload = verdict.model_dump()
+        elif isinstance(verdict, dict):
+            verdict_payload = verdict
+        elif isinstance(verdict, str):
+            verdict_payload = json.loads(self._extract_json(verdict))
+        else:
+            verdict_payload = {}
+        return bool(verdict_payload.get("contains_offer_intent", False))
 
     @staticmethod
     def _extract_single_offer_price(text: str) -> float | None:
@@ -365,20 +385,10 @@ class HDBStructuredActComponent(
             action_type in self._textual_non_offer_action_types()
             and self._contains_offer_intent(details_text)
         ):
-            coerced = self._coerce_offer_like_payload(
-                payload=payload,
-                has_active_offer=has_active_offer,
-                allowed_types=allowed_types,
+            raise ValueError(
+                "Detected offer/counteroffer language inside a non-offer action. "
+                "Regenerate and emit MAKE_OFFER or MAKE_COUNTEROFFER with a numeric price field."
             )
-            if coerced is None:
-                raise ValueError(
-                    "Detected offer/counteroffer language inside a non-offer action. "
-                    "Emit MAKE_OFFER or MAKE_COUNTEROFFER with a numeric price field."
-                )
-            validated = self._schema_for_turn(has_active_offer).model_validate(coerced)
-            canonical = validated.model_dump_json()
-            payload = json.loads(canonical)
-            action_type = str(payload.get("type", "")).strip().upper()
 
         self._judge_reasoning_intent(
             payload=payload,

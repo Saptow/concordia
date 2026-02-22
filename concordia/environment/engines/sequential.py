@@ -139,10 +139,6 @@ class Sequential(engine_lib.Engine):
               putative_event: str,
               verbose: bool = False) -> None:
     """Resolve an event."""
-    if verbose:
-      print(termcolor.colored(
-          f'The suggested action or event to resolve was: {putative_event}',
-          _PRINT_COLOR))
     game_master.observe(observation=f'{PUTATIVE_EVENT_TAG} {putative_event}')
     result = game_master.act(
         action_spec=entity_lib.ActionSpec(
@@ -151,9 +147,6 @@ class Sequential(engine_lib.Engine):
         )
     )
     game_master.observe(observation=f'{EVENT_TAG} {result}')
-    if verbose:
-      print(termcolor.colored(
-          f'The resolved event was: {result}', _PRINT_COLOR))
 
   def terminate(self,
                 game_master: entity_lib.Entity,
