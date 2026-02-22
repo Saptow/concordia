@@ -163,3 +163,27 @@ class HDBStructuredActComponent(
             return prompt.open_question(call_to_action, max_tokens=2200, terminators=())
 
         raise NotImplementedError(f"Unsupported output type: {action_spec.output_type}")
+    
+    def get_state(self) -> entity_component.ComponentState:
+        """Converts component into a dictionary for logging."""
+        return {
+            "role": self._role.value,
+            "structured_component_key": self._structured_component_key,
+            "component_order": list(self._component_order) if self._component_order else None,
+            "randomize_choices": self._randomize_choices,
+            "fallback_to_llm_for_free": self._fallback_to_llm_for_free,
+        }
+    
+    def set_state(self, state: entity_component.ComponentState) -> None:
+        """Restores component state from a dictionary."""
+        if 'role' in state:
+            self._role = RoleType(state['role'])
+        if 'structured_component_key' in state:
+            self._structured_component_key = state['structured_component_key']
+        if 'component_order' in state:
+            self._component_order = tuple(state['component_order']) if state['component_order'] else None
+        if 'randomize_choices' in state:
+            self._randomize_choices = state['randomize_choices']
+        if 'fallback_to_llm_for_free' in state:
+            self._fallback_to_llm_for_free = state['fallback_to_llm_for_free']
+        
