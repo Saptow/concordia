@@ -487,13 +487,11 @@ class HDBStructuredActComponent(
         retry_reason: str,
     ) -> str:
         """Regenerate specifically as an executable offer/counteroffer action."""
-        target_offer_type = self._preferred_offer_action_type(
-            allowed_types=allowed_types,
-            has_active_offer=has_active_offer,
-        )
-        if not target_offer_type:
+        allowed_set = {str(x).strip().upper() for x in allowed_types}
+        target_offer_type = "MAKE_OFFER"
+        if allowed_set and target_offer_type not in allowed_set:
             raise ValueError(
-                "Offer intent was detected, but no offer action type is allowed this turn."
+                "Offer intent was detected, but MAKE_OFFER is not allowed this turn."
             )
 
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
