@@ -674,6 +674,33 @@ class PassthroughResolution(entity_component.ContextComponent):
     self._offer_tracker_component_key = offer_tracker_component_key
     self._notify_players = notify_players
 
+  @staticmethod
+  def _sanitize_event_for_counterparty(event: str) -> str:
+    """Remove private fields before sending event text to counterparties."""
+    actor, sep, payload = event.partition(':')
+    if not sep:
+      return event
+    payload_json = PairActiveOfferTracker._extract_json_object(payload)
+    if not payload_json:
+      return event
+    try:
+      action = json.loads(payload_json)
+    except json.JSONDecodeError:
+      return event
+    if not isinstance(action, dict):
+      return event
+
+    # Strip private reasoning before observation delivery.
+    action.pop('internal_reasoning', None)
+
+    sanitized_json = json.dumps(action, ensure_ascii=False)
+    start = payload.find(payload_json)
+    if start < 0:
+      return event
+    end = start + len(payload_json)
+    sanitized_payload = payload[:start] + sanitized_json + payload[end:]
+    return f'{actor}{sep}{sanitized_payload}'
+
   def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
     if action_spec.output_type != entity_lib.OutputType.RESOLVE:
       return ''
@@ -697,6 +724,7 @@ class PassthroughResolution(entity_component.ContextComponent):
       offer_tracker.record_resolved_event(event)
 
     if self._notify_players and event:
+      observed_event = self._sanitize_event_for_counterparty(event)
       make_observation = self.get_entity().get_component(
           self._make_observation_component_key,
           type_=make_observation_component.MakeObservation,
@@ -716,10 +744,10 @@ class PassthroughResolution(entity_component.ContextComponent):
       )
 
       if pair_members:
-        make_observation.add_to_queue(pair_members[0], event)
-        make_observation.add_to_queue(pair_members[1], event)
+        make_observation.add_to_queue(pair_members[0], observed_event)
+        make_observation.add_to_queue(pair_members[1], observed_event)
       elif actor_name:
-        make_observation.add_to_queue(actor_name, event)
+        make_observation.add_to_queue(actor_name, observed_event)
     return event
 
   def get_state(self) -> entity_component.ComponentState:
