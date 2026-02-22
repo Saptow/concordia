@@ -320,7 +320,7 @@ class Sequential(engine_lib.Engine):
           if verbose:
             print(
                 termcolor.colored(
-                    f'Entity {entity.name} observed: {tagged_observation}',
+                    tagged_observation,
                     _PRINT_COLOR,
                 )
             )
@@ -405,7 +405,7 @@ class Sequential(engine_lib.Engine):
         action = f'{next_entity.name}: [ACTED] {action_payload}'
       if verbose:
         print(termcolor.colored(
-            f'Entity {next_entity.name} chose action: {action}', _PRINT_COLOR))
+            action, _PRINT_COLOR))
 
       self.resolve(game_master=game_master,
                    putative_event=action,

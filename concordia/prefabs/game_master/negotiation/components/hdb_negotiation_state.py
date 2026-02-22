@@ -10,6 +10,7 @@ from concordia.components.game_master import make_observation as make_observatio
 from concordia.components.game_master import next_acting as next_acting_component
 from concordia.environment import engine as engine_lib
 from concordia.hdb_simulation.models import schemas as hdb_schemas
+from concordia.prefabs.entity.negotiation import uncertain_negotiator
 from concordia.language_model import language_model
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -554,6 +555,12 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
 class FixedNextActionSpec(entity_component.ContextComponent):
   """Returns a deterministic next action spec for the currently active player."""
 
+  _OUTPUT_GUARDRAIL_FOOTER = (
+      "OUTPUT CONTRACT:\n"
+      "- Return exactly one executable action JSON object.\n"
+      "- Ensure the JSON action remains within the allowed action options for this turn.\n"
+  )
+
   def __init__(
       self,
       action_mode: str = 'free',
@@ -589,6 +596,15 @@ class FixedNextActionSpec(entity_component.ContextComponent):
     )
     policy = offer_tracker.get_action_policy_for_player(active_player)
     allowed_actions = tuple(str(x) for x in policy.get('allowed_action_types', []))
+    shared_guardrails = uncertain_negotiator.HDB_ACTION_DOMAIN_GUARDRAILS.strip()
+    if shared_guardrails:
+      prompt = (
+          f"{prompt}\n\n"
+          f"{shared_guardrails}\n"
+          f"{self._OUTPUT_GUARDRAIL_FOOTER}"
+      )
+    else:
+      prompt = f"{prompt}\n\n{self._OUTPUT_GUARDRAIL_FOOTER}"
 
     if self._action_mode == 'choice':
       options = self._choice_options or allowed_actions
