@@ -665,6 +665,14 @@ details.step-details[open] > summary { background: #d8d8ff; }
 /* Content inside steps is indented */
 details.step-details > details { margin-left: 15px; }
 .summary { padding: 10px; background: #e8f4f8; border-radius: 4px; margin-bottom: 15px; }
+.round-banner { margin: 8px 0 12px 0; padding: 8px 10px; background: #eef2ff; border-left: 4px solid #4f46e5; border-radius: 4px; font-weight: 600; color: #1f2937; }
+.trace-card { margin: 8px 0; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
+.trace-title { font-weight: 700; color: #334155; margin-bottom: 8px; }
+.trace-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.trace-block { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 4px; padding: 8px; }
+.trace-label { font-size: 11px; text-transform: uppercase; font-weight: 700; color: #475569; margin-bottom: 4px; }
+.trace-item { margin: 3px 0; }
+.trace-empty { color: #94a3b8; font-style: italic; }
 h1 { color: #333; margin-bottom: 5px; }
 .subtitle { color: #666; margin-bottom: 20px; }
 </style>
@@ -833,6 +841,143 @@ function renderObjectChildren(obj) {
   return html;
 }
 
+function resolveRefs(obj) {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(resolveRefs);
+  }
+  if (typeof obj === 'object') {
+    if (obj._ref && Object.keys(obj).length === 1) {
+      return CONTENT_STORE[obj._ref] || ('[ref:' + obj._ref + ']');
+    }
+    const resolved = {};
+    for (const [key, value] of Object.entries(obj)) {
+      resolved[key] = resolveRefs(value);
+    }
+    return resolved;
+  }
+  return obj;
+}
+
+function collectStrings(obj, out) {
+  if (obj === null || obj === undefined) return;
+  if (typeof obj === 'string') {
+    const trimmed = obj.trim();
+    if (trimmed) out.push(trimmed);
+    return;
+  }
+  if (Array.isArray(obj)) {
+    obj.forEach(item => collectStrings(item, out));
+    return;
+  }
+  if (typeof obj === 'object') {
+    Object.values(obj).forEach(value => collectStrings(value, out));
+  }
+}
+
+function getByPath(obj, path) {
+  let current = obj;
+  for (const segment of path) {
+    if (!current || typeof current !== 'object' || !(segment in current)) {
+      return undefined;
+    }
+    current = current[segment];
+  }
+  return current;
+}
+
+function normalizeTextList(value) {
+  const strings = [];
+  collectStrings(value, strings);
+  return strings;
+}
+
+function getStepRoundInfo(entries) {
+  for (const entry of entries) {
+    if (entry.component_name !== 'game_master') continue;
+    const resolved = resolveRefs(entry.deduplicated_data || {});
+    const strings = [];
+    collectStrings(resolved, strings);
+    for (const text of strings) {
+      const roundMatch = /Round:\\s*(\\d+)/.exec(text);
+      if (!roundMatch) continue;
+      const pairMatch = /Active pair:\\s*([^\\n]+)/.exec(text);
+      return {
+        round: roundMatch[1],
+        pair: pairMatch ? pairMatch[1].trim() : ''
+      };
+    }
+  }
+  return null;
+}
+
+function extractEntityTrace(entry) {
+  if (entry.entry_type !== 'entity') return null;
+  const resolved = resolveRefs(entry.deduplicated_data || {});
+  const payload = resolved && resolved.value ? resolved.value : {};
+  if (!payload || typeof payload !== 'object') return null;
+
+  const observed = normalizeTextList(getByPath(payload, ['observation', 'Value']));
+
+  const thought = [];
+  [getByPath(payload, ['situation_perception', 'Summary']),
+   getByPath(payload, ['self_perception', 'Summary']),
+   getByPath(payload, ['action_reasoning', 'Summary'])].forEach(value => {
+    normalizeTextList(value).forEach(item => thought.push(item));
+  });
+
+  let action = '';
+  const actionCandidates = [
+    getByPath(payload, ['action_reasoning', 'State']),
+    getByPath(payload, ['__act__', 'Value']),
+  ];
+  for (const candidate of actionCandidates) {
+    const values = normalizeTextList(candidate);
+    if (values.length > 0) {
+      action = values[values.length - 1];
+      break;
+    }
+  }
+  if (!action && entry.summary) {
+    const marker = entry.entity_name + ':';
+    const idx = entry.summary.indexOf(marker);
+    if (idx >= 0) action = entry.summary.slice(idx + marker.length).trim();
+  }
+
+  return {
+    observed: observed.slice(-4),
+    thought: thought.slice(-4),
+    action: action,
+  };
+}
+
+function renderTraceCard(entityName, trace) {
+  if (!trace) return '';
+  let html = '<div class="trace-card">';
+  html += '<div class="trace-title">Negotiation Trace: ' + escapeHtml(entityName) + '</div>';
+  html += '<div class="trace-grid">';
+
+  const observedRows = trace.observed && trace.observed.length
+    ? trace.observed.map(item => '<div class="trace-item">' + escapeHtml(item) + '</div>').join('')
+    : '<div class="trace-empty">No explicit observation captured.</div>';
+  html += '<div class="trace-block"><div class="trace-label">Observed</div>' + observedRows + '</div>';
+
+  const thoughtRows = trace.thought && trace.thought.length
+    ? trace.thought.map(item => '<div class="trace-item">' + escapeHtml(item) + '</div>').join('')
+    : '<div class="trace-empty">No explicit thought summary captured.</div>';
+  html += '<div class="trace-block"><div class="trace-label">Thought</div>' + thoughtRows + '</div>';
+
+  const actionRow = trace.action
+    ? '<div class="trace-item">' + escapeHtml(trace.action) + '</div>'
+    : '<div class="trace-empty">No action captured.</div>';
+  html += '<div class="trace-block"><div class="trace-label">Action Chosen</div>' + actionRow + '</div>';
+
+  html += '</div></div>';
+  return html;
+}
+
 function renderGMLog() {
   const container = document.getElementById('gm_log');
   let html = '';
@@ -857,6 +1002,14 @@ function renderGMLog() {
     
     html += '<details class="step-details" open>';
     html += '<summary><b>' + escapeHtml(stepSummary) + '</b></summary>';
+    const roundInfo = getStepRoundInfo(entries);
+    if (roundInfo) {
+      let roundText = 'Round ' + roundInfo.round;
+      if (roundInfo.pair) {
+        roundText += ' | Active Pair: ' + roundInfo.pair;
+      }
+      html += '<div class="round-banner">' + escapeHtml(roundText) + '</div>';
+    }
 
     entries.forEach(entry => {
       // Create a label for this entry (like "Entity [name]" or component name)
@@ -867,6 +1020,9 @@ function renderGMLog() {
       
       // If entry has deduplicated_data, render it as collapsible content
       if (entry.deduplicated_data && Object.keys(entry.deduplicated_data).length > 0) {
+        if (entry.entry_type === 'entity') {
+          html += renderTraceCard(entry.entity_name, extractEntityTrace(entry));
+        }
         html += '<details>';
         html += '<summary>' + escapeHtml(entryLabel) + '</summary>';
         // Render all the data in deduplicated_data recursively

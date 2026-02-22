@@ -23,40 +23,40 @@ class FlatType(StrEnum):
 class MakeOffer(BaseModel):
     type: Literal['MAKE_OFFER']
     offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the offer.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the offer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the offer to the other party, e.g. 'Based on recent transactions in the area, I believe this is a fair offer.'")
 
 class NormalAnswer(BaseModel):
     type: Literal['NORMAL_ANSWER']
-    answer_details: str = Field(..., description="Details of the buyer's/seller's answer to inquiries or questions.")
+    answer_details: str = Field(..., description="Details of the buyer's/seller's answer to inquiries or questions. Note that these details SHOULD NOT include private justifications, but are optional texts that the agent can use to explain their answer to the other party, e.g. 'I am asking this question because I want to understand your flexibility on the price.'")
 
 # Buyer-specific actions when no offer is on the table
 class BuyerInquiry(BaseModel):
     type: Literal['INQUIRE_BUYER']
-    inquiry_details: str = Field(..., description="Details of the buyer's inquiry about the flat's conditions/details.")
+    inquiry_details: str = Field(..., description="Details of the buyer's inquiry about the flat's conditions/details. Note that these details SHOULD NOT include private justifications, but are optional texts that the buyer can use to explain their inquiry to the seller, e.g. 'I am asking about the flat's conditions because I want to understand if it is worth the price you are asking.'")
 
 class BuyerQuestion(BaseModel):
     type: Literal['QUESTION_BUYER']
-    question_details: str = Field(..., description="Specific question posed by the buyer regarding flexibility and urgency of the negotiation.")
+    question_details: str = Field(..., description="Specific question posed by the buyer regarding flexibility and urgency of the negotiation. Note that these details SHOULD NOT include private justifications, but are optional texts that the buyer can use to explain their question to the seller, e.g. 'I am asking about your urgency because I want to understand if you are willing to negotiate on the price.'")
 
 # Seller-specific actions when no offer is on the table
 class SellerInquiry(BaseModel):
     type: Literal['INQUIRE_SELLER']
-    inquiry_details: str = Field(..., description="Details of the seller's inquiry about the buyer's preferences or constraints.")
+    inquiry_details: str = Field(..., description="Details of the seller's inquiry about the buyer's preferences or constraints. Note that these details SHOULD NOT include private justifications, but are optional texts that the seller can use to explain their inquiry to the buyer, e.g. 'I am asking about your preferences because I want to understand what is important to you in this negotiation.'")
 
 # Decisions (actions) that can be taken by buyers and sellers when there is an active offer on the table.
 class AcceptOffer(BaseModel):
     type: Literal['ACCEPT_OFFER']
     price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the acceptance of the offer.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the acceptance of the offer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the acceptance to the other party, e.g. 'I accept this offer because it is fair and reasonable.'  ")
 
 class RejectOffer(BaseModel):
     type: Literal['REJECT_OFFER']
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the rejection of the offer.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the rejection of the offer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the rejection to the other party, e.g. 'I reject this offer because it is too low compared to recent transactions in the area.'")
 
 class MakeCounteroffer(BaseModel):
     type: Literal['MAKE_COUNTEROFFER']
     counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the counteroffer.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the counteroffer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the counteroffer to the other party, e.g. 'I make this counteroffer because it is more in line with recent transactions in the area.'")
 
 
 # Union types for buyer and seller actions with discriminators for parsing
