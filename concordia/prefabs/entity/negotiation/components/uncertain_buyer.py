@@ -381,8 +381,11 @@ class UncertainBuyer(entity_component.ContextComponent):
 
         response = self._model.sample_text(prompt, json_schema=UpdateOwnBeliefInfo.model_json_schema())
 
-        # Load JSON response
-        info_update = UpdateOwnBeliefInfo.model_validate_json(response)
+        # Ignore malformed model output so one bad response does not crash the turn.
+        try:
+            info_update = UpdateOwnBeliefInfo.model_validate_json(response)
+        except ValidationError:
+            return
         if info_update.reservation_info:
             self._beliefs['own_reservation'].update_with_evidence(
                 info_update.reservation_info.estimate,
@@ -415,8 +418,11 @@ class UncertainBuyer(entity_component.ContextComponent):
 
         response = self._model.sample_text(prompt, json_schema=UpdateOpposingBeliefInfo.model_json_schema())
 
-        # Load JSON response
-        info_update = UpdateOpposingBeliefInfo.model_validate_json(response)
+        # Ignore malformed model output so one bad response does not crash the turn.
+        try:
+            info_update = UpdateOpposingBeliefInfo.model_validate_json(response)
+        except ValidationError:
+            return
         if info_update.budget_info:
             self._beliefs['counterpart_reservation'].update_with_evidence(
                 info_update.budget_info.estimate,
