@@ -399,8 +399,6 @@ class HDBStructuredActComponent(
         allowed_types: Sequence[str] = (),
     ) -> str:
         """Generate a repaired structured action under current constraints."""
-        prompt = interactive_document.InteractiveDocument(self._model)
-        prompt.statement(self._context_for_action(contexts) + "\n")
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
         allowed_hint = (
             f"\nAllowed action types: {', '.join(allowed_types)}."
@@ -413,28 +411,54 @@ class HDBStructuredActComponent(
             if "WALK_AWAY" in allowed_set
             else ""
         )
-        generated = prompt.structured_question(
-            question=(
-                f"{call_to_action}{allowed_hint}\n"
-                "Rules:\n"
-                "- Return exactly one executable action JSON object, not advice about what to say.\n"
-                "- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER "
-                "or MAKE_COUNTEROFFER.\n"
-                "- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n"
-                "- If your reasoning says you accept, the action type must be ACCEPT_OFFER.\n"
-                "- If your reasoning says you reject, the action type must be REJECT_OFFER.\n"
-                "- If your reasoning proposes a new price, the action type must be MAKE_COUNTEROFFER (or MAKE_OFFER when no active offer exists).\n"
-                f"{walk_away_rule}"
-                "Return exactly one JSON object matching the expected schema."
-            ),
-            output_schema=self._schema_for_turn(has_active_offer),
-            max_tokens=2200,
-            terminators=(),
+        offer_intent_non_offer_error = (
+            "Detected offer/counteroffer language inside a non-offer action."
         )
-        return self._validate_action_for_turn(
-            generated,
-            has_active_offer=has_active_offer,
-            allowed_types=allowed_types,
+        retry_reason = ""
+        for attempt in range(3):
+            prompt = interactive_document.InteractiveDocument(self._model)
+            prompt.statement(self._context_for_action(contexts) + "\n")
+            if retry_reason:
+                prompt.statement(
+                    "Previous output was invalid. "
+                    f"{retry_reason} "
+                    "Regenerate with a valid executable action JSON.\n"
+                )
+            generated = prompt.structured_question(
+                question=(
+                    f"{call_to_action}{allowed_hint}\n"
+                    "Rules:\n"
+                    "- Return exactly one executable action JSON object, not advice about what to say.\n"
+                    "- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER "
+                    "or MAKE_COUNTEROFFER.\n"
+                    "- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n"
+                    "- If your reasoning says you accept, the action type must be ACCEPT_OFFER.\n"
+                    "- If your reasoning says you reject, the action type must be REJECT_OFFER.\n"
+                    "- If your reasoning proposes a new price, the action type must be MAKE_COUNTEROFFER (or MAKE_OFFER when no active offer exists).\n"
+                    f"{walk_away_rule}"
+                    "Return exactly one JSON object matching the expected schema."
+                ),
+                output_schema=self._schema_for_turn(has_active_offer),
+                max_tokens=2200,
+                terminators=(),
+            )
+            try:
+                return self._validate_action_for_turn(
+                    generated,
+                    has_active_offer=has_active_offer,
+                    allowed_types=allowed_types,
+                )
+            except ValueError as error:
+                retry_reason = str(error).strip()
+                if (
+                    offer_intent_non_offer_error in retry_reason
+                    and attempt < 2
+                ):
+                    continue
+                raise
+
+        raise ValueError(
+            "Failed to regenerate a valid structured action after repeated attempts."
         )
 
     @staticmethod
