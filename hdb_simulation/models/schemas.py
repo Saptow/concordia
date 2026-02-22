@@ -58,14 +58,18 @@ class MakeCounteroffer(BaseModel):
     counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
     reasoning: Optional[str] = Field(None, description="Optional reasoning behind the counteroffer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the counteroffer to the other party, e.g. 'I make this counteroffer because it is more in line with recent transactions in the area.'")
 
+class BuyerWalkAway(BaseModel):
+    type: Literal['WALK_AWAY']
+    reasoning: Optional[str] = Field(None, description="Optional explanation that the buyer is ending this negotiation without agreement.")
+
 
 # Union types for buyer and seller actions with discriminators for parsing
 BuyerNonOfferActionTypes=Annotated[
-    Union[MakeOffer,BuyerInquiry, BuyerQuestion, NormalAnswer],
+    Union[MakeOffer,BuyerInquiry, BuyerQuestion, NormalAnswer, BuyerWalkAway],
     Field(discriminator='type')
 ]
 BuyerOfferActionTypes=Annotated[
-    Union[AcceptOffer, RejectOffer, MakeCounteroffer],
+    Union[AcceptOffer, RejectOffer, MakeCounteroffer, BuyerWalkAway],
     Field(discriminator='type')
 ]
 class BuyerNonOfferActions(RootModel[BuyerNonOfferActionTypes]):
@@ -98,6 +102,7 @@ BuyerActionTypes = Annotated[
         AcceptOffer,
         RejectOffer,
         MakeCounteroffer,
+        BuyerWalkAway,
     ],
     Field(discriminator='type')
 ]
@@ -126,11 +131,13 @@ BUYER_NON_OFFER_ACTIONS = (
     'INQUIRE_BUYER',
     'QUESTION_BUYER',
     'NORMAL_ANSWER',
+    'WALK_AWAY',
 )
 BUYER_OFFER_ACTIONS = (
     'ACCEPT_OFFER',
     'REJECT_OFFER',
     'MAKE_COUNTEROFFER',
+    'WALK_AWAY',
 )
 SELLER_NON_OFFER_ACTIONS = (
     'MAKE_OFFER',
@@ -195,5 +202,4 @@ class Flat(BaseModel):
 
 
     
-
 

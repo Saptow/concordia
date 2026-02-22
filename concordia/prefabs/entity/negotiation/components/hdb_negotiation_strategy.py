@@ -275,12 +275,21 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             self._state.current_position = self._uncertainty_context._own_reservation
             self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
 
-        # Decide whether to walk away
+        # Buyer-specific walk-away guidance.
+        if self._role != RoleType.BUYER:
+            return ""
+
         walk_away = self.should_walk_away()
         if walk_away:
-            return "STRATEGY GUIDANCE: Walk away from the negotiation due to exceeded patience horizon."
+            return (
+                "STRATEGY GUIDANCE (BUYER): Patience horizon exceeded. "
+                "Choose WALK_AWAY now to end this negotiation without agreement."
+            )
         else:
-            return "STRATEGY GUIDANCE: DO NOT walk away yet; continue any action other than walking away."
+            return (
+                "STRATEGY GUIDANCE (BUYER): DO NOT choose WALK_AWAY yet; "
+                "continue negotiating with other allowed actions."
+            )
 
     def post_act(self, action_attempt: str) -> str:
         """Update strategy state after each action."""
@@ -312,6 +321,9 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         - AVG_NEGOTIATION_LENGTH (baseline)
         - urgency level (0..1), higher => fewer tolerated rounds
         """
+        if self._role != RoleType.BUYER:
+            return False
+
         horizon = self._max_rounds_from_urgency(self._urgency_level)
 
         # Walk away when we've hit or exceeded the horizon
@@ -352,6 +364,5 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 self._state.rounds_elapsed = int(value)
             elif key == 'UrgencyLevel':
                 self._urgency_level = float(value)
-
 
 

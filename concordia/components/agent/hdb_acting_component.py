@@ -1,7 +1,7 @@
 import json
 import re
 from collections.abc import Sequence
-from typing import Any, override
+from typing import Any, Literal, override
 
 from pydantic import BaseModel, RootModel
 
@@ -10,6 +10,13 @@ from concordia.hdb_simulation.models import schemas as hdb_schemas
 from concordia.language_model import language_model
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
+
+
+class ReasoningIntentJudgement(BaseModel):
+    """LLM-as-a-judge output for action/intent consistency checks."""
+
+    intent: Literal["ACCEPT", "REJECT", "COUNTER_OR_OFFER", "OTHER"]
+    explanation: str
 
 
 class HDBStructuredActComponent(
@@ -197,6 +204,92 @@ class HDBStructuredActComponent(
             return text
         return text[:limit].rstrip()
 
+    @staticmethod
+    def _expected_type_from_intent(
+        intent: str,
+        has_active_offer: bool | None,
+    ) -> str | None:
+        """Map judged semantic intent to canonical action type."""
+        normalized = str(intent).strip().upper()
+        if normalized == "ACCEPT":
+            return "ACCEPT_OFFER"
+        if normalized == "REJECT":
+            return "REJECT_OFFER"
+        if normalized == "COUNTER_OR_OFFER":
+            if has_active_offer is True:
+                return "MAKE_COUNTEROFFER"
+            if has_active_offer is False:
+                return "MAKE_OFFER"
+        return None
+
+    def _judge_reasoning_intent(
+        self,
+        payload: dict[str, Any],
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str],
+    ) -> None:
+        """Use an LLM judge to ensure reasoning semantics match action type."""
+        action_type = str(payload.get("type", "")).strip().upper()
+        reasoning = str(payload.get("reasoning", "")).strip()
+        if not action_type or not reasoning:
+            return
+
+        # Only enforce for offer-state decision actions where confusion is costly.
+        if action_type not in {"ACCEPT_OFFER", "REJECT_OFFER", "MAKE_COUNTEROFFER", "MAKE_OFFER"}:
+            return
+
+        prompt = interactive_document.InteractiveDocument(self._model)
+        prompt.statement(
+            "You are a strict negotiation-action consistency judge.\n"
+            "Decide the semantic intent of the agent's reasoning text, independent of the provided action type.\n"
+            "Return one intent from: ACCEPT, REJECT, COUNTER_OR_OFFER, OTHER.\n"
+            "ACCEPT means the text indicates agreeing to the current offer.\n"
+            "REJECT means the text indicates declining the current offer.\n"
+            "COUNTER_OR_OFFER means the text indicates proposing a different price.\n"
+        )
+        prompt.statement(
+            f"Current action type: {action_type}\n"
+            f"Has active offer: {has_active_offer}\n"
+            f"Allowed action types this turn: {', '.join(str(x) for x in allowed_types) or '(unknown)'}\n"
+            f"Reasoning text:\n{reasoning}\n"
+        )
+        verdict = prompt.structured_question(
+            question=(
+                "What is the semantic intent category of the reasoning text? "
+                "Answer only with the schema."
+            ),
+            output_schema=ReasoningIntentJudgement,
+            max_tokens=300,
+            terminators=(),
+        )
+        if isinstance(verdict, (BaseModel, RootModel)):
+            verdict_payload = verdict.model_dump()
+        elif isinstance(verdict, dict):
+            verdict_payload = verdict
+        elif isinstance(verdict, str):
+            verdict_payload = json.loads(self._extract_json(verdict))
+        else:
+            verdict_payload = {}
+
+        expected_type = self._expected_type_from_intent(
+            verdict_payload.get("intent", "OTHER"),
+            has_active_offer=has_active_offer,
+        )
+        if not expected_type:
+            return
+
+        allowed = {str(x).strip().upper() for x in allowed_types}
+        if allowed and expected_type not in allowed:
+            return
+
+        if action_type != expected_type:
+            explanation = str(verdict_payload.get("explanation", "")).strip()
+            raise ValueError(
+                "Reasoning/action mismatch detected by LLM judge. "
+                f"Action type={action_type}, judged_intent_requires={expected_type}. "
+                f"Judge explanation: {explanation}"
+            )
+
     def _preferred_offer_action_type(
         self,
         allowed_types: Sequence[str],
@@ -283,6 +376,12 @@ class HDBStructuredActComponent(
             payload = json.loads(canonical)
             action_type = str(payload.get("type", "")).strip().upper()
 
+        self._judge_reasoning_intent(
+            payload=payload,
+            has_active_offer=has_active_offer,
+            allowed_types=allowed_types,
+        )
+
         if not allowed_types:
             return canonical
         allowed = {str(x).strip().upper() for x in allowed_types}
@@ -308,6 +407,12 @@ class HDBStructuredActComponent(
             if allowed_types
             else ""
         )
+        allowed_set = {str(x).strip().upper() for x in allowed_types}
+        walk_away_rule = (
+            "- If you want to terminate this negotiation without agreement, use WALK_AWAY.\n"
+            if "WALK_AWAY" in allowed_set
+            else ""
+        )
         generated = prompt.structured_question(
             question=(
                 f"{call_to_action}{allowed_hint}\n"
@@ -316,6 +421,10 @@ class HDBStructuredActComponent(
                 "- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER "
                 "or MAKE_COUNTEROFFER.\n"
                 "- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n"
+                "- If your reasoning says you accept, the action type must be ACCEPT_OFFER.\n"
+                "- If your reasoning says you reject, the action type must be REJECT_OFFER.\n"
+                "- If your reasoning proposes a new price, the action type must be MAKE_COUNTEROFFER (or MAKE_OFFER when no active offer exists).\n"
+                f"{walk_away_rule}"
                 "Return exactly one JSON object matching the expected schema."
             ),
             output_schema=self._schema_for_turn(has_active_offer),

@@ -185,7 +185,9 @@ class HDBNegotiationGameMaster(prefab_lib.Prefab):
     # Keep termination explicit and controlled by outer loop max_steps or
     # external conditions.
     terminate_key = gm_components.terminate.DEFAULT_TERMINATE_COMPONENT_KEY
-    terminate_component = gm_components.terminate.NeverTerminate()
+    terminate_component = hdb_negotiation_state.TerminateWhenAllPairsClosed(
+        offer_tracker_component_key=offer_state_key,
+    )
 
     components_of_game_master = {
         instructions_key: instructions,

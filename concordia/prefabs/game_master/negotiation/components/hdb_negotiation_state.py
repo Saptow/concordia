@@ -60,6 +60,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     self._pair_queue = self._build_pair_queue(negotiation_pairs)
     # Pair-specific round counters. Each pair starts at round 1.
     self._pair_round_numbers = [1 for _ in self._pair_queue]
+    self._closed_pair_indices: set[int] = set()
 
     # Global scheduler cycle counter retained for compatibility/debugging.
     self._round_number = 1
@@ -126,19 +127,60 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     active_pair = self._pair_queue[self._pair_index]
     return active_pair[self._turn_in_pair]
 
+  def _pair_index_for_player_id(self, player_id: str) -> int | None:
+    for idx, pair in enumerate(self._pair_queue):
+      if player_id in pair:
+        return idx
+    return None
+
+  def _ensure_open_pair_cursor(self) -> None:
+    if not self._pair_queue or self.all_pairs_closed():
+      return
+    if self._pair_index not in self._closed_pair_indices:
+      return
+    num_pairs = len(self._pair_queue)
+    next_idx = self._pair_index
+    for _ in range(num_pairs):
+      next_idx = (next_idx + 1) % num_pairs
+      if next_idx not in self._closed_pair_indices:
+        self._pair_index = next_idx
+        self._turn_in_pair = 0
+        return
+
+  def close_pair_for_player(self, player_token: str) -> None:
+    """Mark the player's negotiation pair as closed (e.g., accepted offer)."""
+    try:
+      player_id = self._to_player_id(player_token)
+    except ValueError:
+      return
+    pair_index = self._pair_index_for_player_id(player_id)
+    if pair_index is None:
+      return
+    self._closed_pair_indices.add(pair_index)
+    self._ensure_open_pair_cursor()
+
+  def all_pairs_closed(self) -> bool:
+    return bool(self._pair_queue) and len(self._closed_pair_indices) >= len(self._pair_queue)
+
   def _advance(self) -> None:
+    if self.all_pairs_closed():
+      return
     self._total_turns += 1
     if self._turn_in_pair == 0:
       self._turn_in_pair = 1
+      if self._pair_index in self._closed_pair_indices:
+        self._ensure_open_pair_cursor()
       return
 
     completed_pair_index = self._pair_index
     self._turn_in_pair = 0
     self._pair_index += 1
-    self._pair_round_numbers[completed_pair_index] += 1
+    if completed_pair_index not in self._closed_pair_indices:
+      self._pair_round_numbers[completed_pair_index] += 1
     if self._pair_index >= len(self._pair_queue):
       self._pair_index = 0
       self._round_number += 1
+    self._ensure_open_pair_cursor()
 
   def get_pair_queue_names(self) -> list[tuple[str, str]]:
     return [
@@ -147,6 +189,19 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     ]
 
   def get_scheduler_snapshot(self) -> dict[str, int | str]:
+    if self.all_pairs_closed():
+      max_rounds = self._max_rounds if self._max_rounds is not None else 0
+      return {
+          'round_number': 0,
+          'global_round_number': self._round_number,
+          'pair_index': -1,
+          'turn_in_pair': 0,
+          'next_actor_name': '',
+          'active_pair_first_name': '',
+          'active_pair_second_name': '',
+          'total_turns': self._total_turns,
+          'max_rounds': max_rounds,
+      }
     active_pair = self._pair_queue[self._pair_index]
     next_actor_id = self._peek_next_actor_id()
     pair_round_number = self._pair_round_numbers[self._pair_index]
@@ -168,6 +223,10 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
   def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
     if action_spec.output_type != entity_lib.OutputType.NEXT_ACTING:
       return ''
+    if self.all_pairs_closed():
+      self._currently_active_player = ''
+      return ''
+    self._ensure_open_pair_cursor()
 
     next_actor_id = self._peek_next_actor_id()
     self._currently_active_player = self._id_to_name[next_actor_id]
@@ -186,6 +245,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
         'total_turns': self._total_turns,
         'pair_queue': [list(pair) for pair in self._pair_queue],
         'pair_round_numbers': list(self._pair_round_numbers),
+        'closed_pair_indices': sorted(self._closed_pair_indices),
         'player_ids': list(self._player_ids),
         'max_rounds': self._max_rounds if self._max_rounds is not None else 0,
     }
@@ -213,6 +273,12 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
       self._pair_round_numbers = restored_pair_rounds[:expected]
     else:
       self._pair_round_numbers = [1 for _ in self._pair_queue]
+    closed_pair_indices_state = state.get('closed_pair_indices')
+    if closed_pair_indices_state:
+      self._closed_pair_indices = {int(x) for x in closed_pair_indices_state}  # type: ignore[index]
+    else:
+      self._closed_pair_indices = set()
+    self._ensure_open_pair_cursor()
 
     max_rounds = int(state.get('max_rounds', 0))
     self._max_rounds = max_rounds if max_rounds > 0 else None
@@ -235,6 +301,8 @@ class TurnOrderStateTracker(action_spec_ignored.ActionSpecIgnored):
     scheduler = self.get_entity().get_component(
         self._scheduler_component_key, type_=PairRoundRobinNextActing
     )
+    if scheduler.all_pairs_closed():
+      return 'All negotiation pairs are closed.'
     snapshot = scheduler.get_scheduler_snapshot()
 
     return (
@@ -271,6 +339,8 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
     self._pair_members: dict[str, tuple[str, str]] = {}
     self._pair_order: list[str] = []
     self._active_offers: dict[str, dict[str, object] | None] = {}
+    self._closed_pairs: set[str] = set()
+    self._closed_pair_outcomes: dict[str, str] = {}
 
   @staticmethod
   def _pair_key(first: str, second: str) -> str:
@@ -339,13 +409,34 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
       return
 
     if action_type in ('MAKE_OFFER', 'MAKE_COUNTEROFFER'):
+      if pair_key in self._closed_pairs:
+        return
       self._active_offers[pair_key] = {
           'offerer': actor,
           'action_type': action_type,
           'payload': action,
       }
-    elif action_type in ('ACCEPT_OFFER', 'REJECT_OFFER'):
+    elif action_type == 'REJECT_OFFER':
       self._active_offers[pair_key] = None
+    elif action_type == 'ACCEPT_OFFER':
+      self._active_offers[pair_key] = None
+      self._closed_pairs.add(pair_key)
+      self._closed_pair_outcomes[pair_key] = 'SUCCESS'
+      scheduler = self.get_entity().get_component(
+          self._scheduler_component_key, type_=PairRoundRobinNextActing
+      )
+      scheduler.close_pair_for_player(actor)
+    elif action_type == 'WALK_AWAY':
+      role = self._role_for_player(actor, pair_key)
+      if role != hdb_schemas.RoleType.BUYER:
+        return
+      self._active_offers[pair_key] = None
+      self._closed_pairs.add(pair_key)
+      self._closed_pair_outcomes[pair_key] = 'CLOSED_WITHOUT_SUCCESS'
+      scheduler = self.get_entity().get_component(
+          self._scheduler_component_key, type_=PairRoundRobinNextActing
+      )
+      scheduler.close_pair_for_player(actor)
 
   def has_active_offer_for_player(self, player_name: str) -> bool:
     self._ensure_initialized()
@@ -367,6 +458,16 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
       }
 
     role = self._role_for_player(player_name, pair_key)
+    if pair_key in self._closed_pairs:
+      first, second = self._pair_members[pair_key]
+      return {
+          'role': role.value,
+          'has_active_offer': False,
+          'allowed_action_types': [],
+          'pair': f'{first} <-> {second}',
+          'closed': True,
+          'close_outcome': self._closed_pair_outcomes.get(pair_key, 'CLOSED'),
+      }
     has_active_offer = self._active_offers.get(pair_key) is not None
     allowed_actions = hdb_schemas.get_allowed_action_types(role, has_active_offer)
     first, second = self._pair_members[pair_key]
@@ -375,6 +476,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
         'has_active_offer': has_active_offer,
         'allowed_action_types': list(allowed_actions),
         'pair': f'{first} <-> {second}',
+        'closed': False,
     }
 
   def get_pair_members_for_player(self, player_name: str) -> tuple[str, str] | None:
@@ -397,6 +499,9 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
     if not pair_key:
       return f'No pair found for active player: {active_player}'
     first, second = self._pair_members[pair_key]
+    if pair_key in self._closed_pairs:
+      outcome = self._closed_pair_outcomes.get(pair_key, 'CLOSED')
+      return f'{first} <-> {second}: {outcome}'
     active_offer = self._active_offers.get(pair_key)
     if active_offer:
       return (
@@ -405,6 +510,10 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
       )
     return f'{first} <-> {second}: NO_ACTIVE_OFFER'
 
+  def all_pairs_closed(self) -> bool:
+    self._ensure_initialized()
+    return bool(self._pair_order) and len(self._closed_pairs) >= len(self._pair_order)
+
   def get_state(self) -> entity_component.ComponentState:
     return {
         'scheduler_component_key': self._scheduler_component_key,
@@ -412,6 +521,8 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
         'pair_members': {k: list(v) for k, v in self._pair_members.items()},
         'pair_order': list(self._pair_order),
         'active_offers': dict(self._active_offers),
+        'closed_pairs': sorted(self._closed_pairs),
+        'closed_pair_outcomes': dict(self._closed_pair_outcomes),
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
@@ -429,6 +540,15 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
       self._pair_order = [str(x) for x in state['pair_order']]  # type: ignore[index]
     if 'active_offers' in state:
       self._active_offers = dict(state['active_offers'])  # type: ignore[arg-type]
+    if 'closed_pairs' in state:
+      self._closed_pairs = {str(x) for x in state['closed_pairs']}  # type: ignore[index]
+    if 'closed_pair_outcomes' in state:
+      self._closed_pair_outcomes = {
+          str(k): str(v)
+          for k, v in state['closed_pair_outcomes'].items()  # type: ignore[union-attr]
+      }
+    else:
+      self._closed_pair_outcomes = {}
 
 
 class FixedNextActionSpec(entity_component.ContextComponent):
@@ -504,6 +624,34 @@ class FixedNextActionSpec(entity_component.ContextComponent):
       self._choice_options = tuple(state['choice_options'])  # type: ignore[arg-type]
     if 'next_acting_component_key' in state:
       self._next_acting_component_key = str(state['next_acting_component_key'])
+    if 'offer_tracker_component_key' in state:
+      self._offer_tracker_component_key = str(state['offer_tracker_component_key'])
+
+
+class TerminateWhenAllPairsClosed(entity_component.ContextComponent):
+  """Terminates the simulation once all negotiation pairs are closed."""
+
+  def __init__(
+      self,
+      offer_tracker_component_key: str = 'pair_offer_state',
+  ):
+    super().__init__()
+    self._offer_tracker_component_key = offer_tracker_component_key
+
+  def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
+    if action_spec.output_type != entity_lib.OutputType.TERMINATE:
+      return ''
+    offer_tracker = self.get_entity().get_component(
+        self._offer_tracker_component_key, type_=PairActiveOfferTracker
+    )
+    return 'Yes' if offer_tracker.all_pairs_closed() else 'No'
+
+  def get_state(self) -> entity_component.ComponentState:
+    return {
+        'offer_tracker_component_key': self._offer_tracker_component_key,
+    }
+
+  def set_state(self, state: entity_component.ComponentState) -> None:
     if 'offer_tracker_component_key' in state:
       self._offer_tracker_component_key = str(state['offer_tracker_component_key'])
 

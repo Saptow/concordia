@@ -24,7 +24,7 @@ SELLER_DATA = {
         "name": "Xiao Li",
         "age": 45,
         "occupation": "Software Engineer",
-        "description": "Xiao Li is a tech-savvy individual looking to upgrade her living space. Not rushing to sell, but open to good offers.",
+        "description": "Xiao Li is upgrading her living space and prefers a smooth, timely sale. Open to reasonable counteroffers that can close soon.",
         "flat": Flat(
             flat_type="3-Room",
             address="Blk 16 Jurong East Singapore 090016",
@@ -39,15 +39,15 @@ SELLER_DATA = {
             spr_eligibility="True (Dec 2020)",
         ).model_dump(),
         "expectations": {
-            "min_price": 450000.0,
-            "max_price": 550000.0
+            "min_price": 500000.0,
+            "max_price": 535000.0
         },
     },
     "seller_002": {
         "name": "Lim Wei Han",
         "age": 52,
         "occupation": "Civil Engineer",
-        "description": "Owner of a well-kept flat, open to serious offers aligned with recent area transactions.",
+        "description": "Owner of a well-kept flat, motivated to conclude with a serious buyer and flexible within a realistic price band.",
         "flat": Flat(
             flat_type="4-Room",
             address="Blk 512 Tampines Central 7 Singapore 520512",
@@ -63,7 +63,7 @@ SELLER_DATA = {
             nearby_amenities=["MRT station", "Shopping mall", "Primary school"],
         ).model_dump(),
         "expectations": {
-            "min_price": 650000.0,
+            "min_price": 700000.0,
             "max_price": 730000.0
         },
     },
@@ -71,7 +71,7 @@ SELLER_DATA = {
         "name": "Goh Hui Jie",
         "age": 39,
         "occupation": "Nurse",
-        "description": "Motivated seller with a practical unit that requires only light touch-ups.",
+        "description": "Motivated seller with a practical unit that requires only light touch-ups and willing to settle quickly at a fair number.",
         "flat": Flat(
             flat_type="3-Room",
             address="Blk 301 Woodlands Street 31 Singapore 730301",
@@ -87,15 +87,15 @@ SELLER_DATA = {
             nearby_amenities=["Bus interchange", "Market", "Park"],
         ).model_dump(),
         "expectations": {
-            "min_price": 430000.0,
-            "max_price": 500000.0
+            "min_price": 460000.0,
+            "max_price": 495000.0
         },
     },
     "seller_004": {
         "name": "Rahimah Binte Salleh",
         "age": 50,
         "occupation": "HR Manager",
-        "description": "Selling a larger home after children moved out; values smooth and transparent deal execution.",
+        "description": "Selling a larger home after children moved out; values smooth and transparent deal execution and is open to practical offers.",
         "flat": Flat(
             flat_type="5-Room",
             address="Blk 118 Toa Payoh Lorong 1 Singapore 310118",
@@ -111,15 +111,15 @@ SELLER_DATA = {
             nearby_amenities=["MRT station", "Polyclinic", "Food centre"],
         ).model_dump(),
         "expectations": {
-            "min_price": 760000.0,
-            "max_price": 860000.0
+            "min_price": 810000.0,
+            "max_price": 855000.0
         },
     },
     "seller_005": {
         "name": "Chua Han Rong",
         "age": 44,
         "occupation": "Product Manager",
-        "description": "Flexible seller with a modern flat, prioritizing credible buyers and realistic timelines.",
+        "description": "Flexible seller with a modern flat, prioritizing credible buyers and realistic timelines and willing to close promptly.",
         "flat": Flat(
             flat_type="4-Room",
             address="Blk 274B Sengkang East Avenue Singapore 542274",
@@ -135,7 +135,7 @@ SELLER_DATA = {
             nearby_amenities=["LRT station", "Mall", "Community club"],
         ).model_dump(),
         "expectations": {
-            "min_price": 590000.0,
+            "min_price": 625000.0,
             "max_price": 660000.0
         },
     },
@@ -143,7 +143,7 @@ SELLER_DATA = {
         "name": "Anita Devi",
         "age": 56,
         "occupation": "Business Owner",
-        "description": "Owner of a premium executive flat, willing to negotiate with financially ready buyers.",
+        "description": "Owner of a premium executive flat, willing to negotiate with financially ready buyers and close if price is near expectations.",
         "flat": Flat(
             flat_type="Executive",
             address="Blk 9 Queenstown Close Singapore 140009",
@@ -159,8 +159,8 @@ SELLER_DATA = {
             nearby_amenities=["MRT station", "Hawker centre", "Hospital"],
         ).model_dump(),
         "expectations": {
-            "min_price": 900000.0,
-            "max_price": 1020000.0
+            "min_price": 955000.0,
+            "max_price": 1005000.0
         },
     },
 }

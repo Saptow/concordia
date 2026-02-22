@@ -26,10 +26,10 @@ BUYER_DATA = {
         "name": "Xiao Ming",
         "age": 32,
         "occupation": "Data Analyst",
-        "description": "Looking for a comfortable home close to amenities and public transport. Not rushing, but eager to find the right fit.",
+        "description": "Looking for a comfortable home close to amenities and public transport. Motivated to close soon and open to fair counteroffers for a smooth deal.",
         "budget": {
-            "min_price": 400000.0,
-            "max_price": 600000.0
+            "min_price": 490000.0,
+            "max_price": 545000.0
         },
         "preferences": {
             "flat_type": ["3-Room", "4-Room"],
@@ -41,10 +41,10 @@ BUYER_DATA = {
         "name": "Tan Mei Ling",
         "age": 29,
         "occupation": "Marketing Manager",
-        "description": "First-time buyer seeking a family-friendly estate with reliable transport links.",
+        "description": "First-time buyer seeking a family-friendly estate with reliable transport links and prepared to decide quickly if terms are reasonable.",
         "budget": {
-            "min_price": 520000.0,
-            "max_price": 780000.0
+            "min_price": 690000.0,
+            "max_price": 740000.0
         },
         "preferences": {
             "flat_type": ["4-Room", "5-Room"],
@@ -56,10 +56,10 @@ BUYER_DATA = {
         "name": "Arjun Kumar",
         "age": 35,
         "occupation": "Secondary School Teacher",
-        "description": "Looking for a practical flat with minimal renovation needed and easy commute.",
+        "description": "Looking for a practical HDB flat with minimal renovation needed and easy commute. Ready to make a practical offer and settle if value is fair.",
         "budget": {
-            "min_price": 380000.0,
-            "max_price": 520000.0
+            "min_price": 455000.0,
+            "max_price": 505000.0
         },
         "preferences": {
             "flat_type": ["3-Room"],
@@ -71,10 +71,10 @@ BUYER_DATA = {
         "name": "Nur Aisyah",
         "age": 41,
         "occupation": "Operations Lead",
-        "description": "Upgrading for a larger household and values central access to schools and amenities.",
+        "description": "Upgrading their HDB flat because of a larger household and values central access to schools and amenities. Prefers to conclude negotiations in the near term.",
         "budget": {
-            "min_price": 600000.0,
-            "max_price": 920000.0
+            "min_price": 805000.0,
+            "max_price": 875000.0
         },
         "preferences": {
             "flat_type": ["5-Room", "Executive"],
@@ -86,10 +86,10 @@ BUYER_DATA = {
         "name": "Daniel Ong",
         "age": 33,
         "occupation": "UX Designer",
-        "description": "Wants a move-in ready flat with modern finishes and access to green spaces.",
+        "description": "Wants a move-in ready flat with modern finishes and access to green spaces. Willing to compromise slightly on price to secure the right unit quickly.",
         "budget": {
-            "min_price": 450000.0,
-            "max_price": 700000.0
+            "min_price": 620000.0,
+            "max_price": 670000.0
         },
         "preferences": {
             "flat_type": ["4-Room"],
@@ -101,10 +101,10 @@ BUYER_DATA = {
         "name": "Priya Nair",
         "age": 46,
         "occupation": "Finance Director",
-        "description": "Seeking a spacious flat in a mature estate close to city-side workplaces.",
+        "description": "Seeking a spacious flat in a mature estate close to city-side workplaces. Financially prepared and open to realistic price alignment for a timely close.",
         "budget": {
-            "min_price": 700000.0,
-            "max_price": 1100000.0
+            "min_price": 950000.0,
+            "max_price": 1015000.0
         },
         "preferences": {
             "flat_type": ["Executive", "5-Room"],
