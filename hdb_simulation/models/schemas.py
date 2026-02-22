@@ -23,6 +23,7 @@ class FlatType(StrEnum):
 class MakeOffer(BaseModel):
     type: Literal['MAKE_OFFER']
     offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the offer.")
 
 class NormalAnswer(BaseModel):
     type: Literal['NORMAL_ANSWER']
@@ -46,6 +47,7 @@ class SellerInquiry(BaseModel):
 class AcceptOffer(BaseModel):
     type: Literal['ACCEPT_OFFER']
     price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the acceptance of the offer.")
 
 class RejectOffer(BaseModel):
     type: Literal['REJECT_OFFER']

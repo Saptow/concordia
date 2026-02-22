@@ -194,7 +194,14 @@ class Entity(prefab_lib.Prefab):
         question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
             model=model,
             pre_act_label=f'Next action',
-            question=f'Given the negotiation context, what should {agent_name} do?',
+            question=(
+                f'Given the negotiation context, what should {agent_name} do?\n'
+                'Rules:\n'
+                '- Return exactly one executable action JSON object, not advice about what to say.\n'
+                '- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER or MAKE_COUNTEROFFER.\n'
+                '- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n'
+                '- Keep fields concise and action-oriented.'
+            ),
             answer_prefix=f'',
             add_to_memory=False,
             memory_tag='[action reasoning]',

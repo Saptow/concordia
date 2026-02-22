@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Sequence
 from typing import Any, override
 
@@ -135,6 +136,118 @@ class HDBStructuredActComponent(
             return hdb_schemas.SellerActions
         return hdb_schemas.get_action_model(self._role, has_active_offer)
 
+    def _textual_non_offer_action_types(self) -> set[str]:
+        """Return non-offer action types that carry free-form prose fields."""
+        if self._role == hdb_schemas.RoleType.BUYER:
+            return {"QUESTION_BUYER", "INQUIRE_BUYER", "NORMAL_ANSWER"}
+        return {"INQUIRE_SELLER", "NORMAL_ANSWER"}
+
+    @staticmethod
+    def _collect_text_fields(payload: dict[str, Any]) -> str:
+        """Join text-bearing fields used by non-offer actions."""
+        keys = ("question_details", "inquiry_details", "answer_details", "reasoning")
+        chunks = [str(payload.get(k, "")).strip() for k in keys if str(payload.get(k, "")).strip()]
+        return "\n".join(chunks)
+
+    @staticmethod
+    def _contains_offer_intent(text: str) -> bool:
+        """Heuristic for prose that describes a price proposal/negotiation move."""
+        if not text:
+            return False
+        has_price = bool(
+            re.search(r"\$\s*\d[\d,]*(?:\.\d+)?", text)
+            or re.search(r"\b\d{5,}(?:\.\d+)?\b", text)
+        )
+        has_offer_phrase = bool(
+            re.search(
+                r"\b(offer|counteroffer|counter-offer|counter offer|price|meet you|meet me|"
+                r"willing to|accept|reject|settle|finalize)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        return has_price and has_offer_phrase
+
+    @staticmethod
+    def _extract_single_offer_price(text: str) -> float | None:
+        """Extract one unambiguous candidate offer price from text."""
+        matches: list[float] = []
+        for match in re.finditer(
+            r"\$?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{5,}(?:\.\d+)?)",
+            text,
+        ):
+            raw = match.group(1).replace(",", "")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if value >= 1000:
+                matches.append(value)
+        unique_prices: list[float] = []
+        for value in matches:
+            if value not in unique_prices:
+                unique_prices.append(value)
+        if len(unique_prices) == 1:
+            return unique_prices[0]
+        return None
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 1000) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip()
+
+    def _preferred_offer_action_type(
+        self,
+        allowed_types: Sequence[str],
+        has_active_offer: bool | None,
+    ) -> str | None:
+        """Choose the canonical offer action type for this turn."""
+        allowed = {str(x).strip().upper() for x in allowed_types}
+        if "MAKE_COUNTEROFFER" in allowed:
+            return "MAKE_COUNTEROFFER"
+        if "MAKE_OFFER" in allowed:
+            return "MAKE_OFFER"
+        if not allowed:
+            if has_active_offer is True:
+                return "MAKE_COUNTEROFFER"
+            if has_active_offer is False:
+                return "MAKE_OFFER"
+        return None
+
+    def _coerce_offer_like_payload(
+        self,
+        payload: dict[str, Any],
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str],
+    ) -> dict[str, Any] | None:
+        """Convert prose-heavy non-offer output into canonical offer JSON when safe."""
+        details_text = self._collect_text_fields(payload)
+        offer_type = self._preferred_offer_action_type(
+            allowed_types=allowed_types,
+            has_active_offer=has_active_offer,
+        )
+        if not offer_type:
+            return None
+        price = self._extract_single_offer_price(details_text)
+        if price is None:
+            return None
+        if offer_type == "MAKE_COUNTEROFFER":
+            coerced: dict[str, Any] = {
+                "type": "MAKE_COUNTEROFFER",
+                "counteroffer_price": price,
+            }
+            if details_text:
+                coerced["reasoning"] = self._truncate_text(details_text)
+            return coerced
+        coerced: dict[str, Any] = {
+            "type": "MAKE_OFFER",
+            "offer_price": price,
+        }
+        if details_text:
+            coerced["reasoning"] = self._truncate_text(details_text)
+        return coerced
+
     def _validate_action_for_turn(
         self,
         raw: Any,
@@ -146,10 +259,32 @@ class HDBStructuredActComponent(
         json_str = self._extract_json(normalized)
         validated = self._schema_for_turn(has_active_offer).model_validate_json(json_str)
         canonical = validated.model_dump_json()
-        if not allowed_types:
-            return canonical
         payload = json.loads(canonical)
         action_type = str(payload.get("type", "")).strip().upper()
+        details_text = self._collect_text_fields(payload)
+
+        # Prevent advice-like prose with embedded prices from passing as non-offer actions.
+        if (
+            action_type in self._textual_non_offer_action_types()
+            and self._contains_offer_intent(details_text)
+        ):
+            coerced = self._coerce_offer_like_payload(
+                payload=payload,
+                has_active_offer=has_active_offer,
+                allowed_types=allowed_types,
+            )
+            if coerced is None:
+                raise ValueError(
+                    "Detected offer/counteroffer language inside a non-offer action. "
+                    "Emit MAKE_OFFER or MAKE_COUNTEROFFER with a numeric price field."
+                )
+            validated = self._schema_for_turn(has_active_offer).model_validate(coerced)
+            canonical = validated.model_dump_json()
+            payload = json.loads(canonical)
+            action_type = str(payload.get("type", "")).strip().upper()
+
+        if not allowed_types:
+            return canonical
         allowed = {str(x).strip().upper() for x in allowed_types}
         if action_type not in allowed:
             raise ValueError(
@@ -176,6 +311,11 @@ class HDBStructuredActComponent(
         generated = prompt.structured_question(
             question=(
                 f"{call_to_action}{allowed_hint}\n"
+                "Rules:\n"
+                "- Return exactly one executable action JSON object, not advice about what to say.\n"
+                "- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER "
+                "or MAKE_COUNTEROFFER.\n"
+                "- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n"
                 "Return exactly one JSON object matching the expected schema."
             ),
             output_schema=self._schema_for_turn(has_active_offer),
