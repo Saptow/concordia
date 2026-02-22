@@ -203,6 +203,67 @@ class Sequential(engine_lib.Engine):
       )
     return game_masters_by_name[next_game_master_name]
 
+  def _pair_round_snapshot(
+      self, game_master: entity_lib.Entity
+  ) -> tuple[list[tuple[str, str]], list[int]] | None:
+    """Best-effort snapshot of pair labels and pair-local round numbers."""
+    if not hasattr(game_master, 'get_component'):
+      return None
+    try:
+      scheduler = game_master.get_component(
+          next_acting_components.DEFAULT_NEXT_ACTING_COMPONENT_KEY
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+    if not hasattr(scheduler, 'get_state'):
+      return None
+    try:
+      state = scheduler.get_state()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+    pair_round_numbers = state.get('pair_round_numbers')
+    pair_queue = state.get('pair_queue')
+    if not isinstance(pair_round_numbers, list) or not isinstance(pair_queue, list):
+      return None
+
+    pairs: list[tuple[str, str]] = []
+    for pair in pair_queue:
+      if isinstance(pair, (list, tuple)) and len(pair) == 2:
+        pairs.append((str(pair[0]), str(pair[1])))
+      else:
+        pairs.append(('<unknown>', '<unknown>'))
+
+    rounds: list[int] = []
+    for value in pair_round_numbers:
+      try:
+        rounds.append(int(value))
+      except (TypeError, ValueError):
+        rounds.append(0)
+
+    return pairs, rounds
+
+  def _global_round_snapshot(self, game_master: entity_lib.Entity) -> int | None:
+    """Best-effort snapshot of scheduler global round number."""
+    if not hasattr(game_master, 'get_component'):
+      return None
+    try:
+      scheduler = game_master.get_component(
+          next_acting_components.DEFAULT_NEXT_ACTING_COMPONENT_KEY
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+    if not hasattr(scheduler, 'get_state'):
+      return None
+    try:
+      state = scheduler.get_state()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+    round_number = state.get('round_number')
+    try:
+      return int(round_number)
+    except (TypeError, ValueError):
+      return None
+
   def run_loop(
       self,
       game_masters: Sequence[entity_lib.Entity | entity_lib.EntityWithLogging],
@@ -220,6 +281,17 @@ class Sequential(engine_lib.Engine):
     log_entry = _get_empty_log_entry()
     steps = 0
     game_master = game_masters[0]
+    global_round_by_game_master: dict[str, int] = {}
+    pair_rounds_by_game_master: dict[str, list[int]] = {}
+    if verbose:
+      for gm in game_masters:
+        round_number = self._global_round_snapshot(gm)
+        if round_number is not None:
+          global_round_by_game_master[gm.name] = round_number
+        pair_snapshot = self._pair_round_snapshot(gm)
+        if pair_snapshot is not None:
+          _, rounds = pair_snapshot
+          pair_rounds_by_game_master[gm.name] = list(rounds)
     if premise:
       premise = f'{EVENT_TAG} {premise}'
       game_master.observe(premise)
@@ -242,14 +314,17 @@ class Sequential(engine_lib.Engine):
               game_master.get_last_log())
         # Only observe if the observation is not an empty or whitespace string
         if observation and observation.strip():
+          tagged_observation = observation.strip()
+          if not tagged_observation.startswith('[OBSERVED]'):
+            tagged_observation = f'[OBSERVED] {tagged_observation}'
           if verbose:
             print(
                 termcolor.colored(
-                    f'Entity {entity.name} observed: {observation}',
+                    f'Entity {entity.name} observed: {tagged_observation}',
                     _PRINT_COLOR,
                 )
             )
-          entity.observe(observation)
+          entity.observe(tagged_observation)
 
       tasks = {
           entity.name: functools.partial(_entity_observation, entity)
@@ -259,6 +334,44 @@ class Sequential(engine_lib.Engine):
 
       next_entity, entity_spec_to_use = self.next_acting(
           game_master, entities, log_entry=log_entry, log=log)
+      if verbose:
+        current_round = self._global_round_snapshot(game_master)
+        previous_round = global_round_by_game_master.get(game_master.name)
+        if (
+            current_round is not None
+            and previous_round is not None
+            and current_round != previous_round
+        ):
+          print(termcolor.colored(f'Week: {current_round}', _PRINT_COLOR))
+        if current_round is not None:
+          global_round_by_game_master[game_master.name] = current_round
+
+        pair_snapshot = self._pair_round_snapshot(game_master)
+        if pair_snapshot is not None:
+          pairs, current_pair_rounds = pair_snapshot
+          previous_pair_rounds = pair_rounds_by_game_master.get(game_master.name)
+          if previous_pair_rounds is not None:
+            for idx, current_pair_round in enumerate(current_pair_rounds):
+              previous_pair_round = (
+                  previous_pair_rounds[idx]
+                  if idx < len(previous_pair_rounds)
+                  else current_pair_round
+              )
+              if current_pair_round != previous_pair_round:
+                if idx < len(pairs):
+                  pair_name = f'{pairs[idx][0]} <-> {pairs[idx][1]}'
+                else:
+                  pair_name = f'pair_index={idx}'
+                print(
+                    termcolor.colored(
+                        (
+                            'Pair round advanced for '
+                            f'{pair_name}: {previous_pair_round} -> {current_pair_round}'
+                        ),
+                        _PRINT_COLOR,
+                    )
+                )
+          pair_rounds_by_game_master[game_master.name] = list(current_pair_rounds)
 
       if entity_spec_to_use.output_type == entity_lib.OutputType.SKIP_THIS_STEP:
         # It is often useful to have a game master that does not allow players
@@ -279,10 +392,17 @@ class Sequential(engine_lib.Engine):
             f'Entity {next_entity.name} is next to act. They must respond '
             f' in the format: "{entity_spec_to_use}".', _PRINT_COLOR))
       raw_action = next_entity.act(entity_spec_to_use)
-      if next_entity.name in raw_action:
-        action = raw_action
+      actor_prefix = f'{next_entity.name}:'
+      stripped_action = raw_action.strip()
+      if stripped_action.startswith(actor_prefix):
+        _, _, action_payload = stripped_action.partition(':')
+        action_payload = action_payload.strip()
       else:
-        action = f'{next_entity.name}: {raw_action}'
+        action_payload = stripped_action
+      if action_payload.startswith('[ACTED]'):
+        action = f'{next_entity.name}: {action_payload}'
+      else:
+        action = f'{next_entity.name}: [ACTED] {action_payload}'
       if verbose:
         print(termcolor.colored(
             f'Entity {next_entity.name} chose action: {action}', _PRINT_COLOR))

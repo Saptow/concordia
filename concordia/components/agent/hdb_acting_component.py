@@ -230,8 +230,12 @@ class HDBStructuredActComponent(
     ) -> None:
         """Use an LLM judge to ensure reasoning semantics match action type."""
         action_type = str(payload.get("type", "")).strip().upper()
-        reasoning = str(payload.get("reasoning", "")).strip()
-        if not action_type or not reasoning:
+        verbal_explanation = str(
+            payload.get("verbal_explanation")
+            or payload.get("explanation")
+            or ""
+        ).strip()
+        if not action_type or not verbal_explanation:
             return
 
         # Only enforce for offer-state decision actions where confusion is costly.
@@ -241,7 +245,7 @@ class HDBStructuredActComponent(
         prompt = interactive_document.InteractiveDocument(self._model)
         prompt.statement(
             "You are a strict negotiation-action consistency judge.\n"
-            "Decide the semantic intent of the agent's reasoning text, independent of the provided action type.\n"
+            "Decide the semantic intent of the agent's verbal explanation, independent of the provided action type.\n"
             "Return one intent from: ACCEPT, REJECT, COUNTER_OR_OFFER, OTHER.\n"
             "ACCEPT means the text indicates agreeing to the current offer.\n"
             "REJECT means the text indicates declining the current offer.\n"
@@ -251,11 +255,11 @@ class HDBStructuredActComponent(
             f"Current action type: {action_type}\n"
             f"Has active offer: {has_active_offer}\n"
             f"Allowed action types this turn: {', '.join(str(x) for x in allowed_types) or '(unknown)'}\n"
-            f"Reasoning text:\n{reasoning}\n"
+            f"Verbal explanation text:\n{verbal_explanation}\n"
         )
         verdict = prompt.structured_question(
             question=(
-                "What is the semantic intent category of the reasoning text? "
+                "What is the semantic intent category of the verbal explanation text? "
                 "Answer only with the schema."
             ),
             output_schema=ReasoningIntentJudgement,

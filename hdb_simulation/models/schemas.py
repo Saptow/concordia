@@ -19,48 +19,62 @@ class FlatType(StrEnum):
 
 
 # Data Models
+# Shared reasoning fields across all executable actions.
+class ActionReasoningFields(BaseModel):
+    internal_reasoning: str = Field(
+        ...,
+        description=(
+            "Private chain-of-thought style rationale for internal debugging/"
+            "tracing only. Must never be shown to counterparties."
+        ),
+    )
+    verbal_explanation: str = Field(
+        ...,
+        validation_alias='explanation',
+        description=(
+            "Public-facing explanation safe to share with counterparties. "
+            "Do not include hidden thresholds, private beliefs, or strategy internals."
+        ),
+    )
+
+
 # Decisions (actions) that buyers and sellers can take during the negotiation process when no offer is on the table. 
-class MakeOffer(BaseModel):
+class MakeOffer(ActionReasoningFields):
     type: Literal['MAKE_OFFER']
     offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the offer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the offer to the other party, e.g. 'Based on recent transactions in the area, I believe this is a fair offer.'")
 
-class NormalAnswer(BaseModel):
+class NormalAnswer(ActionReasoningFields):
     type: Literal['NORMAL_ANSWER']
-    answer_details: str = Field(..., description="Details of the buyer's/seller's answer to inquiries or questions. Note that these details SHOULD NOT include private justifications, but are optional texts that the agent can use to explain their answer to the other party, e.g. 'I am asking this question because I want to understand your flexibility on the price.'")
+    answer_details: str = Field(..., description="Detailed public answer to counterpart's question. Keep aligned with verbal_explanation and avoid private information.")
 
 # Buyer-specific actions when no offer is on the table
-class BuyerInquiry(BaseModel):
+class BuyerInquiry(ActionReasoningFields):
     type: Literal['INQUIRE_BUYER']
-    inquiry_details: str = Field(..., description="Details of the buyer's inquiry about the flat's conditions/details. Note that these details SHOULD NOT include private justifications, but are optional texts that the buyer can use to explain their inquiry to the seller, e.g. 'I am asking about the flat's conditions because I want to understand if it is worth the price you are asking.'")
+    inquiry_details: str = Field(..., description="Public inquiry details to counterpart. Must not include private information.")
 
-class BuyerQuestion(BaseModel):
+class BuyerQuestion(ActionReasoningFields):
     type: Literal['QUESTION_BUYER']
-    question_details: str = Field(..., description="Specific question posed by the buyer regarding flexibility and urgency of the negotiation. Note that these details SHOULD NOT include private justifications, but are optional texts that the buyer can use to explain their question to the seller, e.g. 'I am asking about your urgency because I want to understand if you are willing to negotiate on the price.'")
+    question_details: str = Field(..., description="Specific public question to counterpart regarding negotiation context.")
 
 # Seller-specific actions when no offer is on the table
-class SellerInquiry(BaseModel):
+class SellerInquiry(ActionReasoningFields):
     type: Literal['INQUIRE_SELLER']
-    inquiry_details: str = Field(..., description="Details of the seller's inquiry about the buyer's preferences or constraints. Note that these details SHOULD NOT include private justifications, but are optional texts that the seller can use to explain their inquiry to the buyer, e.g. 'I am asking about your preferences because I want to understand what is important to you in this negotiation.'")
+    inquiry_details: str = Field(..., description="Public inquiry details to counterpart. Must not include private information.")
 
 # Decisions (actions) that can be taken by buyers and sellers when there is an active offer on the table.
-class AcceptOffer(BaseModel):
+class AcceptOffer(ActionReasoningFields):
     type: Literal['ACCEPT_OFFER']
     price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the acceptance of the offer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the acceptance to the other party, e.g. 'I accept this offer because it is fair and reasonable.'  ")
 
-class RejectOffer(BaseModel):
+class RejectOffer(ActionReasoningFields):
     type: Literal['REJECT_OFFER']
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the rejection of the offer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the rejection to the other party, e.g. 'I reject this offer because it is too low compared to recent transactions in the area.'")
 
-class MakeCounteroffer(BaseModel):
+class MakeCounteroffer(ActionReasoningFields):
     type: Literal['MAKE_COUNTEROFFER']
     counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
-    reasoning: Optional[str] = Field(None, description="Optional reasoning behind the counteroffer. This reasoning SHOULD NOT include private justifications, but are optional texts that the agent can use to explain the counteroffer to the other party, e.g. 'I make this counteroffer because it is more in line with recent transactions in the area.'")
 
-class BuyerWalkAway(BaseModel):
+class BuyerWalkAway(ActionReasoningFields):
     type: Literal['WALK_AWAY']
-    reasoning: Optional[str] = Field(None, description="Optional explanation that the buyer is ending this negotiation without agreement.")
 
 
 # Union types for buyer and seller actions with discriminators for parsing
@@ -202,4 +216,3 @@ class Flat(BaseModel):
 
 
     
-
