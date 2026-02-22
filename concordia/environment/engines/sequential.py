@@ -17,6 +17,7 @@
 
 from collections.abc import Mapping, Sequence
 import functools
+import json
 from typing import Any, Callable
 
 from absl import logging
@@ -257,6 +258,45 @@ class Sequential(engine_lib.Engine):
     except (TypeError, ValueError):
       return None
 
+  @staticmethod
+  def _format_action_for_display(action: str) -> str:
+    """Format `[ACTED]` JSON payload for readable logs.
+
+    - Keeps `[ACTED]` prefix.
+    - Pretty-prints JSON with one field per line.
+    - Reorders object keys with `type` first.
+    """
+    actor, sep, payload = action.partition(':')
+    if not sep:
+      return action
+    payload = payload.strip()
+    acted_prefix = '[ACTED]'
+    if payload.startswith(acted_prefix):
+      payload_json = payload[len(acted_prefix):].strip()
+      display_prefix = acted_prefix
+    else:
+      payload_json = payload
+      display_prefix = ''
+
+    try:
+      parsed = json.loads(payload_json)
+    except json.JSONDecodeError:
+      return action
+
+    if isinstance(parsed, dict):
+      ordered: dict[str, Any] = {}
+      if 'type' in parsed:
+        ordered['type'] = parsed['type']
+      for key, value in parsed.items():
+        if key != 'type':
+          ordered[key] = value
+      pretty_payload = json.dumps(ordered, ensure_ascii=False, indent=2)
+    else:
+      pretty_payload = json.dumps(parsed, ensure_ascii=False, indent=2)
+
+    prefix = f'{display_prefix} ' if display_prefix else ''
+    return f'{actor}: {prefix}{pretty_payload}'
+
   def run_loop(
       self,
       game_masters: Sequence[entity_lib.Entity | entity_lib.EntityWithLogging],
@@ -372,7 +412,7 @@ class Sequential(engine_lib.Engine):
       if verbose:
         print(termcolor.colored(
             f'Entity {next_entity.name} is next to act. They must respond '
-            f' in the format: "{entity_spec_to_use}".', _PRINT_COLOR))
+            f' with the choices: "{entity_spec_to_use.get("choices", "")}".', _PRINT_COLOR))
       raw_action = next_entity.act(entity_spec_to_use)
       actor_prefix = f'{next_entity.name}:'
       stripped_action = raw_action.strip()
@@ -386,8 +426,9 @@ class Sequential(engine_lib.Engine):
       else:
         action = f'{next_entity.name}: [ACTED] {action_payload}'
       if verbose:
+        display_action = self._format_action_for_display(action)
         print(termcolor.colored(
-            action, _PRINT_COLOR))
+            display_action, _PRINT_COLOR))
 
       self.resolve(game_master=game_master,
                    putative_event=action,
