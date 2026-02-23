@@ -125,21 +125,30 @@ class Sequential(engine_lib.Engine):
     if getattr(make_observation, '_allow_llm_fallback', True):
       return entities
 
-    if not hasattr(make_observation, 'get_state'):
-      return entities
-    try:
-      state = make_observation.get_state()
-    except Exception:  # pylint: disable=broad-exception-caught
-      return entities
+    pending_names: Sequence[str] | None = None
+    if hasattr(make_observation, 'get_entities_with_pending_events'):
+      try:
+        pending_names = make_observation.get_entities_with_pending_events()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pending_names = None
 
-    queue = state.get('queue')
-    if not isinstance(queue, Mapping):
-      return entities
+    if pending_names is None:
+      if not hasattr(make_observation, 'get_state'):
+        return entities
+      try:
+        state = make_observation.get_state()
+      except Exception:  # pylint: disable=broad-exception-caught
+        return entities
+
+      queue = state.get('queue')
+      if not isinstance(queue, Mapping):
+        return entities
+      pending_names = [name for name, pending in queue.items() if pending]
 
     entities_by_name = {entity.name: entity for entity in entities}
     targets: list[entity_lib.Entity] = []
-    for name, pending in queue.items():
-      if pending and name in entities_by_name:
+    for name in pending_names:
+      if name in entities_by_name:
         targets.append(entities_by_name[name])
     return tuple(targets)
 

@@ -65,11 +65,16 @@ class ObservationQueue:
   def get_and_clear(self, entity_name: str) -> list[str]:
     """Gets and clears the queue for the given entity."""
     with self._lock:
-      if entity_name in self._queue and self._queue[entity_name]:
-        events = self._queue[entity_name]
-        self._queue[entity_name] = []
-        return events
+      if entity_name in self._queue:
+        events = self._queue.pop(entity_name)
+        if events:
+          return events
       return []
+
+  def get_entities_with_pending(self) -> list[str]:
+    """Returns entity names that currently have queued observations."""
+    with self._lock:
+      return [name for name, events in self._queue.items() if events]
 
   def get_all(self) -> dict[str, list[str]]:
     """Returns a deep copy of the entire queue state."""
@@ -256,6 +261,10 @@ class MakeObservation(entity_component.ContextComponent,
   def add_to_queue(self, entity_name: str, event: str):
     """Adds an event to the queue of events to observe."""
     self._queue.add(entity_name, event, self._player_names)
+
+  def get_entities_with_pending_events(self) -> list[str]:
+    """Returns entity names with pending queued observation events."""
+    return self._queue.get_entities_with_pending()
 
   def get_state(self) -> entity_component.ComponentState:
     """Returns the state of the component."""
