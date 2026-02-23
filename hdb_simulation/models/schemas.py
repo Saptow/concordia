@@ -50,7 +50,7 @@ class MakeOffer(VerbalExplanationFields):
             )
         ),
     ]
-    offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
+    offer_price: int = Field(..., gt=0, description="The price proposed in the offer.")
 
 class NormalAnswer(ActionReasoningFields):
     type: Annotated[
@@ -126,7 +126,7 @@ class AcceptOffer(VerbalExplanationFields):
             )
         ),
     ]
-    price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
+    price_settled: int = Field(..., gt=0, description="The price at which the offer is accepted.")
 
 class RejectOffer(VerbalExplanationFields):
     type: Annotated[
@@ -147,7 +147,7 @@ class MakeCounteroffer(VerbalExplanationFields):
             )
         ),
     ]
-    counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
+    counteroffer_price: int = Field(..., gt=0, description="The price proposed in the counteroffer.")
 
 class BuyerWalkAway(VerbalExplanationFields):
     type: Annotated[
