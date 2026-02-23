@@ -101,6 +101,48 @@ class Sequential(engine_lib.Engine):
     )
     return observation
 
+  def _entities_to_observe(
+      self,
+      game_master: entity_lib.Entity,
+      entities: Sequence[entity_lib.Entity],
+  ) -> Sequence[entity_lib.Entity]:
+    """Select observation recipients for the current step.
+
+    Default behavior observes all entities. If the game master's
+    `MakeObservation` component has `allow_llm_fallback=False`, we only
+    observe entities that currently have queued events.
+    """
+    if not hasattr(game_master, 'get_component'):
+      return entities
+
+    try:
+      make_observation = game_master.get_component(
+          make_observation_component.DEFAULT_MAKE_OBSERVATION_COMPONENT_KEY
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      return entities
+
+    if getattr(make_observation, '_allow_llm_fallback', True):
+      return entities
+
+    if not hasattr(make_observation, 'get_state'):
+      return entities
+    try:
+      state = make_observation.get_state()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return entities
+
+    queue = state.get('queue')
+    if not isinstance(queue, Mapping):
+      return entities
+
+    entities_by_name = {entity.name: entity for entity in entities}
+    targets: list[entity_lib.Entity] = []
+    for name, pending in queue.items():
+      if pending and name in entities_by_name:
+        targets.append(entities_by_name[name])
+    return tuple(targets)
+
   def next_acting(
       self,
       game_master: entity_lib.Entity,
@@ -348,9 +390,10 @@ class Sequential(engine_lib.Engine):
             tagged_observation = f'[OBSERVED] {tagged_observation}'
           entity.observe(tagged_observation)
 
+      entities_to_observe = self._entities_to_observe(game_master, entities)
       tasks = {
           entity.name: functools.partial(_entity_observation, entity)
-          for entity in entities
+          for entity in entities_to_observe
       }
       concurrency.run_tasks(tasks, max_workers=1)
 

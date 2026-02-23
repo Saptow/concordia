@@ -657,13 +657,8 @@ class UncertainSeller(entity_component.ContextComponent):
         return ""
 
     def post_act(self, action_attempt: str) -> str:
-        """Update uncertainty state based on action taken."""
-        # Analyze action for information gathering or commitment
-        if '?' in action_attempt or 'ask' in action_attempt.lower() or 'question' in action_attempt.lower():
-            # Information gathering action
-            for belief in self._beliefs.values():
-                belief.confidence = min(0.95, belief.confidence + 0.02)  # Small confidence boost
-
+        """No-op: uncertainty updates are observation-driven (pre_observe only)."""
+        del action_attempt
         return ""
 
     def pre_observe(self, observation: str) -> str:
