@@ -647,11 +647,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         """Provide uncertainty-aware guidance before action."""
         context = action_spec.call_to_action
 
-        # Update beliefs based on new context
-        self._update_own_reservation_from_context(context)
-        self._update_counterpart_reservation_from_context(context)
-
-        # Generate uncertainty-aware guidance
+        # Beliefs are updated only when new observations arrive (pre_observe).
         guidance = self._generate_uncertainty_guidance(context)
         self._last_pre_act_value = guidance
 
