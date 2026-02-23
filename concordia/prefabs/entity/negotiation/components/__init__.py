@@ -15,6 +15,7 @@ from concordia.prefabs.entity.negotiation.components import strategy_evolution
 from concordia.prefabs.entity.negotiation.components import theory_of_mind
 from concordia.prefabs.entity.negotiation.components import uncertain_buyer
 from concordia.prefabs.entity.negotiation.components import uncertain_seller
+from concordia.prefabs.entity.negotiation.components import deterministic_numeric_facts
 
 # All advanced modules implemented
 
@@ -31,4 +32,5 @@ __all__ = [
     'theory_of_mind',
     'uncertain_buyer',
     'uncertain_seller',
+    'deterministic_numeric_facts',
 ]

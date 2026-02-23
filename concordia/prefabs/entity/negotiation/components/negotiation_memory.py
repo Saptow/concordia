@@ -45,6 +45,7 @@ class NegotiationMemory(entity_component.ContextComponent):
         agent_name: str,
         memory_bank: basic_associative_memory.AssociativeMemoryBank,
         verbose: bool = False,
+        emit_pre_act_context: bool = True,
     ):
         """Initialize negotiation memory.
 
@@ -56,6 +57,7 @@ class NegotiationMemory(entity_component.ContextComponent):
         self._agent_name = agent_name
         self._memory = memory_bank
         self._verbose = verbose
+        self._emit_pre_act_context = emit_pre_act_context
         self._last_pre_act_value: Optional[str] = None
 
         # Negotiation-specific tracking
@@ -170,6 +172,7 @@ class NegotiationMemory(entity_component.ContextComponent):
 
     def pre_act(self, action_spec) -> str:
         """Provide negotiation memory context before action."""
+        del action_spec
         context = "NEGOTIATION MEMORY:\n"
 
         # Current negotiation state
@@ -185,7 +188,9 @@ class NegotiationMemory(entity_component.ContextComponent):
             for s in similar:
                 context += f"- {s}\n"
         self._last_pre_act_value = context
-        return context
+        if self._emit_pre_act_context:
+            return context
+        return ""
 
     def post_act(self, action_attempt: str) -> str:
         """Update memory after action."""

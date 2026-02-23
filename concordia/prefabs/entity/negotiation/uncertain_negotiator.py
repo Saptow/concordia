@@ -8,7 +8,11 @@ from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
-from concordia.prefabs.entity.negotiation.components import uncertain_buyer, uncertain_seller
+from concordia.prefabs.entity.negotiation.components import (
+    deterministic_numeric_facts,
+    uncertain_buyer,
+    uncertain_seller,
+)
 from concordia.hdb_simulation.models.schemas import BuyerActions, RoleType, SellerActions
 from concordia.language_model import language_model
 from concordia.typing import prefab as prefab_lib
@@ -28,16 +32,16 @@ DEFAULT_ETHICS = (
 HDB_ACTION_DOMAIN_GUARDRAILS = (
     "DOMAIN CONSTRAINTS:\n"
     "- This negotiation is ONLY about one HDB resale flat in Singapore.\n"
-    "- Keep all questions/answers tied to the flat condition, lease, location, transaction terms, or timeline.\n"
+    "- Keep all questions/answers tied to the flat condition, lease, location, transaction terms, HDB-specific policies or timeline.\n"
     "- If the conversation drifts to an unrelated asset/domain, steer it back to the flat negotiation context.\n"
-    "- Keep prices in SGD.\n"
 )
 HDB_CONTEXT_ANCHOR = (
     "CONTEXT ANCHOR:\n"
     "- You are in an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore and discard any off-domain prior context (for example: cars, mileage, vehicle servicing, electronics).\n"
     "- If any text conflicts with this domain, treat that conflicting text as irrelevant noise and continue in HDB-flat context.\n"
-    "- Keep all pricing and monetary references in SGD.\n"
+    "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
+    "- ALL pricing and monetary references in SGD.\n"
 )
 @dataclasses.dataclass
 class Entity(prefab_lib.Prefab):
@@ -55,7 +59,6 @@ class Entity(prefab_lib.Prefab):
     params: Mapping[str, str] = dataclasses.field(default_factory=lambda: {
         'name': 'Negotiator',
         'description': 'Reach a mutually beneficial agreement',
-        'negotiation_style': 'competitive',
         'reservation_value': '0.0',
         'ethical_constraints': DEFAULT_ETHICS,
         'modules': '', # e.g. uncertainty_buyer, uncertainty_seller
@@ -80,7 +83,6 @@ class Entity(prefab_lib.Prefab):
         # Extract parameters from params dict
         agent_name = self.params.get('name', 'Negotiator')
         description = self.params.get('description', '')
-        style = self.params.get('negotiation_style', 'competitive')
         reservation = float(self.params.get('reservation_value', '0.0'))
         ethics = self.params.get('ethical_constraints', DEFAULT_ETHICS)
         # TODO: revise the ethical constraints based on HDB negotiation context
@@ -121,7 +123,6 @@ class Entity(prefab_lib.Prefab):
             agent_name=agent_name,
             role = role,
             description=description,
-            negotiation_style=style,
             reservation_value=reservation,
             ethical_constraints=ethics,
             verbose=True,
@@ -132,6 +133,7 @@ class Entity(prefab_lib.Prefab):
             agent_name=agent_name,
             memory_bank=memory_bank,
             verbose=True,
+            emit_pre_act_context=False,
         )
         # Setup uncertainty context if specified (should only be one of buyer/seller)
         # TODO: revise negotiation strategy to include strategy evolution based on past failed negotiations, if any
@@ -151,6 +153,7 @@ class Entity(prefab_lib.Prefab):
                 lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
+                emit_pre_act_context=False,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -173,6 +176,7 @@ class Entity(prefab_lib.Prefab):
                 lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
+                emit_pre_act_context=False,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -182,7 +186,14 @@ class Entity(prefab_lib.Prefab):
                 description=description,
                 verbose=True,
             )
-    
+        numeric_facts_key = 'numeric_facts'
+        numeric_facts = deterministic_numeric_facts.DeterministicNumericFacts(
+            role=role,
+            uncertain_component_key=uncertain_key,
+            strategy_component_key=strategy_key,
+            emit_pre_act_context=False,
+        )
+
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
             pre_act_label=f'Self-perception as {role}:',
@@ -245,7 +256,7 @@ class Entity(prefab_lib.Prefab):
             add_to_memory=False,
             memory_tag='[action reasoning]',
             output_schema=BuyerActions if role == RoleType.BUYER else SellerActions,
-            components = ['situation_perception', 'self_perception', strategy_key, instructions.name]
+            components = ['situation_perception', 'self_perception', strategy_key, numeric_facts_key, instructions.name]
         )
 
         # # Recent memories for context 
@@ -265,6 +276,7 @@ class Entity(prefab_lib.Prefab):
             neg_memory.name: neg_memory,
             uncertain_key: uncertain_context,
             strategy_key: strategy,
+            numeric_facts_key: numeric_facts,
             'situation_perception': question_about_situation,
             'self_perception': question_about_self,
             'action_reasoning': question_about_action,
@@ -284,6 +296,7 @@ class Entity(prefab_lib.Prefab):
             neg_memory.name,
             uncertain_key,
             strategy_key,
+            numeric_facts_key,
             'situation_perception',
             'self_perception',
             'action_reasoning',

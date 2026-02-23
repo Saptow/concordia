@@ -25,7 +25,6 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         agent_name: str,
         role: RoleType,
         description: str,
-        negotiation_style: str = 'competitive',
         reservation_value: float = 0.0,
         ethical_constraints: Optional[str] = None,
         pre_act_label: str = 'Negotiation instructions',
@@ -44,7 +43,6 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         self._agent_name = agent_name
         self._role = role
         self._description = description
-        self._style = negotiation_style
         self._reservation_value = reservation_value
         self._ethics = ethical_constraints or 'Be honest and fair. Do not deceive.'
         self._pre_act_label = pre_act_label
@@ -63,14 +61,22 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         """Generate base negotiation instructions."""
         additional_instructions = None
         if self._role == RoleType.BUYER:
-            goal = "Discover the true details of the flat and negotiate the lowest possible price within budget if possible."
+            goal = (
+                "Get the best possible purchase terms for this flat while "
+                "keeping the negotiation moving toward agreement, and learn "
+                "the flat's true value through targeted information gathering."
+            )
             additional_instructions = ( # TODO: expand later with policy-specific aspects of the flat
                 f'BUYER-SPECIFIC GUIDANCE:\n'
                 f'Always **adhere** to your own preferences when evaluating the flat and making offers.'
-                f'Remember that the other party has more information about the flat condition than you do. Consider this when discovering more about the flat and negotiating prices.'
+                f'Remember that the other party has more information about the flat condition than you do. '
+                f'Use questions and observations to reduce uncertainty and refine your valuation while negotiating price.'
             )
         elif self._role == RoleType.SELLER:
-            goal = "Negotiate highest possible price to sell the flat strategically based on strategy provided."
+            goal = (
+                "Get the best possible sale terms for this flat while keeping "
+                "the negotiation moving toward agreement."
+            )
             additional_instructions = ( # TODO: expand later with policy-specific aspects of the flat
                 f'SELLER-SPECIFIC GUIDANCE:\n'
                 f'You have full knowledge of the flat condition. The counterpart party does not. Always remember this when negotiating price.'
@@ -78,19 +84,11 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         instructions = (
             f'You are {self._agent_name}, a potential {self._role} within the HDB resale market. \n\n'
             f'PRIMARY GOAL: {goal}\n'
-            f'NEGOTIATION STYLE: {self._style}\n'
-            f'RESERVATION VALUE: {self._reservation_value} (your minimum acceptable outcome)\n'
             f'ETHICS: {self._ethics}\n\n'
             'CORE NEGOTIATION PRINCIPLES:\n'
-            '1. Know your walk-away thresholds (BATNA/reservation value) at all times\n'
+            '1. Keep your objective clear and consistent each turn\n'
             '2. Infer interests (timeline, certainty, inclusions) behind positions, not just price itself\n'
             '3. Communicate offers naturally but unambiguously\n'
-            'COMPETITIVE STYLE GUIDANCE:\n'
-            '- Maximize your own value capture\n'
-            '- Control information strategically\n'
-            '- Start with ambitious positions\n'
-            '- Use leverage when available\n'
-            '- Be willing to walk away\n\n'
         )
 
         if additional_instructions:
@@ -131,35 +129,29 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
 
     def get_pre_act_value(self) -> str:
         """Pre-act instruction body used by dependent components."""
-        # Update phase based on rounds
-        if self._rounds_completed < 3:
-            self._negotiation_phase = 'opening'
-        elif self._rounds_completed < 10:
-            self._negotiation_phase = 'middle'
-        else:
-            self._negotiation_phase = 'closing'
-
         # Build contextual instructions
         instructions = self._base_instructions
-        instructions += self.get_phase_specific_guidance()
+        instructions += (
+            f'\nCURRENT ROUND COUNTER: {self._rounds_completed}\n'
+            'Stay objective-focused: improve your deal while moving toward agreement.\n'
+        )
 
         # Add situational guidance
         if self._last_offer_received:
             instructions += f'\nLAST OFFER RECEIVED: {self._last_offer_received}\n'
-            instructions += 'Consider: Is this above your reservation value? '
-            instructions += 'Can you find creative ways to improve the deal?\n'
+            instructions += (
+                'Consider how to improve terms from this point and what '
+                'concrete next action best advances your objective.\n'
+            )
 
         if self._last_offer_made:
             instructions += f'\nYOUR LAST OFFER: {self._last_offer_made}\n'
 
         # Add tactical reminders
         instructions += '\nREMEMBER:\n'
-        if self._style == 'cooperative':
-            instructions += '- Share information to build trust\n'
-        elif self._style == 'competitive':
-            instructions += '- Every concession should get something in return\n'
-        else:
-            instructions += '- Look for ways to expand value for both parties\n'
+        instructions += '- Make each turn advance the negotiation meaningfully\n'
+        instructions += '- Every concession should get something in return\n'
+        instructions += '- Prefer clear actionable proposals over vague repetition\n'
 
         return instructions
 
@@ -203,11 +195,42 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
 
     def get_state(self) -> str:
         """Get the component state for saving/restoring."""
-        return f'{self._negotiation_phase}|{self._rounds_completed}'
+        # Persist only objective-relevant state.
+        last_made = self._last_offer_made.replace('|', '\\|') if self._last_offer_made else ''
+        last_received = (
+            self._last_offer_received.replace('|', '\\|')
+            if self._last_offer_received
+            else ''
+        )
+        return (
+            f'rounds={self._rounds_completed}|'
+            f'last_made={last_made}|'
+            f'last_received={last_received}'
+        )
 
     def set_state(self, state: str) -> None:
         """Set the component state from a saved string."""
         if '|' in state:
-            phase, rounds = state.split('|', 1)
-            self._negotiation_phase = phase
-            self._rounds_completed = int(rounds)
+            parts = state.split('|')
+            if len(parts) == 2 and '=' not in parts[0]:
+                _, rounds = parts
+                self._rounds_completed = int(rounds)
+                self._last_offer_made = None
+                self._last_offer_received = None
+                return
+
+            parsed: dict[str, str] = {}
+            for part in parts:
+                if '=' in part:
+                    key, value = part.split('=', 1)
+                    parsed[key.strip()] = value
+            self._rounds_completed = int(parsed.get('rounds', '0'))
+            last_made = parsed.get('last_made', '').replace('\\|', '|').strip()
+            last_received = parsed.get('last_received', '').replace('\\|', '|').strip()
+            self._last_offer_made = last_made or None
+            self._last_offer_received = last_received or None
+            return
+
+        self._rounds_completed = int(state.strip() or 0)
+        self._last_offer_made = None
+        self._last_offer_received = None

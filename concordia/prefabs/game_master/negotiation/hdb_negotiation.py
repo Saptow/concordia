@@ -164,7 +164,6 @@ class GameMaster(prefab_lib.Prefab):
 
     # Deterministic next action spec (no LLM decision needed here).
     next_action_spec_key = gm_components.next_acting.DEFAULT_NEXT_ACTION_SPEC_COMPONENT_KEY
-    # Note that the free form options is structurally enforced on the agent side already, so the GM can just provide the prompt without options if in free mode.
     next_action_spec = hdb_negotiation_state.FixedNextActionSpec(
         action_mode=action_mode,
         call_to_action=action_prompt,
@@ -173,7 +172,7 @@ class GameMaster(prefab_lib.Prefab):
         offer_tracker_component_key=offer_state_key,
     )
 
-    # Pass-through event resolution to keep GM lightweight.
+    # Pass-through event resolution to ensure processing of observations and no information leakage across pairs. 
     event_resolution_key = gm_components.switch_act.DEFAULT_RESOLUTION_COMPONENT_KEY
     event_resolution = hdb_negotiation_state.PassthroughResolution(
         memory_component_key=memory_component_key,

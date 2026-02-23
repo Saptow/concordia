@@ -281,6 +281,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         lambda_: float = 1.0,
         a: float = 1.0,
         b: float = 1.0,
+        emit_pre_act_context: bool = True,
     ):
         """Initialize uncertainty-aware component.
 
@@ -295,6 +296,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         self._risk_tolerance = risk_tolerance
         self._preferences = preferences or {}
         self._info_budget = information_gathering_budget
+        self._emit_pre_act_context = emit_pre_act_context
         self._last_pre_act_value: Optional[str] = None
 
         # Belief state tracking
@@ -646,7 +648,9 @@ class UncertainBuyer(entity_component.ContextComponent):
         guidance = self._generate_uncertainty_guidance(context)
         self._last_pre_act_value = guidance
 
-        return f"\n{guidance}"
+        if self._emit_pre_act_context:
+            return f"\n{guidance}"
+        return ""
 
     def post_act(self, action_attempt: str) -> str:
         """Update uncertainty state based on action taken."""

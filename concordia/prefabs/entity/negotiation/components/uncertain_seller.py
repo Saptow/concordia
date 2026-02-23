@@ -336,6 +336,7 @@ class UncertainSeller(entity_component.ContextComponent):
         lambda_: float = 1.0,
         a: float = 1.0,
         b: float = 1.0,
+        emit_pre_act_context: bool = True,
     ):
         """Initialize uncertainty-aware component.
 
@@ -351,6 +352,7 @@ class UncertainSeller(entity_component.ContextComponent):
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
+        self._emit_pre_act_context = emit_pre_act_context
         self._pre_act_value: Optional[str] = None
 
         # Belief state tracking
@@ -646,7 +648,9 @@ class UncertainSeller(entity_component.ContextComponent):
         # Generate uncertainty-aware guidance
         guidance = self._generate_uncertainty_guidance(context)
         self._pre_act_value=guidance
-        return f"\n{guidance}"
+        if self._emit_pre_act_context:
+            return f"\n{guidance}"
+        return ""
 
     def post_act(self, action_attempt: str) -> str:
         """Update uncertainty state based on action taken."""
