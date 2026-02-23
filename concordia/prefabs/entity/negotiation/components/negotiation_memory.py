@@ -2,6 +2,7 @@
 
 import dataclasses
 import datetime
+import json
 from typing import Dict, List, Optional, Any
 
 from concordia.associative_memory import basic_associative_memory
@@ -70,6 +71,48 @@ class NegotiationMemory(entity_component.ContextComponent):
         self._current_best_offer: Optional[Offer] = None
         self._concessions_made: List[float] = []
         self._value_discovered: float = 0.0
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str | None:
+        start = text.find('{')
+        if start < 0:
+            return None
+        candidate = text[start:]
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx, ch in enumerate(candidate):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == '\\':
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return candidate[: idx + 1]
+        return None
+
+    @classmethod
+    def _is_offer_action(cls, text: str) -> bool:
+        payload_json = cls._extract_first_json_object(text)
+        if not payload_json:
+            return False
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        action_type = str(payload.get('type', '')).strip().upper()
+        return action_type in {'MAKE_OFFER', 'MAKE_COUNTEROFFER'}
 
     def get_pre_act_label(self) -> str:
         return self.name
@@ -195,7 +238,7 @@ class NegotiationMemory(entity_component.ContextComponent):
     def post_act(self, action_attempt: str) -> str:
         """Update memory after action."""
         # Parse if action was an offer
-        if 'offer' in action_attempt.lower():
+        if self._is_offer_action(action_attempt):
             # Simple parsing - in real implementation would be more sophisticated
             offer = Offer(
                 offerer=self._agent_name,
@@ -209,7 +252,7 @@ class NegotiationMemory(entity_component.ContextComponent):
     def pre_observe(self, observation: str) -> str:
         """Process negotiation observations."""
         # Parse if observation contains an offer
-        if 'offer' in observation.lower():
+        if self._is_offer_action(observation):
             # Simple parsing for now
             offer = Offer(
                 offerer='other_party',  # Would parse from observation

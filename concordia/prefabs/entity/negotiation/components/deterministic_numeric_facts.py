@@ -206,8 +206,8 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     if abs(diff) <= 1e-9:
       return 'Equal'
     if diff > 0:
-      return f'OwnAboveOpponent(Diff={self._format_money(diff)})'
-    return f'OwnBelowOpponent(Diff={self._format_money(diff)})'
+      return f'OwnAboveOpponent with Diff of {self._format_money(diff)})'
+    return f'OwnBelowOpponent with Diff of {self._format_money(diff)})'
 
   def _resolve_zopa_feasible(
       self,
@@ -273,7 +273,6 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     )
 
     lines = [
-      'NUMERIC FACTS (DETERMINISTIC):',
       f'OwnVsOpponentReservation={reservation_comparison}',
       f'ZOPAFeasible={str(zopa_feasible) if zopa_feasible is not None else "Unknown"}',
       f'LastObservedActionType={last_action_type or "NA"}',
@@ -300,10 +299,7 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
           lines.append(
               f'OfferMeetsOwnReservation={str(active_offer_price >= own_reservation)}'
           )
-
-    lines.append(
-        'Use these computed facts as authoritative for any numeric comparison.'
-    )
+          
     return '\n'.join(lines)
 
   def get_state(self) -> entity_component.ComponentState:

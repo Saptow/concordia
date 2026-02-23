@@ -396,55 +396,18 @@ class HDBStructuredActComponent(
         price: float,
         retry_reason: str,
     ) -> tuple[str, str]:
-        """Use the LLM to generate reasoning fields for forced fallback offers."""
-        default_internal, default_verbal = self._default_forced_reasoning(
+        """Return deterministic reasoning for forced fallback offers.
+
+        We avoid another LLM call in this path to prevent inconsistent narratives
+        (for example, hallucinated prior offers/prices) when execution has
+        already fallen back after repeated validation failures.
+        """
+        del contexts
+        internal_reasoning, verbal_explanation = self._default_forced_reasoning(
             action_type=action_type,
             price=price,
             retry_reason=retry_reason,
         )
-
-        prompt = interactive_document.InteractiveDocument(self._model)
-        prompt.statement(self._context_for_action(contexts) + "\n")
-        prompt.statement(
-            "You are generating reasoning fields for a forced executable negotiation action.\n"
-            f"Action type: {action_type}\n"
-            f"Price: {float(price):.2f}\n"
-            f"Previous validation failure: {retry_reason or 'unknown'}\n"
-            "The verbal explanation must clearly propose this exact price."
-        )
-
-        try:
-            generated = prompt.structured_question(
-                question=(
-                    "Return reasoning fields for this forced action.\n"
-                    "Rules:\n"
-                    "- internal_reasoning: concise private rationale.\n"
-                    "- verbal_explanation: concise public statement proposing the given price.\n"
-                    "- Both fields must align with the specified action type and price."
-                ),
-                output_schema=ForcedOfferReasoning,
-                max_tokens=320,
-                terminators=(),
-            )
-            if isinstance(generated, (BaseModel, RootModel)):
-                payload = generated.model_dump()
-            elif isinstance(generated, dict):
-                payload = generated
-            elif isinstance(generated, str):
-                payload = json.loads(self._extract_json(generated))
-            else:
-                payload = {}
-        except Exception:
-            payload = {}
-
-        internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
-        verbal_explanation = str(payload.get("verbal_explanation", "")).strip()
-
-        if not internal_reasoning:
-            internal_reasoning = default_internal
-        if not verbal_explanation:
-            verbal_explanation = default_verbal
-
         return (
             self._truncate_text(internal_reasoning, limit=1000),
             self._truncate_text(verbal_explanation, limit=1000),

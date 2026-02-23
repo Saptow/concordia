@@ -38,7 +38,7 @@ HDB_ACTION_DOMAIN_GUARDRAILS = (
 HDB_CONTEXT_ANCHOR = (
     "CONTEXT ANCHOR:\n"
     "- You are in an HDB resale negotiation for exactly one flat in Singapore.\n"
-    "- Ignore and discard any off-domain prior context (for example: cars, mileage, vehicle servicing, electronics).\n"
+    "- Ignore and discard ANY off-domain prior context.\n"
     "- If any text conflicts with this domain, treat that conflicting text as irrelevant noise and continue in HDB-flat context.\n"
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
@@ -137,13 +137,13 @@ class Entity(prefab_lib.Prefab):
             verbose=True,
         )
 
-        # Create negotiation memory
-        neg_memory = negotiation_memory.NegotiationMemory(
-            agent_name=agent_name,
-            memory_bank=memory_bank,
-            verbose=True,
-            emit_pre_act_context=False,
-        )
+        # Create negotiation memory TODO: (we do not need this for now.)
+        # neg_memory = negotiation_memory.NegotiationMemory(
+        #     agent_name=agent_name,
+        #     memory_bank=memory_bank,
+        #     verbose=True,
+        #     emit_pre_act_context=False,
+        # )
         # Setup uncertainty context if specified (should only be one of buyer/seller)
         # TODO: revise negotiation strategy to include strategy evolution based on past failed negotiations, if any
         uncertain_key, uncertain_context = None, None
@@ -159,6 +159,7 @@ class Entity(prefab_lib.Prefab):
                 preferences=uncertain_configs.get('preferences', {}),
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
                 own_reservation_std=uncertain_configs.get('own_reservation_std', 1000.0),
+                mu=uncertain_configs.get('cp_reservation_', 0.0),
                 lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
@@ -182,6 +183,7 @@ class Entity(prefab_lib.Prefab):
                 risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5),
                 information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
+                mu=uncertain_configs.get('cp_reservation_', 0.0),
                 lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
@@ -205,22 +207,21 @@ class Entity(prefab_lib.Prefab):
 
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
-            pre_act_label=f'Self-perception as {role}:',
+            pre_act_label=f'Self-perception as {role}',
             question=(
             f'Agent description: {description}\n'
             f'What kind of {role} is {agent_name}? Respond in 1-5 sentences.\n'
             f'Requirement: return at least one concrete sentence; do not return an empty answer.'
             ),
-            answer_prefix=f'{agent_name} is a {role} who ',
+            answer_prefix=f'{agent_name} is a {role} who',
             add_to_memory=False,
             memory_tag='[self perception]',
-            terminators=(),
         )
 
         # Create question components for context and reasoning
         question_about_situation = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
-            pre_act_label=f'Current negotiation situation:',
+            pre_act_label=f'Current negotiation situation',
             question=(
                 f'What is the current negotiation situation that {agent_name} is in? '
                 'Respond in 1-5 sentences.'
@@ -228,7 +229,7 @@ class Entity(prefab_lib.Prefab):
             answer_prefix=f'{agent_name} is currently ',
             add_to_memory=False,
             memory_tag='[situation perception]',
-            components = [uncertain_key, neg_memory.name]
+            components = [uncertain_key]
         )
 
         if role == RoleType.SELLER:
@@ -263,8 +264,7 @@ class Entity(prefab_lib.Prefab):
             'situation_perception',
             'self_perception',
             strategy_key,
-            numeric_facts_key,
-            neg_memory.name,
+            numeric_facts_key
         ]
         question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
             model=model,
@@ -291,7 +291,6 @@ class Entity(prefab_lib.Prefab):
             'observation': observation,
             agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY: memory,
             instructions.name: instructions,
-            neg_memory.name: neg_memory,
             uncertain_key: uncertain_context,
             strategy_key: strategy,
             numeric_facts_key: numeric_facts,
@@ -311,7 +310,6 @@ class Entity(prefab_lib.Prefab):
             'observation',
             agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
             instructions.name,
-            neg_memory.name,
             uncertain_key,
             strategy_key,
             numeric_facts_key,

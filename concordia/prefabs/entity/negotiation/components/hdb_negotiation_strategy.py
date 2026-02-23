@@ -13,9 +13,9 @@ from concordia.typing import entity_component
 
 from concordia.prefabs.entity.negotiation.config import StrategyConfig
 
-AVG_NEGOTIATION_LENGTH = 5  # average number of rounds in HDB resale negotiation (in weeks)
-MIN_ROUNDS = 2
-MAX_ROUNDS = 8
+AVG_NEGOTIATION_LENGTH = 12  # average number of rounds in HDB resale negotiation (in weeks)
+MIN_ROUNDS = 8
+MAX_ROUNDS = 15
 class UrgencyLevel(BaseModel):
     """Schema for urgency level output."""
     urgency: float = Field(..., ge=0.0, le=1.0, description="Urgency level from 0 (not urgent) to 1 (extremely urgent)")
@@ -279,19 +279,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, horizon - rounds_elapsed)
         urgency = max(0.0, min(1.0, float(self._urgency_level)))
-        deterministic_rule = (
-            "DETERMINISTIC CONTEXT CHECK: Read ZOPAFeasible and HasActiveOffer from"
-            "NUMERIC FACTS (DETERMINISTIC). If ZOPAFeasible=True and HasActiveOffer=True "
-            "prioritize MAKE_OFFER now."
-            "If ZOPAFeasible=True and HasActiveOffer=True prioritize ACCEPT_OFFER now."
-        )
 
         if self._role == RoleType.BUYER:
             if self.should_walk_away():
                 return (
                     "STRATEGY GUIDANCE (BUYER): PATIENCE LIMIT REACHED. "
                     "Use WALK_AWAY now unless you are immediately ACCEPT_OFFER. "
-                    f"{deterministic_rule}"
                 )
 
             if rounds_left <= 1:
@@ -316,7 +309,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 "STRATEGY GUIDANCE (BUYER): "
                 f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
                 f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
-                f"{deterministic_rule} {urgency_rule}"
+                f"{urgency_rule}"
             )
 
         if rounds_left <= 1:
@@ -340,7 +333,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             "STRATEGY GUIDANCE (SELLER): "
             f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
             f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
-            f"{deterministic_rule} {urgency_rule}"
+            f"{urgency_rule}"
         )
 
     def post_act(self, action_attempt: str) -> str:

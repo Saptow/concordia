@@ -1,6 +1,7 @@
 
 """Negotiation-specific instructions component."""
 
+import json
 from collections.abc import Mapping
 from typing import Optional
 
@@ -61,6 +62,48 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         # Base instructions
         self._base_instructions = self._generate_base_instructions()
 
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str | None:
+        start = text.find('{')
+        if start < 0:
+            return None
+        candidate = text[start:]
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx, ch in enumerate(candidate):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == '\\':
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return candidate[: idx + 1]
+        return None
+
+    @classmethod
+    def _is_offer_action(cls, text: str) -> bool:
+        payload_json = cls._extract_first_json_object(text)
+        if not payload_json:
+            return False
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        action_type = str(payload.get('type', '')).strip().upper()
+        return action_type in {'MAKE_OFFER', 'MAKE_COUNTEROFFER'}
+
     def _format_flat_listing_details(self) -> str:
         """Render listing details into a compact prompt block."""
         if not self._flat_listing:
@@ -100,15 +143,15 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                 f'You have full knowledge of the flat condition. The counterpart party does not. Always remember this when negotiating price.'
             )
         instructions = (
-            f'You are {self._agent_name}'
-            f'ROLE: {self._role.name}. ALWAYS KEEP TO YOUR ROLE.\n'
-            f'DESCRIPTION: {self._description}\n'
-            f'PRIMARY GOAL: {goal}\n'
+            f'You are {self._agent_name}.\n\n'
+            f'ROLE: {self._role.name}. \n\n'
+            f'DESCRIPTION: {self._description}\n\n'
+            f'PRIMARY GOAL: {goal}\n\n'
             f'ETHICS: {self._ethics}\n\n'
             'CORE NEGOTIATION PRINCIPLES:\n'
             '1. Keep your objective clear and consistent each turn\n'
             '2. Infer interests (timeline, certainty, inclusions) behind positions, not just price itself\n'
-            '3. Communicate offers naturally but unambiguously\n'
+            '3. Communicate offers naturally but unambiguously\n\n'
         )
         instructions += self._format_flat_listing_details()
 
@@ -157,17 +200,6 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             'Stay objective-focused: improve your deal while moving toward agreement.\n'
         )
 
-        # Add situational guidance
-        if self._last_offer_received:
-            instructions += f'\nLAST OFFER RECEIVED: {self._last_offer_received}\n'
-            instructions += (
-                'Consider how to improve terms from this point and what '
-                'concrete next action best advances your objective.\n'
-            )
-
-        if self._last_offer_made:
-            instructions += f'\nYOUR LAST OFFER: {self._last_offer_made}\n'
-
         # Add tactical reminders
         instructions += '\nREMEMBER:\n'
         instructions += '- Make each turn advance the negotiation meaningfully\n'
@@ -187,7 +219,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         self._rounds_completed += 1
 
         # Track if we made an offer
-        if 'offer' in action_attempt.lower():
+        if self._is_offer_action(action_attempt):
             self._last_offer_made = action_attempt
 
         if self._verbose:
@@ -197,7 +229,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
     def pre_observe(self, observation: str) -> str:
         """Process incoming observations."""
         # Track if we received an offer
-        if 'offer' in observation.lower():
+        if self._is_offer_action(observation):
             self._last_offer_received = observation
         return ""
 
