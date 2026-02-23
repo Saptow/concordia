@@ -370,29 +370,7 @@ class Sequential(engine_lib.Engine):
 
         pair_snapshot = self._pair_round_snapshot(game_master)
         if pair_snapshot is not None:
-          pairs, current_pair_rounds = pair_snapshot
-          previous_pair_rounds = pair_rounds_by_game_master.get(game_master.name)
-          if previous_pair_rounds is not None:
-            for idx, current_pair_round in enumerate(current_pair_rounds):
-              previous_pair_round = (
-                  previous_pair_rounds[idx]
-                  if idx < len(previous_pair_rounds)
-                  else current_pair_round
-              )
-              if current_pair_round != previous_pair_round:
-                if idx < len(pairs):
-                  pair_name = f'{pairs[idx][0]} <-> {pairs[idx][1]}'
-                else:
-                  pair_name = f'pair_index={idx}'
-                print(
-                    termcolor.colored(
-                        (
-                            'Pair round advanced for '
-                            f'{pair_name}: {previous_pair_round} -> {current_pair_round}'
-                        ),
-                        _PRINT_COLOR,
-                    )
-                )
+          _, current_pair_rounds = pair_snapshot
           pair_rounds_by_game_master[game_master.name] = list(current_pair_rounds)
 
       if entity_spec_to_use.output_type == entity_lib.OutputType.SKIP_THIS_STEP:

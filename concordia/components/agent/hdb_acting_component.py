@@ -3,7 +3,7 @@ import time
 from collections.abc import Sequence
 from typing import Any, Literal, override
 
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, RootModel, ValidationError
 
 from concordia.document import interactive_document
 from concordia.hdb_simulation.models import schemas as hdb_schemas
@@ -505,7 +505,10 @@ class HDBStructuredActComponent(
         """Validate extracted JSON against role+offer state (+optional allowed types)."""
         normalized = self._normalize_structured_action(raw)
         json_str = self._extract_json(normalized)
-        validated = self._schema_for_turn(has_active_offer).model_validate_json(json_str)
+        try:
+            validated = self._schema_for_turn(has_active_offer).model_validate_json(json_str)
+        except ValidationError as error:
+            raise ValueError(f"Schema validation failed: {error}") from error
         canonical = validated.model_dump_json()
         payload = json.loads(canonical)
         action_type = str(payload.get("type", "")).strip().upper()
@@ -603,7 +606,7 @@ class HDBStructuredActComponent(
                         allowed_types=allowed_types,
                         retry_reason=retry_reason,
                     )
-                raise
+                continue
 
         raise ValueError(
             "Failed to regenerate a valid structured action after repeated attempts."

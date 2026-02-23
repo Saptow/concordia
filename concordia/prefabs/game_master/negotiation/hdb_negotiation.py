@@ -187,6 +187,7 @@ class GameMaster(prefab_lib.Prefab):
     terminate_key = gm_components.terminate.DEFAULT_TERMINATE_COMPONENT_KEY
     terminate_component = hdb_negotiation_state.TerminateWhenAllPairsClosed(
         offer_tracker_component_key=offer_state_key,
+        scheduler_component_key=next_actor_key,
     )
 
     components_of_game_master = {

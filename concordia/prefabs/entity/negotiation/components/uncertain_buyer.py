@@ -127,20 +127,31 @@ class NormalInverseGamma:
         self.b = new_b
 
 
-    # # TODO: revise this method to be more principled
-    # def update_flexibility(self, flexibility_score: float, reliability: float = 1.0):
-    #         """
-    #         Update through known inverse gamma conjugate prior updates for variance, holding mu and lambda constant.
-            
-    #         Args:
-    #             flexibility_score: 
-    #                 0.0 (Rigid)    -> Shrink variance (Multiplier < 1.0)
+    def update_trust(self, trust_level: float, scale: float = 7.0):
+        '''
+        Update confidence based on trust level of new information. Note that scale is chosen at 7.0 since timestep is in terms of weeks.
+        '''
+        w = max(0.0, min(1.0, float(trust_level)))
+        if w <= 0.0:
+            return
 
-    #             reliability: 
-    #                 Multiplier dampening factor (0.0 to 1.0)
-    #         """
+        m_eff = scale * w  # >= 0
 
-    
+        # Current expected variance (safe)
+        ev = max(1e-9, self.get_expected_variance)
+
+        # Update a (shape)
+        a_new = self.a + 0.5 * m_eff
+
+        # Adjust b to keep E[sigma^2] = b/(a-1) constant
+        b_new = ev * max(1e-9, (a_new - 1.0))
+
+        self.a = a_new
+        self.b = b_new
+
+        self.evidence_count += 1
+        self.confidence = min(0.95, self.confidence + 0.02 * (1 - math.exp(-m_eff / 5.0)))
+        
 @dataclasses.dataclass
 class BeliefDistribution:
     """Represents a belief about a parameter with uncertainty."""
@@ -188,7 +199,8 @@ class BeliefDistribution:
 
         self.mean = max(0.0, new_mean)
         self.std = max(0.01, new_std)  # Prevent std from becoming too small
-
+    
+        
     def get_confidence_interval(self, level: float = 0.95) -> Tuple[float, float]:
         """Get confidence interval for the belief."""
         z_score = 1.96 if level == 0.95 else 2.58  # 95% or 99%
@@ -241,13 +253,17 @@ class UpdateOwnBeliefInfo(BaseModel):
 
 class UpdateOpposingBeliefInfoMetadata(BaseModel):
     '''Metadata for belief info updates during negotiations.'''
-    estimate: float = Field(ge=0.0)
-    confidence: float = Field(ge=0.0, le=1.0)
+    estimate: float = Field(ge=0.0, description="Estimate of the counterpart's reservation value.")
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence level in the estimate of the counterpart's reservation value.")
+
+class UpdateOpposingBeliefTrustMetadata(BaseModel):
+    '''Metadata for trust updates during negotiations.'''
+    trust_level: float = Field(ge=0.0, le=1.0, description="Trust level in the counterpart based on the new information")
 
 class UpdateOpposingBeliefInfo(BaseModel):
     '''Information to update belief during negotiations.'''
     budget_info: Optional[UpdateOpposingBeliefInfoMetadata] = None
-    flexibility_info: Optional[UpdateOpposingBeliefInfoMetadata] = None
+    trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
 
 class UncertainBuyer(entity_component.ContextComponent):
     """Component for probabilistic reasoning and uncertainty management in negotiations. (buyer side)"""
@@ -375,8 +391,7 @@ class UncertainBuyer(entity_component.ContextComponent):
 
         Focus on extracting reservation_info, your own reservation value. Determine the confidence level (0-1) through the amount of trust you have in this information.
 
-        Return a response using the JSON schema provided. Provide estimates with confidence levels:
-        reservation_info: [value estimate] [confidence 0-1]
+        Return a response using the JSON schema provided.
         """
 
         response = self._model.sample_text(prompt, json_schema=UpdateOwnBeliefInfo.model_json_schema())
@@ -405,15 +420,8 @@ class UncertainBuyer(entity_component.ContextComponent):
         Context: {context}
 
         First, focus on extracting BUDGET_INFO, the counterpart's budget or reservation value (in dollars), if any. Determine the confidence level (0-1) through the amount of trust you have in this information.
-
-        Should there be no explicit budget information from the counterpart, focus next on extracting other relevant information on:
-        1. Sense of urgency or timeline flexibility of the sale
-        2. Current relationship strength with the counterpart
-        Consider these other relevant information to determine FLEXIBILITY_INFO (the flexibility of the sale). Determine the confidence level (0-1) through the amount of trust you have in this information.
-
-        Return a response using the JSON schema provided. Provide estimates with confidence levels:
-        budget_info: [value estimate] [confidence 0-1]
-        flexibility_info: [flexibility estimate 0-1] [confidence 0-1]
+        Should there be no explicit budget information from the counterpart, focus next on extracting your TRUST in the counterpart based on the context, and determine a trust level (0-1) that reflects how much you trust the counterpart based on the given context. 
+        Return a response using the JSON schema provided.
         """
 
         response = self._model.sample_text(prompt, json_schema=UpdateOpposingBeliefInfo.model_json_schema())
@@ -428,13 +436,10 @@ class UncertainBuyer(entity_component.ContextComponent):
                 info_update.budget_info.estimate,
                 info_update.budget_info.confidence
             )
-        # else:
-            #TODO: refine flexibility update logic using pseudo observation update logic (assuming a fixed mean)
-            # if info_update.flexibility_info:
-            #     self._beliefs['counterpart_flexibility'].update_flexibility(
-            #         info_update.flexibility_info.estimate,
-            #         info_update.flexibility_info.confidence
-            #     )
+        elif info_update.trust_info: # if there is no explicit budget info, we update our beliefs based on the trust level of the counterpart instead.
+            self._beliefs['counterpart_reservation'].update_trust(
+                info_update.trust_info.trust_level
+            )
 
     def _generate_scenarios(self) -> List[ScenarioAnalysis]:
         """
@@ -605,7 +610,12 @@ class UncertainBuyer(entity_component.ContextComponent):
         guidance += f"\n**Uncertainty Management Strategy:**\n"
 
         # Calculate overall uncertainty level
-        avg_uncertainty = np.mean([1 - confidence_level for info in uncertainty_analysis.uncertainty_sources for confidence_level in [info.confidence_level]])
+        uncertainty_levels = [1 - info.confidence_level for info in uncertainty_analysis.uncertainty_sources]
+        if uncertainty_levels:
+            avg_uncertainty = float(np.mean(uncertainty_levels))
+        else:
+            belief_confidences = [belief.confidence for belief in self._beliefs.values()]
+            avg_uncertainty = 1.0 - float(np.mean(belief_confidences)) if belief_confidences else 1.0
 
         if avg_uncertainty > self._risk_tolerance: # if uncertainty level is higher than risk tolerance => not confident
             guidance += f"• HIGH UNCERTAINTY DETECTED (uncertainty: {avg_uncertainty:.1%})\n"
@@ -648,32 +658,62 @@ class UncertainBuyer(entity_component.ContextComponent):
 
         return ""
 
-    def observe(self, observation: str) -> None:
-        """Process observations to update beliefs."""
-        # Update beliefs based on new observations
+    def pre_observe(self, observation: str) -> str:
+        """Process incoming observation text to update beliefs."""
         self._update_own_reservation_from_context(observation)
         self._update_counterpart_reservation_from_context(observation)
+        return ""
 
     def get_state(self) -> Dict[str, Any]:
         """Get component state."""
+        belief_states = {}
+        for name, belief in self._beliefs.items():
+            belief_state: Dict[str, Any] = {
+                'class': belief.__class__.__name__,
+                'confidence': belief.confidence,
+                'evidence_count': belief.evidence_count,
+                'last_updated': belief.last_updated,
+            }
+            if isinstance(belief, BeliefDistribution):
+                belief_state.update({
+                    'mean': belief.mean,
+                    'std': belief.std,
+                })
+            elif isinstance(belief, NormalInverseGamma):
+                belief_state.update({
+                    'mu': belief.mu,
+                    'lambda_': belief.lambda_,
+                    'a': belief.a,
+                    'b': belief.b,
+                })
+            belief_states[name] = belief_state
+
+        belief_confidences = [belief.confidence for belief in self._beliefs.values()]
+        avg_confidence = float(np.mean(belief_confidences)) if belief_confidences else 0.0
+
         return {
-            'beliefs': {
-                name: {
-                    'confidence': belief.confidence,
-                    'evidence_count': belief.evidence_count,
-                }
-                for name, belief in self._beliefs.items()
-            },
-            'avg_confidence': np.mean([belief.confidence for belief in self._beliefs.values()]),
-            'uncertainty_level': 1 - np.mean([belief.confidence for belief in self._beliefs.values()]),
+            'beliefs': belief_states,
+            'avg_confidence': avg_confidence,
+            'uncertainty_level': 1.0 - avg_confidence,
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
         """Set component state."""
         for name, belief_data in state.get('beliefs', {}).items():
             if name in self._beliefs:
-                self._beliefs[name].confidence = belief_data.get('confidence', self._beliefs[name].confidence)
-                self._beliefs[name].evidence_count = belief_data.get('evidence_count', self._beliefs[name].evidence_count)
+                belief = self._beliefs[name]
+                belief.confidence = belief_data.get('confidence', belief.confidence)
+                belief.evidence_count = belief_data.get('evidence_count', belief.evidence_count)
+                belief.last_updated = belief_data.get('last_updated', belief.last_updated)
+
+                if isinstance(belief, BeliefDistribution):
+                    belief.mean = belief_data.get('mean', belief.mean)
+                    belief.std = max(0.01, belief_data.get('std', belief.std))
+                elif isinstance(belief, NormalInverseGamma):
+                    belief.mu = max(0.0, belief_data.get('mu', belief.mu))
+                    belief.lambda_ = max(1e-6, belief_data.get('lambda_', belief.lambda_))
+                    belief.a = max(1e-6, belief_data.get('a', belief.a))
+                    belief.b = max(1e-6, belief_data.get('b', belief.b))
     
     # def get_action_attempt(
     #         self,

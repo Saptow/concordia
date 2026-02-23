@@ -622,10 +622,12 @@ def render_dynamic_html(
   entity_memories_data = entity_memories or {}
   gm_memories_data = game_master_memories or []
 
-  # Get entity names for tabs
-  entity_names = simulation_log.get_entity_names()
-  # Filter to only entities that have memories
-  entity_tabs = [name for name in entity_names if name in entity_memories_data]
+  # Get entity names for tabs (entity actors only, not game masters).
+  entity_tabs = sorted({
+      entry.entity_name
+      for entry in simulation_log.entries
+      if entry.entry_type == 'entity'
+  })
 
   # Build the HTML
   html_parts = [
@@ -673,6 +675,17 @@ details.step-details > details { margin-left: 15px; }
 .trace-label { font-size: 11px; text-transform: uppercase; font-weight: 700; color: #475569; margin-bottom: 4px; }
 .trace-item { margin: 3px 0; }
 .trace-empty { color: #94a3b8; font-style: italic; }
+.entity-round-details { margin: 10px 0; border-left: 3px solid #0ea5e9; padding-left: 10px; }
+.entity-round-details > summary { background: #ecfeff; }
+.entity-step-details { margin: 8px 0 8px 12px; }
+.entity-step-details > summary { background: #f8fafc; }
+.component-state-group { margin: 8px 0; padding: 8px; border: 1px solid #e2e8f0; border-radius: 6px; background: #fcfcff; }
+.component-state-group > summary { background: #eef2ff; }
+.component-state-details { margin: 6px 0; }
+.component-state-details > summary { background: #f3f4f6; font-weight: 600; }
+.chain-group { margin: 8px 0; padding: 8px; border: 1px solid #fde68a; border-radius: 6px; background: #fffbeb; }
+.chain-group > summary { background: #fef3c7; }
+.chain-component { margin: 6px 0; }
 h1 { color: #333; margin-bottom: 5px; }
 .subtitle { color: #666; margin-bottom: 20px; }
 </style>
@@ -913,6 +926,19 @@ function getStepRoundInfo(entries) {
   return null;
 }
 
+function getRoundInfoByStep() {
+  const stepMap = {};
+  ENTRIES.forEach(entry => {
+    if (!stepMap[entry.step]) stepMap[entry.step] = [];
+    stepMap[entry.step].push(entry);
+  });
+  const roundInfoByStep = {};
+  Object.entries(stepMap).forEach(([step, entries]) => {
+    roundInfoByStep[step] = getStepRoundInfo(entries);
+  });
+  return roundInfoByStep;
+}
+
 function extractEntityTrace(entry) {
   if (entry.entry_type !== 'entity') return null;
   const resolved = resolveRefs(entry.deduplicated_data || {});
@@ -1049,18 +1075,161 @@ function renderGMLog() {
   container.innerHTML = html || '<p>No log entries.</p>';
 }
 
-function renderEntityMemories(entityName, containerId) {
+function extractEntityPayload(entry) {
+  const resolved = resolveRefs(entry.deduplicated_data || {});
+  if (!resolved || typeof resolved !== 'object') {
+    return {};
+  }
+  if (resolved.value && typeof resolved.value === 'object') {
+    return resolved.value;
+  }
+  if (resolved.__act__ || resolved.observation || resolved.action_reasoning) {
+    return resolved;
+  }
+  return {};
+}
+
+function extractContextComponentNames(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+  return Object.keys(payload).filter(name => !name.startsWith('__'));
+}
+
+function extractComponentStateValue(componentData) {
+  if (!componentData || typeof componentData !== 'object') {
+    return componentData;
+  }
+  if ('State' in componentData) return componentData.State;
+  if ('Value' in componentData) return componentData.Value;
+  if ('Summary' in componentData) return componentData.Summary;
+  return componentData;
+}
+
+function renderEntityTimeline(entityName, containerId) {
   const container = document.getElementById(containerId);
-  const memories = ENTITY_MEMORIES[entityName] || [];
+  const roundInfoByStep = getRoundInfoByStep();
+  const entityEntries = ENTRIES
+    .filter(entry => entry.entry_type === 'entity' && entry.entity_name === entityName)
+    .sort((a, b) => a.step - b.step);
+
+  if (entityEntries.length === 0) {
+    container.innerHTML = '<p>No entity entries for ' + escapeHtml(entityName) + '.</p>';
+    return;
+  }
+
+  const groupsByRound = {};
+  entityEntries.forEach(entry => {
+    const roundInfo = roundInfoByStep[String(entry.step)] || null;
+    const parsedRound = roundInfo && roundInfo.round ? parseInt(roundInfo.round, 10) : NaN;
+    const roundNumber = Number.isFinite(parsedRound) ? parsedRound : null;
+    const roundKey = roundNumber !== null ? ('round_' + roundNumber) : ('step_' + entry.step);
+    if (!groupsByRound[roundKey]) {
+      groupsByRound[roundKey] = {
+        roundNumber: roundNumber,
+        pair: roundInfo && roundInfo.pair ? roundInfo.pair : '',
+        entries: [],
+      };
+    }
+    groupsByRound[roundKey].entries.push(entry);
+    if (!groupsByRound[roundKey].pair && roundInfo && roundInfo.pair) {
+      groupsByRound[roundKey].pair = roundInfo.pair;
+    }
+  });
+
+  const orderedGroups = Object.values(groupsByRound).sort((a, b) => {
+    if (a.roundNumber !== null && b.roundNumber !== null) {
+      return a.roundNumber - b.roundNumber;
+    }
+    if (a.roundNumber !== null) return -1;
+    if (b.roundNumber !== null) return 1;
+    const aMinStep = Math.min(...a.entries.map(entry => entry.step));
+    const bMinStep = Math.min(...b.entries.map(entry => entry.step));
+    return aMinStep - bMinStep;
+  });
+
   let html = '';
 
+  orderedGroups.forEach(group => {
+    let roundLabel = group.roundNumber !== null
+      ? ('Round ' + group.roundNumber)
+      : 'Unmapped Round';
+    if (group.pair) {
+      roundLabel += ' | Active Pair: ' + group.pair;
+    }
+    html += '<details class="entity-round-details" open>';
+    html += '<summary><b>' + escapeHtml(roundLabel) + '</b></summary>';
+
+    group.entries.forEach(entry => {
+      const payload = extractEntityPayload(entry);
+      const resolved = resolveRefs(entry.deduplicated_data || {});
+      const contextNames = extractContextComponentNames(payload);
+
+      html += '<details class="entity-step-details">';
+      html += '<summary>' + escapeHtml('Step ' + entry.step) + '</summary>';
+      html += renderTraceCard(entry.entity_name, extractEntityTrace(entry));
+
+      html += '<details class="component-state-group">';
+      html += '<summary>Context Component States</summary>';
+      if (contextNames.length === 0) {
+        html += '<div class="trace-empty">No context component states captured.</div>';
+      } else {
+        contextNames.forEach(componentName => {
+          const componentData = payload[componentName];
+          const stateValue = extractComponentStateValue(componentData);
+          html += '<details class="component-state-details">';
+          html += '<summary>' + escapeHtml(componentName) + '</summary>';
+          html += renderObject(stateValue);
+          html += '</details>';
+        });
+      }
+      html += '</details>';
+
+      html += '<details class="chain-group">';
+      html += '<summary>Chain of Thought</summary>';
+      let hasChainOfThought = false;
+      contextNames.forEach(componentName => {
+        const componentData = payload[componentName];
+        if (
+          componentData &&
+          typeof componentData === 'object' &&
+          ('Chain of thought' in componentData)
+        ) {
+          hasChainOfThought = true;
+          html += '<details class="chain-component">';
+          html += '<summary>' + escapeHtml(componentName) + '</summary>';
+          html += renderObject(componentData['Chain of thought']);
+          html += '</details>';
+        }
+      });
+      if (!hasChainOfThought) {
+        html += '<div class="trace-empty">No chain-of-thought trace captured for this step.</div>';
+      }
+      html += '</details>';
+
+      if (resolved && Object.keys(resolved).length > 0) {
+        html += '<details>';
+        html += '<summary>Raw Entry</summary>';
+        html += renderObject(resolved);
+        html += '</details>';
+      }
+
+      html += '</details>';
+    });
+    html += '</details>';
+  });
+
+  const memories = ENTITY_MEMORIES[entityName] || [];
+  html += '<details>';
+  html += '<summary>Entity Memories</summary>';
   if (memories.length === 0) {
-    html = '<p>No memories for ' + escapeHtml(entityName) + '.</p>';
+    html += '<p>No memories for ' + escapeHtml(entityName) + '.</p>';
   } else {
     memories.forEach(mem => {
       html += '<div class="memory-item">' + escapeHtml(mem) + '</div>';
     });
   }
+  html += '</details>';
 
   container.innerHTML = html;
 }
@@ -1101,11 +1270,16 @@ function openTab(evt, tabId) {
 document.addEventListener('DOMContentLoaded', function() {
   renderGMLog();
 
-  // Render entity memories
-  Object.keys(ENTITY_MEMORIES).forEach(name => {
+  // Render entity timelines.
+  const entityNames = [...new Set(
+    ENTRIES
+      .filter(entry => entry.entry_type === 'entity')
+      .map(entry => entry.entity_name)
+  )];
+  entityNames.forEach(name => {
     const containerId = name.replace(/ /g, '_');
     if (document.getElementById(containerId)) {
-      renderEntityMemories(name, containerId);
+      renderEntityTimeline(name, containerId);
     }
   });
 

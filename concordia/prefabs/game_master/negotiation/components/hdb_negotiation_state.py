@@ -178,6 +178,12 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     self._pair_index += 1
     if completed_pair_index not in self._closed_pair_indices:
       self._pair_round_numbers[completed_pair_index] += 1
+      # Close a pair once it has completed `max_rounds` full rounds.
+      if (
+          self._max_rounds is not None
+          and self._pair_round_numbers[completed_pair_index] > self._max_rounds
+      ):
+        self._closed_pair_indices.add(completed_pair_index)
     if self._pair_index >= len(self._pair_queue):
       self._pair_index = 0
       self._round_number += 1
@@ -650,9 +656,13 @@ class TerminateWhenAllPairsClosed(entity_component.ContextComponent):
   def __init__(
       self,
       offer_tracker_component_key: str = 'pair_offer_state',
+      scheduler_component_key: str = (
+          next_acting_component.DEFAULT_NEXT_ACTING_COMPONENT_KEY
+      ),
   ):
     super().__init__()
     self._offer_tracker_component_key = offer_tracker_component_key
+    self._scheduler_component_key = scheduler_component_key
 
   def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
     if action_spec.output_type != entity_lib.OutputType.TERMINATE:
@@ -660,16 +670,23 @@ class TerminateWhenAllPairsClosed(entity_component.ContextComponent):
     offer_tracker = self.get_entity().get_component(
         self._offer_tracker_component_key, type_=PairActiveOfferTracker
     )
-    return 'Yes' if offer_tracker.all_pairs_closed() else 'No'
+    scheduler = self.get_entity().get_component(
+        self._scheduler_component_key, type_=PairRoundRobinNextActing
+    )
+    should_terminate = offer_tracker.all_pairs_closed() or scheduler.all_pairs_closed()
+    return 'Yes' if should_terminate else 'No'
 
   def get_state(self) -> entity_component.ComponentState:
     return {
         'offer_tracker_component_key': self._offer_tracker_component_key,
+        'scheduler_component_key': self._scheduler_component_key,
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
     if 'offer_tracker_component_key' in state:
       self._offer_tracker_component_key = str(state['offer_tracker_component_key'])
+    if 'scheduler_component_key' in state:
+      self._scheduler_component_key = str(state['scheduler_component_key'])
 
 
 class PassthroughResolution(entity_component.ContextComponent):
