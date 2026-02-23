@@ -143,12 +143,34 @@ class QuestionOfRecentMemories(
       prompt.statement(f'Current time: {self._clock_now()}.\n')
 
     question = self._question.format(agent_name=agent_name)
+    answer_prefix = self._answer_prefix.format(agent_name=agent_name)
     result = prompt.open_question(
         question,
-        answer_prefix=self._answer_prefix.format(agent_name=agent_name),
+        answer_prefix=answer_prefix,
         max_tokens=1000,
         terminators=self._terminators,
     )
+    if not str(result).strip():
+      # Some backends terminate immediately when the first generated token is a
+      # newline. Retry once with relaxed terminators to avoid empty states.
+      relaxed_terminators = tuple(t for t in self._terminators if t != '\n')
+      if relaxed_terminators != self._terminators:
+        retry_prompt = interactive_document.InteractiveDocument(self._model)
+        retry_prompt.statement(component_states)
+        retry_prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
+        if self._clock_now is not None:
+          retry_prompt.statement(f'Current time: {self._clock_now()}.\n')
+        retry_result = retry_prompt.open_question(
+            question,
+            answer_prefix=answer_prefix,
+            max_tokens=1000,
+            terminators=relaxed_terminators or (),
+        )
+        if str(retry_result).strip():
+          prompt = retry_prompt
+          result = retry_result
+      if not str(result).strip():
+        result = '[no response generated]'
     result = self._answer_prefix.format(agent_name=agent_name) + result
 
     if self._add_to_memory:
@@ -519,4 +541,3 @@ class BestOptionPerceptionWithoutPreAct(QuestionOfRecentMemoriesWithoutPreAct):
         add_to_memory=False,
         **kwargs,
     )
-

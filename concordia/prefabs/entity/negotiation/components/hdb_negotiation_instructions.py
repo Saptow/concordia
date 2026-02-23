@@ -1,6 +1,7 @@
 
 """Negotiation-specific instructions component."""
 
+from collections.abc import Mapping
 from typing import Optional
 
 from concordia.typing import entity_component
@@ -25,6 +26,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         agent_name: str,
         role: RoleType,
         description: str,
+        flat_listing: Mapping[str, object] | None = None,
         reservation_value: float = 0.0,
         ethical_constraints: Optional[str] = None,
         pre_act_label: str = 'Negotiation instructions',
@@ -35,6 +37,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         Args:
             agent_name: Name of the agent
             description: Brief description of the agent in mind
+            flat_listing: Flat listing metadata shared by both buyer and seller
             negotiation_style: One of 'cooperative', 'competitive', 'integrative', fixed at 'competitive' for HDB negotiations
             reservation_value: Minimum acceptable value (BATNA)
             ethical_constraints: Optional ethical guidelines
@@ -43,6 +46,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         self._agent_name = agent_name
         self._role = role
         self._description = description
+        self._flat_listing = dict(flat_listing) if flat_listing else {}
         self._reservation_value = reservation_value
         self._ethics = ethical_constraints or 'Be honest and fair. Do not deceive.'
         self._pre_act_label = pre_act_label
@@ -56,6 +60,23 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
 
         # Base instructions
         self._base_instructions = self._generate_base_instructions()
+
+    def _format_flat_listing_details(self) -> str:
+        """Render listing details into a compact prompt block."""
+        if not self._flat_listing:
+            return ''
+        lines = ['FLAT LISTING DETAILS (authoritative):']
+        for key, value in self._flat_listing.items():
+            label = str(key).replace('_', ' ').strip().title()
+            if isinstance(value, list):
+                value_str = ', '.join(str(v) for v in value) if value else 'None'
+            else:
+                value_str = str(value)
+            lines.append(f'- {label}: {value_str}')
+        lines.append(
+            '- Treat these listing details as the shared factual baseline for this negotiation.'
+        )
+        return '\n'.join(lines) + '\n\n'
 
     def _generate_base_instructions(self) -> str:
         """Generate base negotiation instructions."""
@@ -90,6 +111,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             '2. Infer interests (timeline, certainty, inclusions) behind positions, not just price itself\n'
             '3. Communicate offers naturally but unambiguously\n'
         )
+        instructions += self._format_flat_listing_details()
 
         if additional_instructions:
             instructions += additional_instructions + '\n\n'

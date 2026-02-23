@@ -143,7 +143,7 @@ class MakeCounteroffer(VerbalExplanationFields):
         Literal['MAKE_COUNTEROFFER'],
         Field(
             description=(
-                "Respond to the currently active offer with an alternative price."
+                "Respond to the currently active offer with an alternative price. IT CANNOT be used to repeat  "
             )
         ),
     ]

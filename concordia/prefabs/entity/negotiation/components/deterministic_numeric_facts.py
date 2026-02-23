@@ -164,6 +164,51 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     own_reservation = getattr(uncertain_component, '_own_reservation', None)
     return self._coerce_positive_float(own_reservation)
 
+  def _resolve_opponent_reservation(self) -> float | None:
+    # Primary source: strategy state opponent_position.
+    try:
+      strategy_component = self.get_entity().get_component(self._strategy_component_key)
+    except Exception:
+      strategy_component = None
+
+    if strategy_component is not None:
+      strategy_state = getattr(strategy_component, '_state', None)
+      opponent_position = getattr(strategy_state, 'opponent_position', None)
+      parsed = self._coerce_positive_float(opponent_position)
+      if parsed is not None:
+        return parsed
+
+    # Fallback source from uncertainty components.
+    if not self._uncertain_component_key:
+      return None
+    try:
+      uncertain_component = self.get_entity().get_component(self._uncertain_component_key)
+    except Exception:
+      return None
+
+    beliefs = getattr(uncertain_component, '_beliefs', None)
+    if isinstance(beliefs, dict):
+      counterpart_res = beliefs.get('counterpart_reservation')
+      expected_mean = getattr(counterpart_res, 'get_expected_mean', None)
+      parsed = self._coerce_positive_float(expected_mean)
+      if parsed is not None:
+        return parsed
+    return None
+
+  def _format_reservation_comparison(
+      self,
+      own_reservation: float | None,
+      opponent_reservation: float | None,
+  ) -> str:
+    if own_reservation is None or opponent_reservation is None:
+      return 'Unknown'
+    diff = own_reservation - opponent_reservation
+    if abs(diff) <= 1e-9:
+      return 'Equal'
+    if diff > 0:
+      return f'OwnAboveOpponent(Diff={self._format_money(diff)})'
+    return f'OwnBelowOpponent(Diff={self._format_money(diff)})'
+
   @staticmethod
   def _format_money(value: float | None) -> str:
     if value is None:
@@ -179,52 +224,48 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     recent_memories = memory.retrieve_recent(limit=self._max_observations)
 
     active_offer_price: float | None = None
-    active_offerer: str | None = None
     active_offer_type: str | None = None
     last_action_type: str | None = None
-    last_action_actor: str | None = None
 
     for mem in recent_memories:
       parsed = self._parse_observed_action(mem)
       if not parsed:
         continue
-      actor, action = parsed
+      _, action = parsed
       action_type = str(action.get('type', '')).strip().upper()
       if not action_type:
         continue
 
       last_action_type = action_type
-      last_action_actor = actor
 
       if action_type in {'MAKE_OFFER', 'MAKE_COUNTEROFFER'}:
         price = self._extract_action_price(action)
         if price is not None:
           active_offer_price = price
-          active_offerer = actor
           active_offer_type = action_type
       elif action_type in {'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'}:
         active_offer_price = None
-        active_offerer = None
         active_offer_type = None
 
     own_reservation = self._resolve_own_reservation()
+    opponent_reservation = self._resolve_opponent_reservation()
+    reservation_comparison = self._format_reservation_comparison(
+        own_reservation=own_reservation,
+        opponent_reservation=opponent_reservation,
+    )
 
     lines = [
       'NUMERIC FACTS (DETERMINISTIC):',
-      f'Role={self._role.value}',
-      f'OwnReservation={self._format_money(own_reservation)}',
+      f'OwnVsOpponentReservation={reservation_comparison}',
       f'LastObservedActionType={last_action_type or "NA"}',
-      f'LastObservedActionActor={last_action_actor or "NA"}',
     ]
 
     if active_offer_price is None:
       lines.append('HasActiveOffer=False')
       lines.append('ActiveOfferPrice=NA')
-      lines.append('ActiveOfferBy=NA')
     else:
       lines.append('HasActiveOffer=True')
       lines.append(f'ActiveOfferPrice={self._format_money(active_offer_price)}')
-      lines.append(f'ActiveOfferBy={active_offerer or "NA"}')
       lines.append(f'ActiveOfferType={active_offer_type or "NA"}')
       if own_reservation is not None:
         offer_minus_reservation = active_offer_price - own_reservation
@@ -270,4 +311,3 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
       self._max_observations = max(1, int(state['max_observations']))
     if 'emit_pre_act_context' in state:
       self._emit_pre_act_context = bool(state['emit_pre_act_context'])
-

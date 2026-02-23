@@ -60,6 +60,7 @@ class Entity(prefab_lib.Prefab):
         'name': 'Negotiator',
         'description': 'Reach a mutually beneficial agreement',
         'reservation_value': '0.0',
+        'flat_listing': '',
         'ethical_constraints': DEFAULT_ETHICS,
         'modules': '', # e.g. uncertainty_buyer, uncertainty_seller
         'modules_config': '', # e.g. config parameters for the modules in JSON format
@@ -84,8 +85,15 @@ class Entity(prefab_lib.Prefab):
         agent_name = self.params.get('name', 'Negotiator')
         description = self.params.get('description', '')
         reservation = float(self.params.get('reservation_value', '0.0'))
+        flat_listing_raw = self.params.get('flat_listing', '')
         ethics = self.params.get('ethical_constraints', DEFAULT_ETHICS)
         # TODO: revise the ethical constraints based on HDB negotiation context
+        try:
+            flat_listing = json.loads(flat_listing_raw) if flat_listing_raw else {}
+            if not isinstance(flat_listing, dict):
+                flat_listing = {}
+        except json.JSONDecodeError:
+            flat_listing = {}
 
         # Parse module configurations
         modules_str = self.params.get('modules', '')
@@ -123,6 +131,7 @@ class Entity(prefab_lib.Prefab):
             agent_name=agent_name,
             role = role,
             description=description,
+            flat_listing=flat_listing,
             reservation_value=reservation,
             ethical_constraints=ethics,
             verbose=True,
@@ -197,13 +206,15 @@ class Entity(prefab_lib.Prefab):
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
             pre_act_label=f'Self-perception as {role}:',
-            question=(f'{HDB_CONTEXT_ANCHOR}'
+            question=(
             f'Agent description: {description}\n'
-            f'What kind of {role} is {agent_name}? Respond in 1-5 sentences.'
+            f'What kind of {role} is {agent_name}? Respond in 1-5 sentences.\n'
+            f'Requirement: return at least one concrete sentence; do not return an empty answer.'
             ),
             answer_prefix=f'{agent_name} is a {role} who ',
             add_to_memory=False,
             memory_tag='[self perception]',
+            terminators=(),
         )
 
         # Create question components for context and reasoning
@@ -211,7 +222,6 @@ class Entity(prefab_lib.Prefab):
             model=model,
             pre_act_label=f'Current negotiation situation:',
             question=(
-                f'{HDB_CONTEXT_ANCHOR}'
                 f'What is the current negotiation situation that {agent_name} is in? '
                 'Respond in 1-5 sentences.'
             ),
@@ -248,6 +258,14 @@ class Entity(prefab_lib.Prefab):
                 f'if strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.'
                 f'{HDB_ACTION_DOMAIN_GUARDRAILS}'
             )
+        action_components = [
+            instructions.name,
+            'situation_perception',
+            'self_perception',
+            strategy_key,
+            numeric_facts_key,
+            neg_memory.name,
+        ]
         question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
             model=model,
             pre_act_label=f'Next action',
@@ -256,7 +274,7 @@ class Entity(prefab_lib.Prefab):
             add_to_memory=False,
             memory_tag='[action reasoning]',
             output_schema=BuyerActions if role == RoleType.BUYER else SellerActions,
-            components = ['situation_perception', 'self_perception', strategy_key, numeric_facts_key, instructions.name]
+            components=action_components,
         )
 
         # # Recent memories for context 

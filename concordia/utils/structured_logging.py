@@ -1162,7 +1162,6 @@ function renderEntityTimeline(entityName, containerId) {
 
     group.entries.forEach(entry => {
       const payload = extractEntityPayload(entry);
-      const resolved = resolveRefs(entry.deduplicated_data || {});
       const contextNames = extractContextComponentNames(payload);
 
       html += '<details class="entity-step-details">';
@@ -1206,13 +1205,6 @@ function renderEntityTimeline(entityName, containerId) {
         html += '<div class="trace-empty">No chain-of-thought trace captured for this step.</div>';
       }
       html += '</details>';
-
-      if (resolved && Object.keys(resolved).length > 0) {
-        html += '<details>';
-        html += '<summary>Raw Entry</summary>';
-        html += renderObject(resolved);
-        html += '</details>';
-      }
 
       html += '</details>';
     });

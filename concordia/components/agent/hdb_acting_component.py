@@ -27,6 +27,13 @@ class OfferIntentJudgement(BaseModel):
     explanation: str
 
 
+class WalkAwayIntentJudgement(BaseModel):
+    """LLM-as-a-judge output for buyer walk-away detection in prose."""
+
+    intent: Literal["WALK_AWAY", "CONTINUE", "UNCLEAR"]
+    explanation: str
+
+
 class ForcedOfferReasoning(BaseModel):
     """Schema for fallback reasoning tied to a forced offer action."""
 
@@ -178,6 +185,92 @@ class HDBStructuredActComponent(
         keys = ("question_details", "inquiry_details", "answer_details", "reasoning")
         chunks = [str(payload.get(k, "")).strip() for k in keys if str(payload.get(k, "")).strip()]
         return "\n".join(chunks)
+
+    @staticmethod
+    def _walk_away_explanation_from_payload(payload: dict[str, Any]) -> str:
+        """Extract best public-facing explanation text for WALK_AWAY."""
+        for key in ("verbal_explanation", "answer_details", "inquiry_details", "question_details", "reasoning"):
+            value = str(payload.get(key, "")).strip()
+            if value:
+                return value
+        return "I am ending this negotiation without agreement."
+
+    def _strategy_requires_walk_away(self, allowed_types: Sequence[str]) -> bool:
+        """Return True when buyer strategy patience has been exceeded."""
+        if self._role != hdb_schemas.RoleType.BUYER:
+            return False
+        allowed = {str(x).strip().upper() for x in allowed_types}
+        if allowed and "WALK_AWAY" not in allowed:
+            return False
+        try:
+            strategy_component = self.get_entity().get_component("NegotiationStrategy")
+        except Exception:
+            return False
+
+        should_walk_away = getattr(strategy_component, "should_walk_away", None)
+        if not callable(should_walk_away):
+            return False
+
+        try:
+            return bool(should_walk_away())
+        except Exception:
+            return False
+
+    def _judge_walk_away_intent(
+        self,
+        payload: dict[str, Any],
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str],
+    ) -> str:
+        """Use an LLM judge to detect explicit walk-away intent in non-offer prose."""
+        action_type = str(payload.get("type", "")).strip().upper()
+        if self._role != hdb_schemas.RoleType.BUYER:
+            return "CONTINUE"
+        if action_type not in self._textual_non_offer_action_types():
+            return "CONTINUE"
+        allowed = {str(x).strip().upper() for x in allowed_types}
+        if allowed and "WALK_AWAY" not in allowed:
+            return "CONTINUE"
+
+        public_text = self._collect_text_fields(payload)
+        internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
+        if not public_text and not internal_reasoning:
+            return "CONTINUE"
+
+        prompt = interactive_document.InteractiveDocument(self._model)
+        prompt.statement(
+            "You are a strict negotiation termination judge.\n"
+            "Determine whether the agent is explicitly terminating the CURRENT negotiation NOW without agreement.\n"
+            "WALK_AWAY means a clear, present decision to end this negotiation with no deal.\n"
+            "CONTINUE means the agent is still negotiating, asking questions, or discussing conditions.\n"
+            "UNCLEAR means ambiguous/conditional/hypothetical mentions that do not clearly terminate now.\n"
+            "Do not infer WALK_AWAY from generic frustration alone."
+        )
+        prompt.statement(
+            f"Current action type: {action_type}\n"
+            f"Has active offer: {has_active_offer}\n"
+            f"Allowed action types this turn: {', '.join(str(x) for x in allowed_types) or '(unknown)'}\n"
+            f"Public text:\n{public_text or '(empty)'}\n"
+            f"Internal reasoning:\n{internal_reasoning or '(empty)'}\n"
+        )
+        verdict = prompt.structured_question(
+            question=(
+                "Classify the termination intent. "
+                "Return only the schema."
+            ),
+            output_schema=WalkAwayIntentJudgement,
+            max_tokens=280,
+            terminators=(),
+        )
+        if isinstance(verdict, (BaseModel, RootModel)):
+            verdict_payload = verdict.model_dump()
+        elif isinstance(verdict, dict):
+            verdict_payload = verdict
+        elif isinstance(verdict, str):
+            verdict_payload = json.loads(self._extract_json(verdict))
+        else:
+            verdict_payload = {}
+        return str(verdict_payload.get("intent", "UNCLEAR")).strip().upper() or "UNCLEAR"
 
     def _contains_offer_intent(self, text: str) -> bool:
         """Use LLM-as-a-judge to detect offer/counteroffer intent in prose."""
@@ -515,6 +608,52 @@ class HDBStructuredActComponent(
         payload = json.loads(canonical)
         action_type = str(payload.get("type", "")).strip().upper()
         details_text = self._collect_text_fields(payload)
+        allowed = {str(x).strip().upper() for x in allowed_types}
+
+        # Hard-stop buyer drift once patience is exhausted.
+        if (
+            self._strategy_requires_walk_away(allowed_types)
+            and action_type not in {"WALK_AWAY", "ACCEPT_OFFER"}
+        ):
+            internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
+            if not internal_reasoning:
+                internal_reasoning = (
+                    "Patience horizon exceeded; ending negotiation without agreement."
+                )
+            coerced_payload = {
+                "type": "WALK_AWAY",
+                "internal_reasoning": internal_reasoning,
+                "verbal_explanation": self._walk_away_explanation_from_payload(payload),
+            }
+            coerced = self._schema_for_turn(has_active_offer).model_validate(coerced_payload)
+            canonical = coerced.model_dump_json()
+            payload = json.loads(canonical)
+            action_type = "WALK_AWAY"
+            details_text = self._collect_text_fields(payload)
+
+        # Coerce buyer non-offer outputs to WALK_AWAY when semantic intent clearly ends negotiation now.
+        walk_away_intent = self._judge_walk_away_intent(
+            payload=payload,
+            has_active_offer=has_active_offer,
+            allowed_types=allowed_types,
+        )
+        if walk_away_intent == "WALK_AWAY":
+            internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
+            if not internal_reasoning:
+                internal_reasoning = (
+                    "Terminating negotiation without agreement due to lack of conditions "
+                    "required to proceed confidently."
+                )
+            coerced_payload = {
+                "type": "WALK_AWAY",
+                "internal_reasoning": internal_reasoning,
+                "verbal_explanation": self._walk_away_explanation_from_payload(payload),
+            }
+            coerced = self._schema_for_turn(has_active_offer).model_validate(coerced_payload)
+            canonical = coerced.model_dump_json()
+            payload = json.loads(canonical)
+            action_type = "WALK_AWAY"
+            details_text = self._collect_text_fields(payload)
 
         # Prevent advice-like prose with embedded prices from passing as non-offer actions.
         if (
@@ -534,7 +673,6 @@ class HDBStructuredActComponent(
 
         if not allowed_types:
             return canonical
-        allowed = {str(x).strip().upper() for x in allowed_types}
         if action_type not in allowed:
             raise ValueError(
                 f"Action type {action_type!r} not in allowed options {sorted(allowed)}."

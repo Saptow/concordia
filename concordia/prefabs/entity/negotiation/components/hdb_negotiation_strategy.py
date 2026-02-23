@@ -13,9 +13,9 @@ from concordia.typing import entity_component
 
 from concordia.prefabs.entity.negotiation.config import StrategyConfig
 
-AVG_NEGOTIATION_LENGTH = 6 # average number of rounds in HDB resale negotiation (in weeks)
-MIN_ROUNDS = 3
-MAX_ROUNDS = 9
+AVG_NEGOTIATION_LENGTH = 5  # average number of rounds in HDB resale negotiation (in weeks)
+MIN_ROUNDS = 2
+MAX_ROUNDS = 8
 class UrgencyLevel(BaseModel):
     """Schema for urgency level output."""
     urgency: float = Field(..., ge=0.0, le=1.0, description="Urgency level from 0 (not urgent) to 1 (extremely urgent)")
@@ -275,21 +275,66 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             self._state.current_position = self._uncertainty_context._own_reservation
             self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
 
-        # Buyer-specific walk-away guidance.
-        if self._role != RoleType.BUYER:
-            return ""
+        horizon = self._max_rounds_from_urgency(self._urgency_level)
+        rounds_elapsed = self._state.rounds_elapsed
+        rounds_left = max(0, horizon - rounds_elapsed)
+        urgency = max(0.0, min(1.0, float(self._urgency_level)))
 
-        walk_away = self.should_walk_away()
-        if walk_away:
+        if self._role == RoleType.BUYER:
+            if self.should_walk_away():
+                return (
+                    "STRATEGY GUIDANCE (BUYER): PATIENCE LIMIT REACHED. "
+                    "Use WALK_AWAY now unless you are immediately ACCEPT_OFFER."
+                )
+
+            if rounds_left <= 1:
+                urgency_rule = (
+                    "FINAL DECISION TURN: If an offer is active, decide now with "
+                    "ACCEPT_OFFER, REJECT_OFFER, MAKE_COUNTEROFFER, or WALK_AWAY. "
+                    "If no offer is active, make a concrete MAKE_OFFER now."
+                )
+            elif rounds_left <= 2:
+                urgency_rule = (
+                    "HIGH DEADLINE PRESSURE: Stop exploratory loops and move price "
+                    "decisively this turn. Prefer offer/accept/reject/counter over "
+                    "questions or generic answers."
+                )
+            else:
+                urgency_rule = (
+                    "NORMAL PRESSURE: Keep negotiating, but ensure each turn advances "
+                    "toward closure with concrete price progress."
+                )
+
             return (
-                "STRATEGY GUIDANCE (BUYER): Patience horizon exceeded. "
-                "Choose WALK_AWAY now to end this negotiation without agreement."
+                "STRATEGY GUIDANCE (BUYER): "
+                f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
+                f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
+                f"{urgency_rule}"
+            )
+
+        if rounds_left <= 1:
+            urgency_rule = (
+                "FINAL DECISION TURN: If an offer is active, decide now with "
+                "ACCEPT_OFFER, REJECT_OFFER, or MAKE_COUNTEROFFER. "
+                "If no offer is active, issue MAKE_OFFER now."
+            )
+        elif rounds_left <= 2:
+            urgency_rule = (
+                "HIGH DEADLINE PRESSURE: Prioritize price-closing actions and avoid "
+                "open-ended inquiries."
             )
         else:
-            return (
-                "STRATEGY GUIDANCE (BUYER): DO NOT choose WALK_AWAY yet; "
-                "continue negotiating with other allowed actions."
+            urgency_rule = (
+                "NORMAL PRESSURE: Keep progressing toward agreement with concrete "
+                "price movement each turn."
             )
+
+        return (
+            "STRATEGY GUIDANCE (SELLER): "
+            f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
+            f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
+            f"{urgency_rule}"
+        )
 
     def post_act(self, action_attempt: str) -> str:
         """Update strategy state after each action."""
@@ -343,9 +388,23 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         pass
     def get_pre_act_label(self) -> str:
         return 'NegotiationStrategy'
+
+    @staticmethod
+    def _display_position(value: float | None) -> str:
+        if not isinstance(value, (int, float)):
+            return 'Unknown'
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            return 'Unknown'
+        return str(parsed)
     
     def get_pre_act_value(self) -> str:
-        return f"CurrentPosition:{self._state.current_position}|OpponentPosition:{self._state.opponent_position}|RoundsElapsed:{self._state.rounds_elapsed}|UrgencyLevel:{self._urgency_level}"
+        return (
+            f"CurrentPosition:{self._state.current_position}"
+            f"|OpponentPosition:{self._display_position(self._state.opponent_position)}"
+            f"|RoundsElapsed:{self._state.rounds_elapsed}"
+            f"|UrgencyLevel:{self._urgency_level}"
+        )
 
     def get_state(self)-> str:
         '''Get component state for saving /restoring.'''
@@ -364,5 +423,3 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 self._state.rounds_elapsed = int(value)
             elif key == 'UrgencyLevel':
                 self._urgency_level = float(value)
-
-

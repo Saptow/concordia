@@ -310,13 +310,14 @@ class Simulation(simulation_lib.Simulation):
           entity_memory_component.get_all_memories_as_text()
       )
 
-    game_master_memories = (
-        self.game_master_memory_bank.get_all_memories_as_text()
-    )
+    # Temporarily disabled per request: do not log game master memories.
+    # game_master_memories = (
+    #     self.game_master_memory_bank.get_all_memories_as_text()
+    # )
 
     simulation_log.attach_memories(
         entity_memories=entity_memories,
-        game_master_memories=game_master_memories,
+        # game_master_memories=game_master_memories,
     )
 
     return simulation_log

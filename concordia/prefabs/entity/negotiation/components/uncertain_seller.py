@@ -595,8 +595,15 @@ class UncertainSeller(entity_component.ContextComponent):
 """
 
         for name, belief in self._beliefs.items():
-            guidance += f"• {belief.name}: {belief.get_expected_mean:.1f} ± {belief.get_expected_variance:.1f} \n"
-            guidance += f"  95% CI: [{belief.get_confidence_interval()[0]:.1f}, {belief.get_confidence_interval()[1]:.1f}]\n"
+            std = math.sqrt(max(0.0, belief.get_expected_variance))
+            guidance += (
+                f"• {belief.name}: Mean={belief.get_expected_mean:.1f}, "
+                f"Std={std:.1f}\n"
+            )
+            guidance += (
+                f"  95% CI: [{belief.get_confidence_interval()[0]:.1f}, "
+                f"{belief.get_confidence_interval()[1]:.1f}]\n"
+            )
 
         guidance += f"\n**Scenario Analysis:**\n"
         for scenario in scenarios:
