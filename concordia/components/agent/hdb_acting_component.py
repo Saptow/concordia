@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from collections.abc import Sequence
 from typing import Any, Literal, override
@@ -375,7 +376,8 @@ class HDBStructuredActComponent(
         verbal_explanation: str,
     ) -> dict[str, Any]:
         """Build deterministic schema-compliant fallback offer JSON."""
-        safe_price = max(1.0, float(price))
+        # Offer schemas require integer prices.
+        safe_price = max(1, math.floor(float(price) + 0.5))
         payload: dict[str, Any] = {
             "type": action_type,
             "internal_reasoning": internal_reasoning,
@@ -579,6 +581,7 @@ class HDBStructuredActComponent(
                     "- Return exactly one executable action JSON object, not advice about what to say.\n"
                     "- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER "
                     "or MAKE_COUNTEROFFER.\n"
+                    "- Any offer/counteroffer price must be a positive integer.\n"
                     "- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n"
                     "- If your reasoning says you accept, the action type must be ACCEPT_OFFER.\n"
                     "- If your reasoning says you reject, the action type must be REJECT_OFFER.\n"
@@ -660,7 +663,7 @@ class HDBStructuredActComponent(
                     "Rules:\n"
                     f"- Return exactly one executable action JSON with type {target_offer_type}.\n"
                     "- Do not output QUESTION/INQUIRE/NORMAL_ANSWER for this response.\n"
-                    "- Include a valid positive numeric price field."
+                    "- Include a valid positive integer price field."
                 ),
                 output_schema=self._schema_for_turn(has_active_offer),
                 max_tokens=2200,
