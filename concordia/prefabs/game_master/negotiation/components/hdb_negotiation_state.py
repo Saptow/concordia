@@ -59,6 +59,8 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     self._id_to_name = dict(zip(self._player_ids, player_names))
     self._name_to_id = dict(zip(player_names, self._player_ids))
     self._pair_queue = self._build_pair_queue(negotiation_pairs)
+    self._player_id_to_pair_index: dict[str, int] = {}
+    self._rebuild_player_index()
     # Pair-specific round counters. Each pair starts at round 1.
     self._pair_round_numbers = [1 for _ in self._pair_queue]
     self._closed_pair_indices: set[int] = set()
@@ -129,10 +131,15 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     return active_pair[self._turn_in_pair]
 
   def _pair_index_for_player_id(self, player_id: str) -> int | None:
+    return self._player_id_to_pair_index.get(player_id)
+
+  def _rebuild_player_index(self) -> None:
+    """Rebuild O(1) player->pair index lookup table."""
+    self._player_id_to_pair_index = {}
     for idx, pair in enumerate(self._pair_queue):
-      if player_id in pair:
-        return idx
-    return None
+      first, second = pair
+      self._player_id_to_pair_index[first] = idx
+      self._player_id_to_pair_index[second] = idx
 
   def _ensure_open_pair_cursor(self) -> None:
     if not self._pair_queue or self.all_pairs_closed():
@@ -269,6 +276,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
       self._pair_queue = [
           (str(pair[0]), str(pair[1])) for pair in pair_queue_state  # type: ignore[index]
       ]
+    self._rebuild_player_index()
     pair_round_numbers_state = state.get('pair_round_numbers')
     if pair_round_numbers_state:
       restored_pair_rounds = [
@@ -303,11 +311,17 @@ class TurnOrderStateTracker(action_spec_ignored.ActionSpecIgnored):
   ):
     super().__init__(pre_act_label=pre_act_label)
     self._scheduler_component_key = scheduler_component_key
+    self._scheduler: PairRoundRobinNextActing | None = None
+
+  def _get_scheduler(self) -> PairRoundRobinNextActing:
+    if self._scheduler is None:
+      self._scheduler = self.get_entity().get_component(
+          self._scheduler_component_key, type_=PairRoundRobinNextActing
+      )
+    return self._scheduler
 
   def _make_pre_act_value(self) -> str:
-    scheduler = self.get_entity().get_component(
-        self._scheduler_component_key, type_=PairRoundRobinNextActing
-    )
+    scheduler = self._get_scheduler()
     if scheduler.all_pairs_closed():
       return 'All negotiation pairs are closed.'
     snapshot = scheduler.get_scheduler_snapshot()
@@ -328,6 +342,7 @@ class TurnOrderStateTracker(action_spec_ignored.ActionSpecIgnored):
   def set_state(self, state: entity_component.ComponentState) -> None:
     if 'scheduler_component_key' in state:
       self._scheduler_component_key = str(state['scheduler_component_key'])
+      self._scheduler = None
 
 
 class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
@@ -342,6 +357,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
   ):
     super().__init__(pre_act_label=pre_act_label)
     self._scheduler_component_key = scheduler_component_key
+    self._scheduler: PairRoundRobinNextActing | None = None
     self._player_to_pair: dict[str, str] = {}
     self._pair_members: dict[str, tuple[str, str]] = {}
     self._pair_order: list[str] = []
@@ -352,6 +368,13 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
   @staticmethod
   def _pair_key(first: str, second: str) -> str:
     return f'{first}|||{second}'
+
+  def _get_scheduler(self) -> PairRoundRobinNextActing:
+    if self._scheduler is None:
+      self._scheduler = self.get_entity().get_component(
+          self._scheduler_component_key, type_=PairRoundRobinNextActing
+      )
+    return self._scheduler
 
   @staticmethod
   def _extract_json_object(text: str) -> str | None:
@@ -372,9 +395,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
   def _ensure_initialized(self) -> None:
     if self._pair_order:
       return
-    scheduler = self.get_entity().get_component(
-        self._scheduler_component_key, type_=PairRoundRobinNextActing
-    )
+    scheduler = self._get_scheduler()
     for first, second in scheduler.get_pair_queue_names():
       key = self._pair_key(first, second)
       self._pair_order.append(key)
@@ -429,9 +450,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
       self._active_offers[pair_key] = None
       self._closed_pairs.add(pair_key)
       self._closed_pair_outcomes[pair_key] = 'SUCCESS'
-      scheduler = self.get_entity().get_component(
-          self._scheduler_component_key, type_=PairRoundRobinNextActing
-      )
+      scheduler = self._get_scheduler()
       scheduler.close_pair_for_player(actor)
     elif action_type == 'WALK_AWAY':
       role = self._role_for_player(actor, pair_key)
@@ -440,9 +459,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
       self._active_offers[pair_key] = None
       self._closed_pairs.add(pair_key)
       self._closed_pair_outcomes[pair_key] = 'CLOSED_WITHOUT_SUCCESS'
-      scheduler = self.get_entity().get_component(
-          self._scheduler_component_key, type_=PairRoundRobinNextActing
-      )
+      scheduler = self._get_scheduler()
       scheduler.close_pair_for_player(actor)
 
   def has_active_offer_for_player(self, player_name: str) -> bool:
@@ -496,9 +513,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
 
   def _make_pre_act_value(self) -> str:
     self._ensure_initialized()
-    scheduler = self.get_entity().get_component(
-        self._scheduler_component_key, type_=PairRoundRobinNextActing
-    )
+    scheduler = self._get_scheduler()
     active_player = scheduler.get_currently_active_player()
     if not active_player:
       return 'No active player.'
@@ -535,6 +550,7 @@ class PairActiveOfferTracker(action_spec_ignored.ActionSpecIgnored):
   def set_state(self, state: entity_component.ComponentState) -> None:
     if 'scheduler_component_key' in state:
       self._scheduler_component_key = str(state['scheduler_component_key'])
+      self._scheduler = None
     if 'player_to_pair' in state:
       self._player_to_pair = dict(state['player_to_pair'])  # type: ignore[arg-type]
     if 'pair_members' in state:
@@ -587,14 +603,20 @@ class FixedNextActionSpec(entity_component.ContextComponent):
     self._choice_options = tuple(choice_options)
     self._next_acting_component_key = next_acting_component_key
     self._offer_tracker_component_key = offer_tracker_component_key
+    self._scheduler: PairRoundRobinNextActing | None = None
+
+  def _get_scheduler(self) -> PairRoundRobinNextActing:
+    if self._scheduler is None:
+      self._scheduler = self.get_entity().get_component(
+          self._next_acting_component_key, type_=PairRoundRobinNextActing
+      )
+    return self._scheduler
 
   def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
     if action_spec.output_type != entity_lib.OutputType.NEXT_ACTION_SPEC:
       return ''
 
-    scheduler = self.get_entity().get_component(
-        self._next_acting_component_key, type_=PairRoundRobinNextActing
-    )
+    scheduler = self._get_scheduler()
     active_player = scheduler.get_currently_active_player() or '{name}'
     prompt = self._call_to_action.format(name=active_player)
     offer_tracker = self.get_entity().get_component(
@@ -646,6 +668,7 @@ class FixedNextActionSpec(entity_component.ContextComponent):
       self._choice_options = tuple(state['choice_options'])  # type: ignore[arg-type]
     if 'next_acting_component_key' in state:
       self._next_acting_component_key = str(state['next_acting_component_key'])
+      self._scheduler = None
     if 'offer_tracker_component_key' in state:
       self._offer_tracker_component_key = str(state['offer_tracker_component_key'])
 
@@ -663,6 +686,14 @@ class TerminateWhenAllPairsClosed(entity_component.ContextComponent):
     super().__init__()
     self._offer_tracker_component_key = offer_tracker_component_key
     self._scheduler_component_key = scheduler_component_key
+    self._scheduler: PairRoundRobinNextActing | None = None
+
+  def _get_scheduler(self) -> PairRoundRobinNextActing:
+    if self._scheduler is None:
+      self._scheduler = self.get_entity().get_component(
+          self._scheduler_component_key, type_=PairRoundRobinNextActing
+      )
+    return self._scheduler
 
   def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
     if action_spec.output_type != entity_lib.OutputType.TERMINATE:
@@ -670,9 +701,7 @@ class TerminateWhenAllPairsClosed(entity_component.ContextComponent):
     offer_tracker = self.get_entity().get_component(
         self._offer_tracker_component_key, type_=PairActiveOfferTracker
     )
-    scheduler = self.get_entity().get_component(
-        self._scheduler_component_key, type_=PairRoundRobinNextActing
-    )
+    scheduler = self._get_scheduler()
     should_terminate = offer_tracker.all_pairs_closed() or scheduler.all_pairs_closed()
     return 'Yes' if should_terminate else 'No'
 
@@ -687,6 +716,7 @@ class TerminateWhenAllPairsClosed(entity_component.ContextComponent):
       self._offer_tracker_component_key = str(state['offer_tracker_component_key'])
     if 'scheduler_component_key' in state:
       self._scheduler_component_key = str(state['scheduler_component_key'])
+      self._scheduler = None
 
 
 class PassthroughResolution(entity_component.ContextComponent):
@@ -706,6 +736,15 @@ class PassthroughResolution(entity_component.ContextComponent):
     self._make_observation_component_key = make_observation_component_key
     self._offer_tracker_component_key = offer_tracker_component_key
     self._notify_players = notify_players
+    self._scheduler: PairRoundRobinNextActing | None = None
+
+  def _get_scheduler(self) -> PairRoundRobinNextActing:
+    if self._scheduler is None:
+      self._scheduler = self.get_entity().get_component(
+          next_acting_component.DEFAULT_NEXT_ACTING_COMPONENT_KEY,
+          type_=PairRoundRobinNextActing,
+      )
+    return self._scheduler
 
   @staticmethod
   def _sanitize_event_for_counterparty(event: str) -> str:
@@ -765,10 +804,7 @@ class PassthroughResolution(entity_component.ContextComponent):
       actor, sep, _ = event.partition(':')
       actor_name = actor.strip() if sep else ''
       if not actor_name:
-        scheduler = self.get_entity().get_component(
-            next_acting_component.DEFAULT_NEXT_ACTING_COMPONENT_KEY,
-            type_=PairRoundRobinNextActing,
-        )
+        scheduler = self._get_scheduler()
         actor_name = scheduler.get_currently_active_player() or ''
       pair_members = (
           offer_tracker.get_pair_members_for_player(actor_name)
@@ -802,3 +838,4 @@ class PassthroughResolution(entity_component.ContextComponent):
       self._offer_tracker_component_key = str(state['offer_tracker_component_key'])
     if 'notify_players' in state:
       self._notify_players = bool(state['notify_players'])
+    self._scheduler = None
