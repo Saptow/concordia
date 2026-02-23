@@ -53,6 +53,7 @@ from concordia.language_model import language_model
 from concordia.utils import measurements as measurements_lib
 from vllm import LLM
 from vllm import SamplingParams
+from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
 
@@ -60,6 +61,8 @@ _DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
 _DEFAULT_TENSOR_PARALLEL_SIZE = 1
 _DEFAULT_ENABLE_PREFIX_CACHING = False
 _DEFAULT_MAX_LORA_RANK = 16
+_DEFAULT_STRUCTURED_OUTPUTS_BACKEND = 'xgrammar'
+_DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK = False
 
 
 class VLLMLanguageModel(language_model.LanguageModel):
@@ -77,6 +80,12 @@ class VLLMLanguageModel(language_model.LanguageModel):
       channel: str = language_model.DEFAULT_STATS_CHANNEL,
       enable_prefix_caching: bool = _DEFAULT_ENABLE_PREFIX_CACHING,
       max_lora_rank: int = _DEFAULT_MAX_LORA_RANK,
+      structured_outputs_backend: str | None = (
+          _DEFAULT_STRUCTURED_OUTPUTS_BACKEND
+      ),
+      structured_outputs_disable_fallback: bool = (
+          _DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK
+      ),
       **kwargs: Any,
   ):
     """Initialize the vLLM language model.
@@ -91,6 +100,10 @@ class VLLMLanguageModel(language_model.LanguageModel):
       channel: Channel name for measurements.
       enable_prefix_caching: Whether to enable prefix caching in vLLM.
       max_lora_rank: Maximum rank for LoRA adapters.
+      structured_outputs_backend: Structured output backend to use for
+        deterministic behavior. Set to None to use vLLM default selection.
+      structured_outputs_disable_fallback: Whether to disable fallback to other
+        structured output backends.
       **kwargs: Additional arguments passed to vLLM LLM constructor.
 
     Raises:
@@ -118,6 +131,12 @@ class VLLMLanguageModel(language_model.LanguageModel):
 
     if max_model_len is not None:
       llm_kwargs['max_model_len'] = max_model_len
+
+    if structured_outputs_backend is not None:
+      llm_kwargs['structured_outputs_config'] = StructuredOutputsConfig(
+          backend=structured_outputs_backend,
+          disable_fallback=structured_outputs_disable_fallback,
+      )
 
     self._llm = LLM(**llm_kwargs)
 
@@ -279,6 +298,12 @@ class VLLMLora(language_model.LanguageModel):
       channel: str = language_model.DEFAULT_STATS_CHANNEL,
       enable_prefix_caching: bool = _DEFAULT_ENABLE_PREFIX_CACHING,
       max_lora_rank: int = _DEFAULT_MAX_LORA_RANK,
+      structured_outputs_backend: str | None = (
+          _DEFAULT_STRUCTURED_OUTPUTS_BACKEND
+      ),
+      structured_outputs_disable_fallback: bool = (
+          _DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK
+      ),
       **kwargs: Any,
   ):
     """Initialize the vLLM language model with LoRA.
@@ -300,6 +325,10 @@ class VLLMLora(language_model.LanguageModel):
       channel: Channel name for measurements.
       enable_prefix_caching: Whether to enable prefix caching in vLLM.
       max_lora_rank: Maximum rank for LoRA adapters.
+      structured_outputs_backend: Structured output backend to use for
+        deterministic behavior. Set to None to use vLLM default selection.
+      structured_outputs_disable_fallback: Whether to disable fallback to other
+        structured output backends.
       **kwargs: Additional arguments passed to vLLM LLM constructor.
     """
 
@@ -317,6 +346,10 @@ class VLLMLora(language_model.LanguageModel):
           channel=channel,
           enable_prefix_caching=enable_prefix_caching,
           max_lora_rank=max_lora_rank,
+          structured_outputs_backend=structured_outputs_backend,
+          structured_outputs_disable_fallback=(
+              structured_outputs_disable_fallback
+          ),
           **kwargs,
       )
       adapter_id = self._vllm_model.increment_lora_adapters()
