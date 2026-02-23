@@ -618,6 +618,7 @@ class HDBStructuredActComponent(
         raw: Any,
         has_active_offer: bool | None,
         allowed_types: Sequence[str] = (),
+        bypass_unified_judge: bool = False,
     ) -> str:
         """Validate extracted JSON against role+offer state (+optional allowed types)."""
         normalized = self._normalize_structured_action(raw)
@@ -653,17 +654,22 @@ class HDBStructuredActComponent(
             action_type = "WALK_AWAY"
             details_text = self._collect_text_fields(payload)
 
-        judgement = self._judge_action_consistency(
-            payload=payload,
-            has_active_offer=has_active_offer,
-            allowed_types=allowed_types,
-        )
+        judgement: UnifiedActionJudgement | None = None
+        if not bypass_unified_judge:
+            judgement = self._judge_action_consistency(
+                payload=payload,
+                has_active_offer=has_active_offer,
+                allowed_types=allowed_types,
+            )
 
         # Coerce buyer non-offer outputs to WALK_AWAY when intent is explicit.
         if (
+            not bypass_unified_judge
+            and
             self._role == hdb_schemas.RoleType.BUYER
             and action_type in self._textual_non_offer_action_types()
             and ((not allowed) or ("WALK_AWAY" in allowed))
+            and judgement is not None
             and judgement.walk_away_intent == "WALK_AWAY"
         ):
             internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
@@ -692,7 +698,11 @@ class HDBStructuredActComponent(
                     "WALK_AWAY chosen before patience horizon was exceeded. "
                     "Continue negotiating unless strategy guidance requires termination."
                 )
-            if judgement.walk_away_intent != "WALK_AWAY":
+            if (
+                not bypass_unified_judge
+                and judgement is not None
+                and judgement.walk_away_intent != "WALK_AWAY"
+            ):
                 raise ValueError(
                     "WALK_AWAY chosen but unified judge did not detect explicit termination intent. "
                     f"Judge explanation: {judgement.explanation}"
@@ -700,7 +710,10 @@ class HDBStructuredActComponent(
 
         # Coerce offer-related intent to correct action types when mismatches are detected.
         if (
+            not bypass_unified_judge
+            and
             action_type in self._textual_non_offer_action_types()
+            and judgement is not None
             and judgement.contains_offer_intent
         ):
             raise ValueError(
@@ -709,31 +722,33 @@ class HDBStructuredActComponent(
             )
 
         # Verbal intent must align with action type for offer-state decisions.
-        expected_type = self._expected_type_from_intent(
-            judgement.intent,
-            has_active_offer=has_active_offer,
-        )
-        if expected_type and ((not allowed) or (expected_type in allowed)):
-            if action_type != expected_type:
-                raise ValueError(
-                    "Reasoning/action mismatch detected by unified judge. "
-                    f"Action type={action_type}, judged_intent_requires={expected_type}. "
-                    f"Judge explanation: {judgement.explanation}"
-                )
+        if not bypass_unified_judge and judgement is not None:
+            expected_type = self._expected_type_from_intent(
+                judgement.intent,
+                has_active_offer=has_active_offer,
+            )
+            if expected_type and ((not allowed) or (expected_type in allowed)):
+                if action_type != expected_type:
+                    raise ValueError(
+                        "Reasoning/action mismatch detected by unified judge. "
+                        f"Action type={action_type}, judged_intent_requires={expected_type}. "
+                        f"Judge explanation: {judgement.explanation}"
+                    )
 
         # Structured price (if any) must align with verbal explanation to prevent price mismatch exploits.
         structured_price = self._structured_price_from_payload(payload)
-        judged_price = judgement.proposed_price
-        if (
-            structured_price is not None
-            and judged_price is not None
-            and int(structured_price) != int(judged_price)
-        ):
-            raise ValueError(
-                "Price mismatch between verbal explanation and structured price field. "
-                f"StructuredPrice={structured_price}, VerbalPrice={judged_price}. "
-                f"Judge explanation: {judgement.explanation}"
-            )
+        if not bypass_unified_judge and judgement is not None:
+            judged_price = judgement.proposed_price
+            if (
+                structured_price is not None
+                and judged_price is not None
+                and int(structured_price) != int(judged_price)
+            ):
+                raise ValueError(
+                    "Price mismatch between verbal explanation and structured price field. "
+                    f"StructuredPrice={structured_price}, VerbalPrice={judged_price}. "
+                    f"Judge explanation: {judgement.explanation}"
+                )
 
         if not allowed_types:
             return canonical
@@ -823,6 +838,7 @@ class HDBStructuredActComponent(
                 fallback_payload,
                 has_active_offer=has_active_offer,
                 allowed_types=allowed_types,
+                bypass_unified_judge=True,
             )
         except ValueError as fallback_error:
             raise ValueError(
@@ -934,6 +950,7 @@ class HDBStructuredActComponent(
                 deterministic_payload,
                 has_active_offer=has_active_offer,
                 allowed_types=allowed_types,
+                bypass_unified_judge=True,
             )
 
     @staticmethod
