@@ -313,9 +313,21 @@ class DisplayEvents(
     memory = self.get_entity().get_component(
         self._memory_component_key, type_=memory_component.Memory
     )
-    events = memory.scan(selector_fn=lambda x: EVENT_TAG in x)
+    limit = max(0, int(self._num_events_to_retrieve))
+    if limit == 0:
+      return ''
 
-    limit = self._num_events_to_retrieve
+    # Fast path: inspect a bounded recent window first and avoid full scan
+    # when events are dense.
+    recent_window = max(limit * 3, limit)
+    recent_items = memory.retrieve_recent(limit=recent_window)
+    events = [item for item in recent_items if EVENT_TAG in item]
+
+    # Fallback to full scan only when recent window does not contain enough
+    # tagged events.
+    if len(events) < limit:
+      events = memory.scan(selector_fn=lambda x: EVENT_TAG in x)
+
     if limit > len(events):
       limit = len(events)
     events = events[-limit:]

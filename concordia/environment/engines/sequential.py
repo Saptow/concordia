@@ -391,11 +391,16 @@ class Sequential(engine_lib.Engine):
           entity.observe(tagged_observation)
 
       entities_to_observe = self._entities_to_observe(game_master, entities)
-      tasks = {
-          entity.name: functools.partial(_entity_observation, entity)
-          for entity in entities_to_observe
-      }
-      concurrency.run_tasks(tasks, max_workers=1)
+      if not entities_to_observe:
+        pass
+      elif len(entities_to_observe) == 1:
+        _entity_observation(entities_to_observe[0])
+      else:
+        tasks = {
+            entity.name: functools.partial(_entity_observation, entity)
+            for entity in entities_to_observe
+        }
+        concurrency.run_tasks(tasks, max_workers=1)
 
       next_entity, entity_spec_to_use = self.next_acting(
           game_master, entities, log_entry=log_entry, log=log)

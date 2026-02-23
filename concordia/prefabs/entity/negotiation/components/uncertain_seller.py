@@ -354,6 +354,7 @@ class UncertainSeller(entity_component.ContextComponent):
         self._info_budget = information_gathering_budget
         self._emit_pre_act_context = emit_pre_act_context
         self._pre_act_value: Optional[str] = None
+        self._last_observation_hash: int | None = None
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
@@ -368,6 +369,18 @@ class UncertainSeller(entity_component.ContextComponent):
     
     def get_pre_act_value(self) -> str:
         return self._pre_act_value if self._pre_act_value else ""
+
+    @staticmethod
+    def _extract_observation_actor(observation: str) -> str | None:
+        """Extract actor name from observation text like '[OBSERVED] Alice: ...'."""
+        text = observation.strip()
+        if text.startswith('[OBSERVED]'):
+            text = text[len('[OBSERVED]'):].strip()
+        actor, sep, _ = text.partition(':')
+        if not sep:
+            return None
+        actor = actor.strip()
+        return actor if actor else None
     
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0):
         """Initialize default beliefs about negotiation parameters."""
@@ -663,6 +676,19 @@ class UncertainSeller(entity_component.ContextComponent):
 
     def pre_observe(self, observation: str) -> str:
         """Process incoming observation text to update beliefs."""
+        observation_text = observation.strip()
+        if not observation_text:
+            return ""
+
+        observation_hash = hash(observation_text)
+        if self._last_observation_hash == observation_hash:
+            return ""
+        self._last_observation_hash = observation_hash
+
+        actor = self._extract_observation_actor(observation_text)
+        if actor and actor == self.get_entity().name:
+            return ""
+
         self._update_counterpart_reservation_from_context(observation)
         return ""
 
