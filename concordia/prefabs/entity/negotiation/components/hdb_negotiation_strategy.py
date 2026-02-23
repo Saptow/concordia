@@ -279,12 +279,18 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, horizon - rounds_elapsed)
         urgency = max(0.0, min(1.0, float(self._urgency_level)))
+        deterministic_rule = (
+            "DETERMINISTIC CONTEXT CHECK: Read ZOPAFeasible and HasActiveOffer from "
+            "NUMERIC FACTS (DETERMINISTIC). If ZOPAFeasible=True and HasActiveOffer=False, "
+            "prioritize MAKE_OFFER now."
+        )
 
         if self._role == RoleType.BUYER:
             if self.should_walk_away():
                 return (
                     "STRATEGY GUIDANCE (BUYER): PATIENCE LIMIT REACHED. "
-                    "Use WALK_AWAY now unless you are immediately ACCEPT_OFFER."
+                    "Use WALK_AWAY now unless you are immediately ACCEPT_OFFER. "
+                    f"{deterministic_rule}"
                 )
 
             if rounds_left <= 1:
@@ -309,7 +315,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 "STRATEGY GUIDANCE (BUYER): "
                 f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
                 f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
-                f"{urgency_rule}"
+                f"{deterministic_rule} {urgency_rule}"
             )
 
         if rounds_left <= 1:
@@ -333,7 +339,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             "STRATEGY GUIDANCE (SELLER): "
             f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
             f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
-            f"{urgency_rule}"
+            f"{deterministic_rule} {urgency_rule}"
         )
 
     def post_act(self, action_attempt: str) -> str:

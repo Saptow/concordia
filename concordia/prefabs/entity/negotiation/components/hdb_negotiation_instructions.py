@@ -65,7 +65,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         """Render listing details into a compact prompt block."""
         if not self._flat_listing:
             return ''
-        lines = ['FLAT LISTING DETAILS (authoritative):']
+        lines = ['FLAT LISTING DETAILS (FACTUAL):']
         for key, value in self._flat_listing.items():
             label = str(key).replace('_', ' ').strip().title()
             if isinstance(value, list):
@@ -73,9 +73,6 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             else:
                 value_str = str(value)
             lines.append(f'- {label}: {value_str}')
-        lines.append(
-            '- Treat these listing details as the shared factual baseline for this negotiation.'
-        )
         return '\n'.join(lines) + '\n\n'
 
     def _generate_base_instructions(self) -> str:

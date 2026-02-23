@@ -209,6 +209,20 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
       return f'OwnAboveOpponent(Diff={self._format_money(diff)})'
     return f'OwnBelowOpponent(Diff={self._format_money(diff)})'
 
+  def _resolve_zopa_feasible(
+      self,
+      own_reservation: float | None,
+      opponent_reservation: float | None,
+  ) -> bool | None:
+    """Return reservation-overlap feasibility (same logic as realistic ZOPA check)."""
+    if own_reservation is None or opponent_reservation is None:
+      return None
+    if self._role == hdb_schemas.RoleType.BUYER:
+      # Buyer reservation is max willingness to pay.
+      return own_reservation >= opponent_reservation
+    # Seller reservation is minimum acceptable price.
+    return opponent_reservation >= own_reservation
+
   @staticmethod
   def _format_money(value: float | None) -> str:
     if value is None:
@@ -253,10 +267,15 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
         own_reservation=own_reservation,
         opponent_reservation=opponent_reservation,
     )
+    zopa_feasible = self._resolve_zopa_feasible(
+        own_reservation=own_reservation,
+        opponent_reservation=opponent_reservation,
+    )
 
     lines = [
       'NUMERIC FACTS (DETERMINISTIC):',
       f'OwnVsOpponentReservation={reservation_comparison}',
+      f'ZOPAFeasible={str(zopa_feasible) if zopa_feasible is not None else "Unknown"}',
       f'LastObservedActionType={last_action_type or "NA"}',
     ]
 
