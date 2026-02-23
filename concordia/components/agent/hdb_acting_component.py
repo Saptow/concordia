@@ -471,6 +471,111 @@ class HDBStructuredActComponent(
             payload["offer_price"] = safe_price
         return payload
 
+    def _deterministic_fallback_payload(
+        self,
+        has_active_offer: bool | None,
+        allowed_types: Sequence[str],
+        retry_reason: str,
+    ) -> dict[str, Any]:
+        """Build a safe deterministic fallback action payload."""
+        allowed = {str(x).strip().upper() for x in allowed_types}
+        preferred_order = (
+            "REJECT_OFFER",
+            "MAKE_COUNTEROFFER",
+            "MAKE_OFFER",
+            "NORMAL_ANSWER",
+            "INQUIRE_BUYER",
+            "QUESTION_BUYER",
+            "INQUIRE_SELLER",
+            "ACCEPT_OFFER",
+            "WALK_AWAY",
+        )
+
+        action_type: str | None = None
+        if allowed:
+            for candidate in preferred_order:
+                if candidate in allowed:
+                    # Avoid WALK_AWAY as emergency fallback unless it is the only option.
+                    if candidate == "WALK_AWAY" and len(allowed) > 1:
+                        continue
+                    action_type = candidate
+                    break
+        else:
+            if has_active_offer is True:
+                action_type = "REJECT_OFFER"
+            elif has_active_offer is False:
+                action_type = "MAKE_OFFER"
+            else:
+                action_type = "NORMAL_ANSWER"
+
+        if not action_type:
+            action_type = "NORMAL_ANSWER"
+
+        reason = (
+            "Deterministic fallback after repeated invalid structured outputs. "
+            f"Last validation error: {retry_reason or 'unknown'}."
+        )
+
+        if action_type == "MAKE_OFFER":
+            price = self._offer_price_from_reservation_bounds(action_type)
+            return {
+                "type": action_type,
+                "offer_price": int(math.floor(float(price) + 0.5)),
+                "internal_reasoning": reason,
+                "verbal_explanation": f"I propose ${float(price):,.0f} as my offer.",
+            }
+        if action_type == "MAKE_COUNTEROFFER":
+            price = self._offer_price_from_reservation_bounds(action_type)
+            return {
+                "type": action_type,
+                "counteroffer_price": int(math.floor(float(price) + 0.5)),
+                "internal_reasoning": reason,
+                "verbal_explanation": f"I propose ${float(price):,.0f} as my counteroffer.",
+            }
+        if action_type == "ACCEPT_OFFER":
+            price = self._offer_price_from_reservation_bounds("MAKE_COUNTEROFFER")
+            return {
+                "type": action_type,
+                "price_settled": int(math.floor(float(price) + 0.5)),
+                "internal_reasoning": reason,
+                "verbal_explanation": "I accept the current offer.",
+            }
+        if action_type == "REJECT_OFFER":
+            return {
+                "type": action_type,
+                "internal_reasoning": reason,
+                "verbal_explanation": "I reject the current offer.",
+            }
+        if action_type == "INQUIRE_BUYER":
+            return {
+                "type": action_type,
+                "internal_reasoning": reason,
+                "inquiry_details": "Could you share more details that affect your valuation?",
+            }
+        if action_type == "QUESTION_BUYER":
+            return {
+                "type": action_type,
+                "internal_reasoning": reason,
+                "question_details": "What conditions would make this proposal acceptable to you?",
+            }
+        if action_type == "INQUIRE_SELLER":
+            return {
+                "type": action_type,
+                "internal_reasoning": reason,
+                "inquiry_details": "Could you clarify the key terms you need for agreement?",
+            }
+        if action_type == "WALK_AWAY":
+            return {
+                "type": action_type,
+                "internal_reasoning": reason,
+                "verbal_explanation": "I am ending this negotiation without agreement.",
+            }
+        return {
+            "type": "NORMAL_ANSWER",
+            "internal_reasoning": reason,
+            "answer_details": "I need to clarify details before changing my position.",
+        }
+
     @staticmethod
     def _expected_type_from_intent(
 
@@ -708,9 +813,22 @@ class HDBStructuredActComponent(
                     )
                 continue
 
-        raise ValueError(
-            "Failed to regenerate a valid structured action after repeated attempts."
+        fallback_payload = self._deterministic_fallback_payload(
+            has_active_offer=has_active_offer,
+            allowed_types=allowed_types,
+            retry_reason=retry_reason,
         )
+        try:
+            return self._validate_action_for_turn(
+                fallback_payload,
+                has_active_offer=has_active_offer,
+                allowed_types=allowed_types,
+            )
+        except ValueError as fallback_error:
+            raise ValueError(
+                "Failed to regenerate a valid structured action after repeated attempts. "
+                f"Deterministic fallback also failed: {fallback_error}"
+            ) from fallback_error
 
     def _regenerate_offer_only_action(
         self,
