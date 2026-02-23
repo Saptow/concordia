@@ -103,7 +103,9 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                 f'You have full knowledge of the flat condition. The counterpart party does not. Always remember this when negotiating price.'
             )
         instructions = (
-            f'You are {self._agent_name}, and your role is a **{self._role}** within the HDB resale market. TAKE NOTE OF YOUR ROLE.\n\n'
+            f'You are {self._agent_name}'
+            f'ROLE: {self._role.name}. ALWAYS KEEP TO YOUR ROLE.\n'
+            f'DESCRIPTION: {self._description}\n'
             f'PRIMARY GOAL: {goal}\n'
             f'ETHICS: {self._ethics}\n\n'
             'CORE NEGOTIATION PRINCIPLES:\n'
