@@ -1,5 +1,5 @@
 import json
-import re
+import time
 from collections.abc import Sequence
 from typing import Any, Literal, override
 
@@ -24,6 +24,13 @@ class OfferIntentJudgement(BaseModel):
 
     contains_offer_intent: bool
     explanation: str
+
+
+class ForcedOfferReasoning(BaseModel):
+    """Schema for fallback reasoning tied to a forced offer action."""
+
+    internal_reasoning: str
+    verbal_explanation: str
 
 
 class HDBStructuredActComponent(
@@ -54,6 +61,8 @@ class HDBStructuredActComponent(
         component_order: Sequence[str] | None = None,
         randomize_choices: bool = False,
         fallback_to_llm_for_free: bool = False,
+        force_offer_timeout_seconds: float = 20.0,
+        force_offer_default_price: float = 500000.0,
     ):
         """Initialize the HDB structured acting component.
 
@@ -65,6 +74,10 @@ class HDBStructuredActComponent(
             randomize_choices: Whether choice options are shuffled for CHOICE.
             fallback_to_llm_for_free: If True, FREE action falls back to LLM
                 when structured action is missing instead of raising.
+            force_offer_timeout_seconds: Max seconds before forcing a deterministic
+                executable offer/counteroffer fallback.
+            force_offer_default_price: Default positive fallback price used if
+                reservation bounds are unavailable.
         """
         super().__init__()
         self._model = model
@@ -73,6 +86,8 @@ class HDBStructuredActComponent(
         self._randomize_choices = randomize_choices
         self._fallback_to_llm_for_free = fallback_to_llm_for_free
         self._role = role
+        self._force_offer_timeout_seconds = max(1.0, float(force_offer_timeout_seconds))
+        self._force_offer_default_price = max(1.0, float(force_offer_default_price))
 
     def _ordered_keys(self, contexts: entity_component.ComponentContextMapping) -> Sequence[str]:
         """Return context keys in deterministic order for prompt assembly."""
@@ -196,36 +211,185 @@ class HDBStructuredActComponent(
         return bool(verdict_payload.get("contains_offer_intent", False))
 
     @staticmethod
-    def _extract_single_offer_price(text: str) -> float | None:
-        """Extract one unambiguous candidate offer price from text."""
-        matches: list[float] = []
-        for match in re.finditer(
-            r"\$?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{5,}(?:\.\d+)?)",
-            text,
-        ):
-            raw = match.group(1).replace(",", "")
-            try:
-                value = float(raw)
-            except ValueError:
-                continue
-            if value >= 1000:
-                matches.append(value)
-        unique_prices: list[float] = []
-        for value in matches:
-            if value not in unique_prices:
-                unique_prices.append(value)
-        if len(unique_prices) == 1:
-            return unique_prices[0]
-        return None
-
-    @staticmethod
     def _truncate_text(text: str, limit: int = 1000) -> str:
         if len(text) <= limit:
             return text
         return text[:limit].rstrip()
 
+    def _reservation_bounds_from_components(self) -> tuple[float, float] | None:
+        """Fetch reservation bounds from strategy/uncertainty components."""
+        entity = self.get_entity()
+
+        try:
+            strategy_component = entity.get_component("NegotiationStrategy")
+        except Exception:
+            strategy_component = None
+
+        if strategy_component is not None:
+            strategy_state = getattr(strategy_component, "_state", None)
+            current_position = (
+                getattr(strategy_state, "current_position", None)
+                if strategy_state is not None
+                else None
+            )
+            opponent_position = (
+                getattr(strategy_state, "opponent_position", None)
+                if strategy_state is not None
+                else None
+            )
+            if isinstance(current_position, (int, float)) and isinstance(opponent_position, (int, float)):
+                lower = max(0.0, min(float(current_position), float(opponent_position)))
+                upper = max(lower, max(float(current_position), float(opponent_position)))
+                return (lower, upper)
+
+        for component_name in ("uncertain_buyer", "uncertain_seller"):
+            try:
+                uncertain_component = entity.get_component(component_name)
+            except Exception:
+                continue
+
+            own_value = None
+            counterpart_value = None
+
+            beliefs = getattr(uncertain_component, "_beliefs", None)
+            if isinstance(beliefs, dict):
+                own_belief = beliefs.get("own_reservation")
+                counterpart_belief = beliefs.get("counterpart_reservation")
+                if own_belief is not None:
+                    own_value = getattr(own_belief, "get_expected_mean", None)
+                if counterpart_belief is not None:
+                    counterpart_value = getattr(counterpart_belief, "get_expected_mean", None)
+
+            explicit_own = getattr(uncertain_component, "_own_reservation", None)
+            if isinstance(explicit_own, (int, float)):
+                own_value = explicit_own
+
+            if isinstance(own_value, (int, float)) and isinstance(counterpart_value, (int, float)):
+                lower = max(0.0, min(float(own_value), float(counterpart_value)))
+                upper = max(lower, max(float(own_value), float(counterpart_value)))
+                return (lower, upper)
+
+        return None
+
+    def _offer_price_from_reservation_bounds(self, action_type: str) -> float:
+        """Generate fallback offer price using reservation bounds."""
+        bounds = self._reservation_bounds_from_components()
+        if bounds is None:
+            return self._force_offer_default_price
+
+        lower, upper = bounds
+        spread = max(0.0, upper - lower)
+        if spread <= 1e-6:
+            return max(1.0, lower)
+
+        normalized_action_type = str(action_type).strip().upper()
+        if self._role == hdb_schemas.RoleType.BUYER:
+            ratio = 0.40 if normalized_action_type == "MAKE_COUNTEROFFER" else 0.25
+        else:
+            ratio = 0.60 if normalized_action_type == "MAKE_COUNTEROFFER" else 0.75
+
+        return max(1.0, lower + ratio * spread)
+
+    @staticmethod
+    def _default_forced_reasoning(
+        action_type: str,
+        price: float,
+        retry_reason: str,
+    ) -> tuple[str, str]:
+        """Fallback reasoning text when LLM reasoning generation fails."""
+        safe_price = max(1.0, float(price))
+        internal = (
+            "Forced fallback after repeated invalid offer generation. "
+            f"Action={action_type}, Price={safe_price:.2f}. "
+            f"Last validation error: {retry_reason or 'unknown'}."
+        )
+        verbal = f"I propose ${safe_price:,.0f} as my next price."
+        return internal, verbal
+
+    def _generate_forced_offer_reasoning(
+        self,
+        contexts: entity_component.ComponentContextMapping,
+        action_type: str,
+        price: float,
+        retry_reason: str,
+    ) -> tuple[str, str]:
+        """Use the LLM to generate reasoning fields for forced fallback offers."""
+        default_internal, default_verbal = self._default_forced_reasoning(
+            action_type=action_type,
+            price=price,
+            retry_reason=retry_reason,
+        )
+
+        prompt = interactive_document.InteractiveDocument(self._model)
+        prompt.statement(self._context_for_action(contexts) + "\n")
+        prompt.statement(
+            "You are generating reasoning fields for a forced executable negotiation action.\n"
+            f"Action type: {action_type}\n"
+            f"Price: {float(price):.2f}\n"
+            f"Previous validation failure: {retry_reason or 'unknown'}\n"
+            "The verbal explanation must clearly propose this exact price."
+        )
+
+        try:
+            generated = prompt.structured_question(
+                question=(
+                    "Return reasoning fields for this forced action.\n"
+                    "Rules:\n"
+                    "- internal_reasoning: concise private rationale.\n"
+                    "- verbal_explanation: concise public statement proposing the given price.\n"
+                    "- Both fields must align with the specified action type and price."
+                ),
+                output_schema=ForcedOfferReasoning,
+                max_tokens=320,
+                terminators=(),
+            )
+            if isinstance(generated, (BaseModel, RootModel)):
+                payload = generated.model_dump()
+            elif isinstance(generated, dict):
+                payload = generated
+            elif isinstance(generated, str):
+                payload = json.loads(self._extract_json(generated))
+            else:
+                payload = {}
+        except Exception:
+            payload = {}
+
+        internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
+        verbal_explanation = str(payload.get("verbal_explanation", "")).strip()
+
+        if not internal_reasoning:
+            internal_reasoning = default_internal
+        if not verbal_explanation:
+            verbal_explanation = default_verbal
+
+        return (
+            self._truncate_text(internal_reasoning, limit=1000),
+            self._truncate_text(verbal_explanation, limit=1000),
+        )
+
+    @staticmethod
+    def _forced_offer_payload(
+        action_type: str,
+        price: float,
+        internal_reasoning: str,
+        verbal_explanation: str,
+    ) -> dict[str, Any]:
+        """Build deterministic schema-compliant fallback offer JSON."""
+        safe_price = max(1.0, float(price))
+        payload: dict[str, Any] = {
+            "type": action_type,
+            "internal_reasoning": internal_reasoning,
+            "verbal_explanation": verbal_explanation,
+        }
+        if action_type == "MAKE_COUNTEROFFER":
+            payload["counteroffer_price"] = safe_price
+        else:
+            payload["offer_price"] = safe_price
+        return payload
+
     @staticmethod
     def _expected_type_from_intent(
+
         intent: str,
         has_active_offer: bool | None,
     ) -> str | None:
@@ -331,39 +495,6 @@ class HDBStructuredActComponent(
             if has_active_offer is False:
                 return "MAKE_OFFER"
         return None
-
-    def _coerce_offer_like_payload(
-        self,
-        payload: dict[str, Any],
-        has_active_offer: bool | None,
-        allowed_types: Sequence[str],
-    ) -> dict[str, Any] | None:
-        """Convert prose-heavy non-offer output into canonical offer JSON when safe."""
-        details_text = self._collect_text_fields(payload)
-        offer_type = self._preferred_offer_action_type(
-            allowed_types=allowed_types,
-            has_active_offer=has_active_offer,
-        )
-        if not offer_type:
-            return None
-        price = self._extract_single_offer_price(details_text)
-        if price is None:
-            return None
-        if offer_type == "MAKE_COUNTEROFFER":
-            coerced: dict[str, Any] = {
-                "type": "MAKE_COUNTEROFFER",
-                "counteroffer_price": price,
-            }
-            if details_text:
-                coerced["reasoning"] = self._truncate_text(details_text)
-            return coerced
-        coerced: dict[str, Any] = {
-            "type": "MAKE_OFFER",
-            "offer_price": price,
-        }
-        if details_text:
-            coerced["reasoning"] = self._truncate_text(details_text)
-        return coerced
 
     def _validate_action_for_turn(
         self,
@@ -488,10 +619,17 @@ class HDBStructuredActComponent(
     ) -> str:
         """Regenerate specifically as an executable offer/counteroffer action."""
         allowed_set = {str(x).strip().upper() for x in allowed_types}
-        target_offer_type = "MAKE_OFFER"
+        target_offer_type = self._preferred_offer_action_type(
+            allowed_types=allowed_types,
+            has_active_offer=has_active_offer,
+        )
+        if not target_offer_type:
+            raise ValueError(
+                "Offer intent was detected, but no offer/counteroffer type is allowed this turn."
+            )
         if allowed_set and target_offer_type not in allowed_set:
             raise ValueError(
-                "Offer intent was detected, but MAKE_OFFER is not allowed this turn."
+                f"Offer intent was detected, but {target_offer_type} is not allowed this turn."
             )
 
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
@@ -501,7 +639,11 @@ class HDBStructuredActComponent(
             else ""
         )
         strict_retry_reason = retry_reason
+        deadline = time.monotonic() + self._force_offer_timeout_seconds
         for _ in range(20):
+            if time.monotonic() >= deadline:
+                break
+
             prompt = interactive_document.InteractiveDocument(self._model)
             prompt.statement(self._context_for_action(contexts) + "\n")
             prompt.statement(
@@ -536,9 +678,42 @@ class HDBStructuredActComponent(
             except ValueError as error:
                 strict_retry_reason = str(error).strip()
 
-        raise ValueError(
-            "Failed to regenerate a valid offer/counteroffer action after repeated attempts."
+        forced_price = self._offer_price_from_reservation_bounds(target_offer_type)
+        internal_reasoning, verbal_explanation = self._generate_forced_offer_reasoning(
+            contexts=contexts,
+            action_type=target_offer_type,
+            price=forced_price,
+            retry_reason=strict_retry_reason,
         )
+        forced_payload = self._forced_offer_payload(
+            action_type=target_offer_type,
+            price=forced_price,
+            internal_reasoning=internal_reasoning,
+            verbal_explanation=verbal_explanation,
+        )
+        try:
+            return self._validate_action_for_turn(
+                forced_payload,
+                has_active_offer=has_active_offer,
+                allowed_types=allowed_types,
+            )
+        except ValueError:
+            fallback_internal, fallback_verbal = self._default_forced_reasoning(
+                action_type=target_offer_type,
+                price=forced_price,
+                retry_reason=strict_retry_reason,
+            )
+            deterministic_payload = self._forced_offer_payload(
+                action_type=target_offer_type,
+                price=forced_price,
+                internal_reasoning=fallback_internal,
+                verbal_explanation=fallback_verbal,
+            )
+            return self._validate_action_for_turn(
+                deterministic_payload,
+                has_active_offer=has_active_offer,
+                allowed_types=allowed_types,
+            )
 
     @staticmethod
     def _is_action_type_choice(action_spec: entity_lib.ActionSpec) -> bool:
@@ -631,6 +806,8 @@ class HDBStructuredActComponent(
             "component_order": list(self._component_order) if self._component_order else None,
             "randomize_choices": self._randomize_choices,
             "fallback_to_llm_for_free": self._fallback_to_llm_for_free,
+            "force_offer_timeout_seconds": self._force_offer_timeout_seconds,
+            "force_offer_default_price": self._force_offer_default_price,
         }
     
     def set_state(self, state: entity_component.ComponentState) -> None:
@@ -645,4 +822,12 @@ class HDBStructuredActComponent(
             self._randomize_choices = state['randomize_choices']
         if 'fallback_to_llm_for_free' in state:
             self._fallback_to_llm_for_free = state['fallback_to_llm_for_free']
+        if 'force_offer_timeout_seconds' in state:
+            self._force_offer_timeout_seconds = max(
+                1.0, float(state['force_offer_timeout_seconds'])
+            )
+        if 'force_offer_default_price' in state:
+            self._force_offer_default_price = max(
+                1.0, float(state['force_offer_default_price'])
+            )
         
