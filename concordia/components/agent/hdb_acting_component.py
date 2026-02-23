@@ -13,24 +13,13 @@ from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 
 
-class ReasoningIntentJudgement(BaseModel):
-    """LLM-as-a-judge output for action/intent consistency checks."""
+class UnifiedActionJudgement(BaseModel):
+    """Single-pass LLM-as-a-judge output for action-level consistency checks."""
 
     intent: Literal["ACCEPT", "REJECT", "COUNTER_OR_OFFER", "OTHER"]
-    explanation: str
-
-
-class OfferIntentJudgement(BaseModel):
-    """LLM-as-a-judge output for offer/counteroffer detection in prose."""
-
     contains_offer_intent: bool
-    explanation: str
-
-
-class WalkAwayIntentJudgement(BaseModel):
-    """LLM-as-a-judge output for buyer walk-away detection in prose."""
-
-    intent: Literal["WALK_AWAY", "CONTINUE", "UNCLEAR"]
+    walk_away_intent: Literal["WALK_AWAY", "CONTINUE", "UNCLEAR"]
+    proposed_price: int | None = None
     explanation: str
 
 
@@ -216,94 +205,94 @@ class HDBStructuredActComponent(
         except Exception:
             return False
 
-    def _judge_walk_away_intent(
+    @staticmethod
+    def _structured_price_from_payload(payload: dict[str, Any]) -> int | None:
+        """Extract canonical structured numeric price from the action payload."""
+        action_type = str(payload.get("type", "")).strip().upper()
+        field_by_action = {
+            "MAKE_OFFER": "offer_price",
+            "MAKE_COUNTEROFFER": "counteroffer_price",
+            "ACCEPT_OFFER": "price_settled",
+        }
+        price_field = field_by_action.get(action_type)
+        if not price_field:
+            return None
+        raw_value = payload.get(price_field)
+        if isinstance(raw_value, bool) or raw_value is None:
+            return None
+        if isinstance(raw_value, (int, float)):
+            return int(math.floor(float(raw_value) + 0.5))
+        try:
+            return int(float(str(raw_value).strip()))
+        except (TypeError, ValueError):
+            return None
+
+    def _judge_action_consistency(
         self,
         payload: dict[str, Any],
         has_active_offer: bool | None,
         allowed_types: Sequence[str],
-    ) -> str:
-        """Use an LLM judge to detect explicit walk-away intent in non-offer prose."""
+    ) -> UnifiedActionJudgement:
+        """Single judge call for holistic consistency checks."""
         action_type = str(payload.get("type", "")).strip().upper()
-        if self._role != hdb_schemas.RoleType.BUYER:
-            return "CONTINUE"
-        if action_type not in self._textual_non_offer_action_types():
-            return "CONTINUE"
-        allowed = {str(x).strip().upper() for x in allowed_types}
-        if allowed and "WALK_AWAY" not in allowed:
-            return "CONTINUE"
-
-        public_text = self._collect_text_fields(payload)
+        verbal_explanation = str(
+            payload.get("verbal_explanation")
+            or payload.get("explanation")
+            or ""
+        ).strip()
+        non_verbal_text = self._collect_text_fields(payload)
         internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
-        if not public_text and not internal_reasoning:
-            return "CONTINUE"
+        structured_price = self._structured_price_from_payload(payload)
 
         prompt = interactive_document.InteractiveDocument(self._model)
         prompt.statement(
-            "You are a strict negotiation termination judge.\n"
-            "Determine whether the agent is explicitly terminating the CURRENT negotiation NOW without agreement.\n"
-            "WALK_AWAY means a clear, present decision to end this negotiation with no deal.\n"
-            "CONTINUE means the agent is still negotiating, asking questions, or discussing conditions.\n"
-            "UNCLEAR means ambiguous/conditional/hypothetical mentions that do not clearly terminate now.\n"
-            "Do not infer WALK_AWAY from generic frustration alone."
+            "You are a strict negotiation-action validator.\n"
+            "Think step-by-step internally, but return only the output schema.\n"
+            "Validate in this sequence:\n"
+            "1) classify semantic intent as ACCEPT / REJECT / COUNTER_OR_OFFER / OTHER.\n"
+            "2) decide whether public text contains offer/counteroffer intent.\n"
+            "3) decide whether text explicitly ends negotiation now (walk away intent).\n"
+            "4) extract the explicit proposed/accepted SGD price from verbal_explanation if clear, else null.\n"
+            "Definitions:\n"
+            "- WALK_AWAY means explicit immediate termination with no deal.\n"
+            "- COUNTER_OR_OFFER means proposing a new/alternative price."
         )
         prompt.statement(
             f"Current action type: {action_type}\n"
             f"Has active offer: {has_active_offer}\n"
             f"Allowed action types this turn: {', '.join(str(x) for x in allowed_types) or '(unknown)'}\n"
-            f"Public text:\n{public_text or '(empty)'}\n"
+            f"Structured price field (if any): {structured_price if structured_price is not None else 'None'}\n"
+            f"Verbal explanation:\n{verbal_explanation or '(empty)'}\n"
+            f"Other public text fields:\n{non_verbal_text or '(empty)'}\n"
             f"Internal reasoning:\n{internal_reasoning or '(empty)'}\n"
+            f"Action payload JSON:\n{json.dumps(payload, ensure_ascii=False)}"
         )
-        verdict = prompt.structured_question(
-            question=(
-                "Classify the termination intent. "
-                "Return only the schema."
-            ),
-            output_schema=WalkAwayIntentJudgement,
-            max_tokens=280,
-            terminators=(),
-        )
-        if isinstance(verdict, (BaseModel, RootModel)):
-            verdict_payload = verdict.model_dump()
-        elif isinstance(verdict, dict):
-            verdict_payload = verdict
-        elif isinstance(verdict, str):
-            verdict_payload = json.loads(self._extract_json(verdict))
-        else:
-            verdict_payload = {}
-        return str(verdict_payload.get("intent", "UNCLEAR")).strip().upper() or "UNCLEAR"
-
-    def _contains_offer_intent(self, text: str) -> bool:
-        """Use LLM-as-a-judge to detect offer/counteroffer intent in prose."""
-        if not text:
-            return False
-        prompt = interactive_document.InteractiveDocument(self._model)
-        prompt.statement(
-            "You are a strict negotiation-action judge.\n"
-            "Determine whether the text semantically contains an OFFER or COUNTEROFFER intent.\n"
-            "OFFER/COUNTEROFFER intent means proposing or suggesting a concrete price level/change,\n"
-            "even if currency format is unusual (e.g., 850,000 SGD without '$').\n"
-            "Do not mark pure questions, pure inquiries, or pure factual answers as offer intent."
-        )
-        prompt.statement(f"Text to judge:\n{text}\n")
-        verdict = prompt.structured_question(
-            question=(
-                "Does this text contain offer/counteroffer intent? "
-                "Return only the schema."
-            ),
-            output_schema=OfferIntentJudgement,
-            max_tokens=220,
-            terminators=(),
-        )
-        if isinstance(verdict, (BaseModel, RootModel)):
-            verdict_payload = verdict.model_dump()
-        elif isinstance(verdict, dict):
-            verdict_payload = verdict
-        elif isinstance(verdict, str):
-            verdict_payload = json.loads(self._extract_json(verdict))
-        else:
-            verdict_payload = {}
-        return bool(verdict_payload.get("contains_offer_intent", False))
-
+        try:
+            verdict = prompt.structured_question(
+                question=(
+                    "Return unified action consistency judgement using the schema only."
+                ),
+                output_schema=UnifiedActionJudgement,
+                max_tokens=420,
+                terminators=(),
+            )
+            if isinstance(verdict, (BaseModel, RootModel)):
+                verdict_payload = verdict.model_dump()
+            elif isinstance(verdict, dict):
+                verdict_payload = verdict
+            elif isinstance(verdict, str):
+                verdict_payload = json.loads(self._extract_json(verdict))
+            else:
+                verdict_payload = {}
+            return UnifiedActionJudgement.model_validate(verdict_payload)
+        except Exception:
+            return UnifiedActionJudgement(
+                intent="OTHER",
+                contains_offer_intent=False,
+                walk_away_intent="UNCLEAR",
+                proposed_price=None,
+                explanation="Unified judge unavailable.",
+            )
     @staticmethod
     def _truncate_text(text: str, limit: int = 1000) -> str:
         if len(text) <= limit:
@@ -501,78 +490,6 @@ class HDBStructuredActComponent(
                 return "MAKE_OFFER"
         return None
 
-    def _judge_reasoning_intent(
-        self,
-        payload: dict[str, Any],
-        has_active_offer: bool | None,
-        allowed_types: Sequence[str],
-    ) -> None:
-        """Use an LLM judge to ensure reasoning semantics match action type."""
-        action_type = str(payload.get("type", "")).strip().upper()
-        verbal_explanation = str(
-            payload.get("verbal_explanation")
-            or payload.get("explanation")
-            or ""
-        ).strip()
-        if not action_type or not verbal_explanation:
-            return
-
-        # Only enforce for offer-state decision actions where confusion is costly.
-        if action_type not in {"ACCEPT_OFFER", "REJECT_OFFER", "MAKE_COUNTEROFFER", "MAKE_OFFER"}:
-            return
-
-        prompt = interactive_document.InteractiveDocument(self._model)
-        prompt.statement(
-            "You are a strict negotiation-action consistency judge.\n"
-            "Decide the semantic intent of the agent's verbal explanation, independent of the provided action type.\n"
-            "Return one intent from: ACCEPT, REJECT, COUNTER_OR_OFFER, OTHER.\n"
-            "ACCEPT means the text indicates agreeing to the current offer.\n"
-            "REJECT means the text indicates declining the current offer.\n"
-            "COUNTER_OR_OFFER means the text indicates proposing a different price.\n"
-        )
-        prompt.statement(
-            f"Current action type: {action_type}\n"
-            f"Has active offer: {has_active_offer}\n"
-            f"Allowed action types this turn: {', '.join(str(x) for x in allowed_types) or '(unknown)'}\n"
-            f"Verbal explanation text:\n{verbal_explanation}\n"
-        )
-        verdict = prompt.structured_question(
-            question=(
-                "What is the semantic intent category of the verbal explanation text? "
-                "Answer only with the schema."
-            ),
-            output_schema=ReasoningIntentJudgement,
-            max_tokens=300,
-            terminators=(),
-        )
-        if isinstance(verdict, (BaseModel, RootModel)):
-            verdict_payload = verdict.model_dump()
-        elif isinstance(verdict, dict):
-            verdict_payload = verdict
-        elif isinstance(verdict, str):
-            verdict_payload = json.loads(self._extract_json(verdict))
-        else:
-            verdict_payload = {}
-
-        expected_type = self._expected_type_from_intent(
-            verdict_payload.get("intent", "OTHER"),
-            has_active_offer=has_active_offer,
-        )
-        if not expected_type:
-            return
-
-        allowed = {str(x).strip().upper() for x in allowed_types}
-        if allowed and expected_type not in allowed:
-            return
-
-        if action_type != expected_type:
-            explanation = str(verdict_payload.get("explanation", "")).strip()
-            raise ValueError(
-                "Reasoning/action mismatch detected by LLM judge. "
-                f"Action type={action_type}, judged_intent_requires={expected_type}. "
-                f"Judge explanation: {explanation}"
-            )
-
     def _preferred_offer_action_type(
         self,
         allowed_types: Sequence[str],
@@ -610,7 +527,7 @@ class HDBStructuredActComponent(
         details_text = self._collect_text_fields(payload)
         allowed = {str(x).strip().upper() for x in allowed_types}
 
-        # Hard-stop buyer drift once patience is exhausted.
+        # Solves buyer drift once patience horizon exceeded.
         if (
             self._strategy_requires_walk_away(allowed_types)
             and action_type not in {"WALK_AWAY", "ACCEPT_OFFER"}
@@ -631,13 +548,19 @@ class HDBStructuredActComponent(
             action_type = "WALK_AWAY"
             details_text = self._collect_text_fields(payload)
 
-        # Coerce buyer non-offer outputs to WALK_AWAY when semantic intent clearly ends negotiation now.
-        walk_away_intent = self._judge_walk_away_intent(
+        judgement = self._judge_action_consistency(
             payload=payload,
             has_active_offer=has_active_offer,
             allowed_types=allowed_types,
         )
-        if walk_away_intent == "WALK_AWAY":
+
+        # Coerce buyer non-offer outputs to WALK_AWAY when intent is explicit.
+        if (
+            self._role == hdb_schemas.RoleType.BUYER
+            and action_type in self._textual_non_offer_action_types()
+            and ((not allowed) or ("WALK_AWAY" in allowed))
+            and judgement.walk_away_intent == "WALK_AWAY"
+        ):
             internal_reasoning = str(payload.get("internal_reasoning", "")).strip()
             if not internal_reasoning:
                 internal_reasoning = (
@@ -655,21 +578,42 @@ class HDBStructuredActComponent(
             action_type = "WALK_AWAY"
             details_text = self._collect_text_fields(payload)
 
-        # Prevent advice-like prose with embedded prices from passing as non-offer actions.
+        # Coerce offer-related intent to correct action types when mismatches are detected.
         if (
             action_type in self._textual_non_offer_action_types()
-            and self._contains_offer_intent(details_text)
+            and judgement.contains_offer_intent
         ):
             raise ValueError(
                 "Detected offer/counteroffer language inside a non-offer action. "
                 "Regenerate and emit MAKE_OFFER or MAKE_COUNTEROFFER with a numeric price field."
             )
 
-        self._judge_reasoning_intent(
-            payload=payload,
+        # Verbal intent must align with action type for offer-state decisions.
+        expected_type = self._expected_type_from_intent(
+            judgement.intent,
             has_active_offer=has_active_offer,
-            allowed_types=allowed_types,
         )
+        if expected_type and ((not allowed) or (expected_type in allowed)):
+            if action_type != expected_type:
+                raise ValueError(
+                    "Reasoning/action mismatch detected by unified judge. "
+                    f"Action type={action_type}, judged_intent_requires={expected_type}. "
+                    f"Judge explanation: {judgement.explanation}"
+                )
+
+        # Structured price (if any) must align with verbal explanation to prevent price mismatch exploits.
+        structured_price = self._structured_price_from_payload(payload)
+        judged_price = judgement.proposed_price
+        if (
+            structured_price is not None
+            and judged_price is not None
+            and int(structured_price) != int(judged_price)
+        ):
+            raise ValueError(
+                "Price mismatch between verbal explanation and structured price field. "
+                f"StructuredPrice={structured_price}, VerbalPrice={judged_price}. "
+                f"Judge explanation: {judgement.explanation}"
+            )
 
         if not allowed_types:
             return canonical
@@ -975,3 +919,4 @@ class HDBStructuredActComponent(
                 1.0, float(state['force_offer_default_price'])
             )
         
+
