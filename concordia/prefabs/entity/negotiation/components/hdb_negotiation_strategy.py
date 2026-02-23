@@ -280,9 +280,10 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         rounds_left = max(0, horizon - rounds_elapsed)
         urgency = max(0.0, min(1.0, float(self._urgency_level)))
         deterministic_rule = (
-            "DETERMINISTIC CONTEXT CHECK: Read ZOPAFeasible and HasActiveOffer from "
-            "NUMERIC FACTS (DETERMINISTIC). If ZOPAFeasible=True and HasActiveOffer=False, "
+            "DETERMINISTIC CONTEXT CHECK: Read ZOPAFeasible and HasActiveOffer from"
+            "NUMERIC FACTS (DETERMINISTIC). If ZOPAFeasible=True and HasActiveOffer=True "
             "prioritize MAKE_OFFER now."
+            "If ZOPAFeasible=True and HasActiveOffer=True prioritize ACCEPT_OFFER now."
         )
 
         if self._role == RoleType.BUYER:
