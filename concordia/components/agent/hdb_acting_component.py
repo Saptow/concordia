@@ -578,6 +578,21 @@ class HDBStructuredActComponent(
             action_type = "WALK_AWAY"
             details_text = self._collect_text_fields(payload)
 
+        # WALK_AWAY must be explicit and only after patience horizon is exceeded.
+        if action_type == "WALK_AWAY":
+            if self._role != hdb_schemas.RoleType.BUYER:
+                raise ValueError("WALK_AWAY is only valid for buyers.")
+            if not self._strategy_requires_walk_away(allowed_types):
+                raise ValueError(
+                    "WALK_AWAY chosen before patience horizon was exceeded. "
+                    "Continue negotiating unless strategy guidance requires termination."
+                )
+            if judgement.walk_away_intent != "WALK_AWAY":
+                raise ValueError(
+                    "WALK_AWAY chosen but unified judge did not detect explicit termination intent. "
+                    f"Judge explanation: {judgement.explanation}"
+                )
+
         # Coerce offer-related intent to correct action types when mismatches are detected.
         if (
             action_type in self._textual_non_offer_action_types()
@@ -919,4 +934,5 @@ class HDBStructuredActComponent(
                 1.0, float(state['force_offer_default_price'])
             )
         
+
 

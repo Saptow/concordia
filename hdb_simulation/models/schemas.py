@@ -154,8 +154,9 @@ class BuyerWalkAway(VerbalExplanationFields):
         Literal['WALK_AWAY'],
         Field(
             description=(
-                "Buyer ends the negotiation without reaching agreement "
-                "(close without success)."
+                "Buyer explicitly ends the negotiation now without reaching agreement "
+                "(close without success). Use only when intentionally terminating, "
+                "not for questions/information gathering or continued negotiation."
             )
         ),
     ]
@@ -300,3 +301,4 @@ class Flat(BaseModel):
 
 
     
+
