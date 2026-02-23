@@ -210,29 +210,37 @@ class Entity(prefab_lib.Prefab):
             components = [uncertain_key, neg_memory.name]
         )
 
-        walk_away_rule = (
-            '- Buyer-only: if strategy guidance indicates patience is exceeded and you want to terminate without agreement, use WALK_AWAY.\n'
-            if role == RoleType.BUYER
-            else ''
-        )
-
-        question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
-            model=model,
-            pre_act_label=f'Next action',
-            question=(
+        if role == RoleType.SELLER:
+            question = (
                 f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, what should {agent_name} do?\n'
-                'Rules:\n'
+                f'Given the negotiation context, what should {agent_name} do next? '
+                'Rules: \n'
                 '- Return exactly one executable action JSON object, not advice about what to say.\n'
                 '- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER or MAKE_COUNTEROFFER.\n'
                 '- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n'
                 '- If you are accepting the current offer, use ACCEPT_OFFER (do not use MAKE_COUNTEROFFER).\n'
                 '- If you are rejecting the current offer, use REJECT_OFFER.\n'
                 '- If you want a different price from the current offer, use MAKE_COUNTEROFFER.\n'
-                f'{walk_away_rule}'
                 f'{HDB_ACTION_DOMAIN_GUARDRAILS}'
-                '- Keep fields concise and action-oriented.'
-            ),
+            )
+        else:
+            question = (
+                f'{HDB_CONTEXT_ANCHOR}'
+                f'Given the negotiation context, what should {agent_name} do next? '
+                'Rules: \n'
+                '- Return exactly one executable action JSON object, not advice about what to say.\n'
+                '- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER or MAKE_COUNTEROFFER.\n'
+                '- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n'
+                '- If you are accepting the current offer, use ACCEPT_OFFER (do not use MAKE_COUNTEROFFER).\n'
+                '- If you are rejecting the current offer, use REJECT_OFFER.\n'
+                '- If you want a different price from the current offer, use MAKE_COUNTEROFFER.\n'
+                f'if strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.'
+                f'{HDB_ACTION_DOMAIN_GUARDRAILS}'
+            )
+        question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
+            model=model,
+            pre_act_label=f'Next action',
+            question=question,
             answer_prefix=f'',
             add_to_memory=False,
             memory_tag='[action reasoning]',

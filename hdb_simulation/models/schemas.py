@@ -42,11 +42,25 @@ class VerbalExplanationFields(ActionReasoningFields):
 
 # Decisions (actions) that buyers and sellers can take during the negotiation process when no offer is on the table. 
 class MakeOffer(VerbalExplanationFields):
-    type: Literal['MAKE_OFFER']
+    type: Annotated[
+        Literal['MAKE_OFFER'],
+        Field(
+            description=(
+                "Start a new price proposal when there is no active offer on the table."
+            )
+        ),
+    ]
     offer_price: float = Field(..., gt=0, description="The price proposed in the offer.")
 
 class NormalAnswer(ActionReasoningFields):
-    type: Literal['NORMAL_ANSWER']
+    type: Annotated[
+        Literal['NORMAL_ANSWER'],
+        Field(
+            description=(
+                "Provide a factual/public answer without proposing a new price. Try to have a follow-up question or statement to keep the conversation going, unless you intend to walk away."
+            )
+        ),
+    ]
     answer_details: str = Field(
         ...,
         description=(
@@ -57,22 +71,46 @@ class NormalAnswer(ActionReasoningFields):
 
 # Buyer-specific actions when no offer is on the table
 class BuyerInquiry(ActionReasoningFields):
-    type: Literal['INQUIRE_BUYER']
+    type: Annotated[
+        Literal['INQUIRE_BUYER'],
+        Field(
+            description=(
+                "Buyer asks exploratory questions to gather details of the flat without "
+                "making a price proposal."
+            )
+        ),
+    ]
     inquiry_details: str = Field(
         ...,
         description="Public inquiry details to counterpart. Must not include private information.",
     )
 
 class BuyerQuestion(ActionReasoningFields):
-    type: Literal['QUESTION_BUYER']
+    type: Annotated[
+        Literal['QUESTION_BUYER'],
+        Field(
+            description=(
+                "Buyer asks a direct question relevant to the counterpart, "
+                "without making a price proposal."
+            )
+        ),
+    ]
     question_details: str = Field(
         ...,
-        description="Specific public question to counterpart regarding negotiation context.",
+        description="Specific public question to counterpart regarding themselves.",
     )
 
 # Seller-specific actions when no offer is on the table
 class SellerInquiry(ActionReasoningFields):
-    type: Literal['INQUIRE_SELLER']
+    type: Annotated[
+        Literal['INQUIRE_SELLER'],
+        Field(
+            description=(
+                "Seller asks exploratory questions to gather details without "
+                "making a price proposal."
+            )
+        ),
+    ]
     inquiry_details: str = Field(
         ...,
         description="Public inquiry details to counterpart. Must not include private information.",
@@ -80,18 +118,47 @@ class SellerInquiry(ActionReasoningFields):
 
 # Decisions (actions) that can be taken by buyers and sellers when there is an active offer on the table.
 class AcceptOffer(VerbalExplanationFields):
-    type: Literal['ACCEPT_OFFER']
+    type: Annotated[
+        Literal['ACCEPT_OFFER'],
+        Field(
+            description=(
+                "Accept the currently active offer and finalize at the agreed price."
+            )
+        ),
+    ]
     price_settled: float = Field(..., gt=0, description="The price at which the offer is accepted.")
 
 class RejectOffer(VerbalExplanationFields):
-    type: Literal['REJECT_OFFER']
+    type: Annotated[
+        Literal['REJECT_OFFER'],
+        Field(
+            description=(
+                "Reject the currently active offer without proposing a new price."
+            )
+        ),
+    ]
 
 class MakeCounteroffer(VerbalExplanationFields):
-    type: Literal['MAKE_COUNTEROFFER']
+    type: Annotated[
+        Literal['MAKE_COUNTEROFFER'],
+        Field(
+            description=(
+                "Respond to the currently active offer with an alternative price."
+            )
+        ),
+    ]
     counteroffer_price: float = Field(..., gt=0, description="The price proposed in the counteroffer.")
 
 class BuyerWalkAway(VerbalExplanationFields):
-    type: Literal['WALK_AWAY']
+    type: Annotated[
+        Literal['WALK_AWAY'],
+        Field(
+            description=(
+                "Buyer ends the negotiation without reaching agreement "
+                "(close without success)."
+            )
+        ),
+    ]
 
 
 # Union types for buyer and seller actions with discriminators for parsing
