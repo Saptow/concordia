@@ -84,7 +84,7 @@ class GameMaster(prefab_lib.Prefab):
         )
 
     name = str(self.params.get('name', 'HDB Negotiation Scheduler'))
-    custom_instructions = str(self.params.get('instructions', ''))
+    custom_instructions = self.params.get('instructions')
     player_names = [entity.name for entity in self.entities]
     if not player_names:
       raise ValueError('No player entities were provided to the game master.')
@@ -102,8 +102,11 @@ class GameMaster(prefab_lib.Prefab):
     # Core GM components.
     instructions_key = 'instructions'
     instructions = gm_components.instructions.Instructions()
-    if custom_instructions:
-      instructions.set_state(custom_instructions)
+    if custom_instructions is not None:
+      if isinstance(custom_instructions, Mapping):
+        instructions.set_state(custom_instructions)
+      else:
+        instructions.set_state({'state': str(custom_instructions)})
 
     player_characters_key = 'player_characters'
     player_characters = gm_components.instructions.PlayerCharacters(

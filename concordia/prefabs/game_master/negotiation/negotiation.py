@@ -137,8 +137,11 @@ class NegotiationGameMaster(prefab_lib.Prefab):
     # Negotiation-specific instructions
     instructions_key = 'instructions'
     instructions = gm_components.instructions.Instructions()
-    if custom_instructions:
-      instructions.set_state(custom_instructions)
+    if custom_instructions is not None:
+      if isinstance(custom_instructions, Mapping):
+        instructions.set_state(custom_instructions)
+      else:
+        instructions.set_state({'state': str(custom_instructions)})
 
     # Player setup
     player_names = [entity.name for entity in self.entities]
