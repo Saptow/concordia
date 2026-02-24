@@ -24,7 +24,7 @@ SELLER_DATA = {
         "name": "Xiao Li",
         "age": 45,
         "occupation": "Software Engineer",
-        "description": "Xiao Li is upgrading her living space and prefers a smooth, timely sale. Open to reasonable counteroffers that can close soon.",
+        "description": "Xiao Li, a 45-year-old Software Engineer, is selling to fund an upgrade and wants a predictable, low-friction transaction. She is organized and process-oriented, with a strong preference for clear timelines and documentation. She is flexible with well-supported offers from financing-ready buyers.",
         "flat": Flat(
             flat_type="3-Room",
             address="Blk 16 Jurong East Singapore 090016",
@@ -47,7 +47,7 @@ SELLER_DATA = {
         "name": "Lim Wei Han",
         "age": 52,
         "occupation": "Civil Engineer",
-        "description": "Owner of a well-kept flat, motivated to conclude with a serious buyer and flexible within a realistic price band.",
+        "description": "Lim Wei Han, a 52-year-old Civil Engineer, takes pride in the flat's upkeep and prefers straightforward, comparable-based negotiation. He is practical and detail-focused, and values objective reasoning over emotional bargaining. He is open to reasonable concessions for reliable timelines.",
         "flat": Flat(
             flat_type="4-Room",
             address="Blk 512 Tampines Central 7 Singapore 520512",
@@ -71,7 +71,7 @@ SELLER_DATA = {
         "name": "Goh Hui Jie",
         "age": 39,
         "occupation": "Nurse",
-        "description": "Motivated seller with a practical unit that requires only light touch-ups and willing to settle quickly at a fair number.",
+        "description": "Goh Hui Jie, a 39-year-old Nurse, is relocating for family reasons and wants a clean, quick sale. She is calm and cooperative, and prioritizes respectful communication throughout the process. She is cooperative with responsive buyers who make realistic offers.",
         "flat": Flat(
             flat_type="3-Room",
             address="Blk 301 Woodlands Street 31 Singapore 730301",
@@ -95,7 +95,7 @@ SELLER_DATA = {
         "name": "Rahimah Binte Salleh",
         "age": 50,
         "occupation": "HR Manager",
-        "description": "Selling a larger home after children moved out; values smooth and transparent deal execution and is open to practical offers.",
+        "description": "Rahimah Binte Salleh, a 50-year-old HR Manager, is rightsizing after her children moved out and prioritizes a smooth handover. She is people-centered and structured, preferring clear expectations and mutual respect. She prefers transparent communication and practical offers from serious buyers.",
         "flat": Flat(
             flat_type="5-Room",
             address="Blk 118 Toa Payoh Lorong 1 Singapore 310118",
@@ -119,7 +119,7 @@ SELLER_DATA = {
         "name": "Chua Han Rong",
         "age": 44,
         "occupation": "Product Manager",
-        "description": "Flexible seller with a modern flat, prioritizing credible buyers and realistic timelines and willing to close promptly.",
+        "description": "Chua Han Rong, a 44-year-old Product Manager, is selling a modern unit and prioritizes decisive, financing-ready buyers. He is market-aware and efficiency-focused, and values quick decisions backed by evidence. He expects data-backed offers and can close quickly with balanced terms.",
         "flat": Flat(
             flat_type="4-Room",
             address="Blk 274B Sengkang East Avenue Singapore 542274",
@@ -143,7 +143,7 @@ SELLER_DATA = {
         "name": "Anita Devi",
         "age": 56,
         "occupation": "Business Owner",
-        "description": "Owner of a premium executive flat, willing to negotiate with financially ready buyers and close if price is near expectations.",
+        "description": "Anita Devi, a 56-year-old Business Owner, is selling a premium executive flat and expects pricing to reflect its rarity. She is confident and commercially minded, with a clear view of value and acceptable terms. She is negotiable with approved buyers who are clear on completion terms.",
         "flat": Flat(
             flat_type="Executive",
             address="Blk 9 Queenstown Close Singapore 140009",

@@ -26,7 +26,7 @@ BUYER_DATA = {
         "name": "Xiao Ming",
         "age": 32,
         "occupation": "Data Analyst",
-        "description": "Looking for a comfortable home close to amenities and public transport. Motivated to close soon and open to fair counteroffers for a smooth deal.",
+        "description": "Xiao Ming, a 32-year-old Data Analyst, is buying with his partner and wants a practical flat near MRT and supermarkets. He is methodical and family-oriented, prioritizing reliable daily convenience over flashy renovation. He can commit quickly if condition and pricing are reasonable.",
         "budget": {
             "min_price": 490000.0,
             "max_price": 545000.0
@@ -41,7 +41,7 @@ BUYER_DATA = {
         "name": "Tan Mei Ling",
         "age": 29,
         "occupation": "Marketing Manager",
-        "description": "First-time buyer seeking a family-friendly estate with reliable transport links and prepared to decide quickly if terms are reasonable.",
+        "description": "Tan Mei Ling, a 29-year-old Marketing Manager, is a first-time buyer focused on childcare access, safety, and reliable transport. She is organized and forward-looking, balancing lifestyle goals with clear budget discipline. She decides fast on good matches but negotiates firmly on valuation gaps.",
         "budget": {
             "min_price": 690000.0,
             "max_price": 740000.0
@@ -56,7 +56,7 @@ BUYER_DATA = {
         "name": "Arjun Kumar",
         "age": 35,
         "occupation": "Secondary School Teacher",
-        "description": "Looking for a practical HDB flat with minimal renovation needed and easy commute. Ready to make a practical offer and settle if value is fair.",
+        "description": "Arjun Kumar, a 35-year-old Secondary School Teacher, prefers functional units with quiet surroundings and a predictable commute. He is pragmatic and routine-driven, valuing stability and low-maintenance living. He is budget-disciplined but can close quickly when condition checks out.",
         "budget": {
             "min_price": 455000.0,
             "max_price": 505000.0
@@ -71,7 +71,7 @@ BUYER_DATA = {
         "name": "Nur Aisyah",
         "age": 41,
         "occupation": "Operations Lead",
-        "description": "Upgrading their HDB flat because of a larger household and values central access to schools and amenities. Prefers to conclude negotiations in the near term.",
+        "description": "Nur Aisyah, a 41-year-old Operations Lead, is upgrading for a multigenerational household and prioritizes space, layout, and nearby schools and clinics. She is decisive and responsibility-driven, optimizing for smooth family routines. She prefers transparent terms and a near-term close.",
         "budget": {
             "min_price": 805000.0,
             "max_price": 875000.0
@@ -86,7 +86,7 @@ BUYER_DATA = {
         "name": "Daniel Ong",
         "age": 33,
         "occupation": "UX Designer",
-        "description": "Wants a move-in ready flat with modern finishes and access to green spaces. Willing to compromise slightly on price to secure the right unit quickly.",
+        "description": "Daniel Ong, a 33-year-old UX Designer, wants a move-in-ready flat with good light, sensible storage, and park access. He is detail-oriented and design-conscious, but still practical about trade-offs that improve livability. He can stretch slightly on price for the right unit with quick completion.",
         "budget": {
             "min_price": 620000.0,
             "max_price": 670000.0
@@ -101,7 +101,7 @@ BUYER_DATA = {
         "name": "Priya Nair",
         "age": 46,
         "occupation": "Finance Director",
-        "description": "Seeking a spacious flat in a mature estate close to city-side workplaces. Financially prepared and open to realistic price alignment for a timely close.",
+        "description": "Priya Nair, a 46-year-old Finance Director, is seeking a long-term larger home in a mature estate. She is analytical and long-term focused, weighing both day-to-day comfort and asset quality. She expects data-backed pricing and can proceed decisively once value is clear.",
         "budget": {
             "min_price": 950000.0,
             "max_price": 1015000.0

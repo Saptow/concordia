@@ -110,6 +110,13 @@ class Entity(prefab_lib.Prefab):
             role = RoleType.BUYER
         elif 'uncertain_seller' in modules:
             role = RoleType.SELLER
+        buyer_preferences = {}
+        if role == RoleType.BUYER:
+            buyer_module_config = module_configs.get('uncertain_buyer', {})
+            if isinstance(buyer_module_config, dict):
+                raw_preferences = buyer_module_config.get('preferences', {})
+                if isinstance(raw_preferences, dict):
+                    buyer_preferences = raw_preferences
 
         # Create memory component
         memory = agent_components.memory.AssociativeMemory(
@@ -132,6 +139,7 @@ class Entity(prefab_lib.Prefab):
             role = role,
             description=description,
             flat_listing=flat_listing,
+            preferences=buyer_preferences if role == RoleType.BUYER else None,
             reservation_value=reservation,
             ethical_constraints=ethics,
             verbose=True,
@@ -210,12 +218,12 @@ class Entity(prefab_lib.Prefab):
             pre_act_label=f'Self-perception as {role}',
             question=(
             f'Agent description: {description}\n'
-            f'What kind of {role} is {agent_name}? Respond in 1-5 sentences.\n'
-            f'Requirement: return at least one concrete sentence; do not return an empty answer.'
+            f'What kind of {role} is {agent_name}?\n'
+            f'Only consider the agent description to infer their personality and values. Provide your answer in 1-5 sentences.'
             ),
             answer_prefix=f'{agent_name} is a {role} who',
             add_to_memory=False,
-            memory_tag='[self perception]',
+            memory_tag='[self perception]'
         )
 
         # Create question components for context and reasoning
