@@ -13,7 +13,8 @@ from concordia.prefabs.entity.negotiation.components import (
     uncertain_buyer,
     uncertain_seller,
 )
-from concordia.hdb_simulation.models.schemas import BuyerActions, RoleType, SellerActions
+from concordia.hdb_simulation.models import schemas as hdb_schemas
+from concordia.hdb_simulation.models.schemas import RoleType
 from concordia.language_model import language_model
 from concordia.typing import prefab as prefab_lib
 
@@ -21,25 +22,24 @@ from concordia.typing import prefab as prefab_lib
 from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
-DEFAULT_ETHICS = (
-    f'HDB RESALE ETHICAL CONSTRAINTS (LAW/REG-ALIGNED)'
-    f'- Do not fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions).'
+DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
+    f'HDB RESALE ETHICAL CONSTRAINTS:'
+    f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).'
+    f'- If you are unsure about a fact, say you are unsure instead of guessing or making up an answer.'
     f'- You may withhold private limits (true budget/reservation/urgency), but if you answer a factual question, answer truthfully or say you are unsure.'
     f'- Do not propose or encourage terms that contradict HDB’s prescribed OTP/deposit framework or any side payments; keep commitments realistic within HDB timelines.'
     f'- Treat inferences as hypotheses; ask clarifying questions instead of asserting unverified claims.'
     f'- No coercion/harassment or exploitation of vulnerability; keep a clear written record of offers and key terms.'
 )
-HDB_ACTION_DOMAIN_GUARDRAILS = (
-    "DOMAIN CONSTRAINTS:\n"
-    "- This negotiation is ONLY about one HDB resale flat in Singapore.\n"
-    "- Keep all questions/answers tied to the flat condition, lease, location, transaction terms, HDB-specific policies or timeline.\n"
-    "- If the conversation drifts to an unrelated asset/domain, steer it back to the flat negotiation context.\n"
+
+HDB_ACTION_CHOICE_GUARDRAILS = (
+    "ACTION-CHOICE GUARDRAILS:\n"
+    "- If still interested in negotiating price (and not gathering information), choose MAKE_COUNTEROFFER (or MAKE_OFFER when no active offer).\n"
 )
 HDB_CONTEXT_ANCHOR = (
     "CONTEXT ANCHOR:\n"
     "- You are in an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore and discard ANY off-domain prior context.\n"
-    "- If any text conflicts with this domain, treat that conflicting text as irrelevant noise and continue in HDB-flat context.\n"
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
 )
@@ -240,32 +240,46 @@ class Entity(prefab_lib.Prefab):
             components = [uncertain_key]
         )
 
+        if role == RoleType.BUYER:
+            role_action_types = tuple(
+                dict.fromkeys(
+                    hdb_schemas.BUYER_NON_OFFER_ACTIONS
+                    + hdb_schemas.BUYER_OFFER_ACTIONS
+                )
+            )
+        else:
+            role_action_types = tuple(
+                dict.fromkeys(
+                    hdb_schemas.SELLER_NON_OFFER_ACTIONS
+                    + hdb_schemas.SELLER_OFFER_ACTIONS
+                )
+            )
+        action_type_descriptions = hdb_schemas.format_action_type_descriptions(
+            role_action_types
+        )
+
         if role == RoleType.SELLER:
             question = (
                 f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, what should {agent_name} do next? '
+                f'Given the negotiation context, choose exactly one next action type for {agent_name}. '
+                f'Action type descriptions:\n{action_type_descriptions}\n'
                 'Rules: \n'
-                '- Return exactly one executable action JSON object, not advice about what to say.\n'
-                '- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER or MAKE_COUNTEROFFER.\n'
-                '- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n'
-                '- If you are accepting the current offer, use ACCEPT_OFFER (do not use MAKE_COUNTEROFFER).\n'
-                '- If you are rejecting the current offer, use REJECT_OFFER.\n'
-                '- If you want a different price from the current offer, use MAKE_COUNTEROFFER.\n'
-                f'{HDB_ACTION_DOMAIN_GUARDRAILS}'
+                '- You must choose one action type from ALLOWED ACTION TYPES in context.\n'
+                '- Return only one action type token (for example: MAKE_COUNTEROFFER).\n'
+                '- Do not return JSON. Do not return explanation.\n'
+                f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:
             question = (
                 f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, what should {agent_name} do next? '
+                f'Given the negotiation context, choose exactly one next action type for {agent_name}. '
+                f'Action type descriptions:\n{action_type_descriptions}\n'
                 'Rules: \n'
-                '- Return exactly one executable action JSON object, not advice about what to say.\n'
-                '- If you propose/negotiate any numeric price, the action type must be MAKE_OFFER or MAKE_COUNTEROFFER.\n'
-                '- Use QUESTION/INQUIRE/NORMAL_ANSWER only for pure questions/answers with no price proposal.\n'
-                '- If you are accepting the current offer, use ACCEPT_OFFER (do not use MAKE_COUNTEROFFER).\n'
-                '- If you are rejecting the current offer, use REJECT_OFFER.\n'
-                '- If you want a different price from the current offer, use MAKE_COUNTEROFFER.\n'
-                f'if strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.'
-                f'{HDB_ACTION_DOMAIN_GUARDRAILS}'
+                '- You must choose one action type from ALLOWED ACTION TYPES in context.\n'
+                '- Return only one action type token (for example: MAKE_COUNTEROFFER).\n'
+                '- Do not return JSON. Do not return explanation.\n'
+                f'{HDB_ACTION_CHOICE_GUARDRAILS}'
+                f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
             )
         action_components = [
             instructions.name,
@@ -276,13 +290,14 @@ class Entity(prefab_lib.Prefab):
         ]
         question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
             model=model,
-            pre_act_label=f'Next action',
+            pre_act_label=f'Next action choice',
             question=question,
             answer_prefix=f'',
             add_to_memory=False,
-            memory_tag='[action reasoning]',
-            output_schema=BuyerActions if role == RoleType.BUYER else SellerActions,
+            memory_tag='[action choice]',
             components=action_components,
+            choice_responses=role_action_types,
+            randomize_choice_responses=False,
         )
 
         # # Recent memories for context 
@@ -340,6 +355,8 @@ class Entity(prefab_lib.Prefab):
             structured_component_key='action_reasoning',
             component_order=component_order,
             fallback_to_llm_for_free=False,
+            structured_component_outputs_action_choice=True,
+            disable_action_validation=True,
         )
                 # Create the agent
         agent = entity_agent_with_logging.EntityAgentWithLogging(

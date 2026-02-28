@@ -26,9 +26,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     second participant.
   - Pair queue order is fixed and repeated every round.
 
-  Pairs can be expressed either with names or IDs. If `player_ids` are supplied,
-  the scheduler stores and indexes pairs by ID internally and maps to names when
-  returning the next active entity.
+  Pairs can be expressed either with names or IDs.
   """
 
   def __init__(
@@ -47,7 +45,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
         pre_act_label=pre_act_label,
     )
     if not player_names:
-      raise ValueError('`player_names` must not be empty.')
+      raise ValueError('`No player names provided to scheduler.')
 
     self._max_rounds = max_rounds if max_rounds and max_rounds > 0 else None
     self._player_ids = tuple(player_ids) if player_ids else tuple(player_names)
@@ -71,6 +69,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     self._turn_in_pair = 0
     self._total_turns = 0
     self._currently_active_player = None
+    self._active_global_round_number = 1
 
   def _to_player_id(self, token: str) -> str:
     if token in self._id_to_name:
@@ -97,8 +96,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
       )
       if first is None or second is None:
         raise ValueError(
-            'Pair mapping must contain two participants, for example '
-            '`{"first": "...", "second": "..."}`.'
+            'Pair mapping must contain two participants.'
         )
       return self._to_player_id(str(first)), self._to_player_id(str(second))
 
@@ -134,7 +132,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     return self._player_id_to_pair_index.get(player_id)
 
   def _rebuild_player_index(self) -> None:
-    """Rebuild O(1) player->pair index lookup table."""
+    '''Rebuild internal index mapping player IDs to their pair index in the queue using dictionary.'''
     self._player_id_to_pair_index = {}
     for idx, pair in enumerate(self._pair_queue):
       first, second = pair
@@ -156,7 +154,6 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
         return
 
   def close_pair_for_player(self, player_token: str) -> None:
-    """Mark the player's negotiation pair as closed (e.g., accepted offer)."""
     try:
       player_id = self._to_player_id(player_token)
     except ValueError:
@@ -223,8 +220,8 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
     return {
         # Keep `round_number` as pair-local round for active pair.
         'round_number': pair_round_number,
-        # Preserve global cycle visibility for diagnostics.
-        'global_round_number': self._round_number,
+        # Report global round for the currently dispatched actor turn.
+        'global_round_number': self._active_global_round_number,
         'pair_index': self._pair_index,
         'turn_in_pair': self._turn_in_pair,
         'next_actor_name': self._id_to_name[next_actor_id],
@@ -244,6 +241,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
 
     next_actor_id = self._peek_next_actor_id()
     self._currently_active_player = self._id_to_name[next_actor_id]
+    self._active_global_round_number = self._round_number
     self._advance()
     return self._currently_active_player
 
@@ -253,6 +251,7 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
   def get_state(self) -> entity_component.ComponentState:
     return {
         'currently_active_player': self._currently_active_player,
+        'active_global_round_number': self._active_global_round_number,
         'round_number': self._round_number,
         'pair_index': self._pair_index,
         'turn_in_pair': self._turn_in_pair,
@@ -266,6 +265,9 @@ class PairRoundRobinNextActing(next_acting_component.NextActing):
 
   def set_state(self, state: entity_component.ComponentState) -> None:
     self._currently_active_player = state.get('currently_active_player')
+    self._active_global_round_number = int(
+        state.get('active_global_round_number', state.get('round_number', 1))
+    )
     self._round_number = int(state.get('round_number', 1))
     self._pair_index = int(state.get('pair_index', 0))
     self._turn_in_pair = int(state.get('turn_in_pair', 0))
@@ -762,7 +764,6 @@ class PassthroughResolution(entity_component.ContextComponent):
     if not isinstance(action, dict):
       return event
 
-    # Strip private reasoning before observation delivery.
     action.pop('internal_reasoning', None)
 
     sanitized_json = json.dumps(action, ensure_ascii=False)

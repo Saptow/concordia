@@ -303,7 +303,7 @@ class Sequential(engine_lib.Engine):
       state = scheduler.get_state()
     except Exception:  # pylint: disable=broad-exception-caught
       return None
-    round_number = state.get('round_number')
+    round_number = state.get('active_global_round_number', state.get('round_number'))
     try:
       return int(round_number)
     except (TypeError, ValueError):

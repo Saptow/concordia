@@ -1,6 +1,6 @@
 from enum import StrEnum
 from pydantic import BaseModel, Field, RootModel
-from typing import List, Literal, Optional, Annotated, Union
+from typing import List, Literal, Optional, Annotated, Sequence, Union
 
 # Enums
 class RoleType(StrEnum):
@@ -143,7 +143,7 @@ class MakeCounteroffer(VerbalExplanationFields):
         Literal['MAKE_COUNTEROFFER'],
         Field(
             description=(
-                "Respond to the currently active offer with an alternative price. IT CANNOT be used to repeat  "
+                "Respond to the currently active offer with an alternative price. IT CANNOT be used to repeat the same offer price from the previous round. "
             )
         ),
     ]
@@ -249,6 +249,30 @@ SELLER_OFFER_ACTIONS = (
     'MAKE_COUNTEROFFER',
 )
 
+ACTION_TYPE_DESCRIPTIONS: dict[str, str] = {
+    'MAKE_OFFER': 'Start a new price proposal when there is no active offer.',
+    'INQUIRE_BUYER': 'Buyer asks exploratory questions without proposing a price.',
+    'QUESTION_BUYER': 'Buyer asks a direct question without proposing a price.',
+    'INQUIRE_SELLER': 'Seller asks exploratory questions without proposing a price.',
+    'NORMAL_ANSWER': 'Provide a factual/public answer without proposing a new price.',
+    'ACCEPT_OFFER': 'Accept the currently active offer and finalize at that price.',
+    'REJECT_OFFER': 'Reject the currently active offer without proposing a new price.',
+    'MAKE_COUNTEROFFER': 'Respond to an active offer with an alternative price.',
+    'WALK_AWAY': 'Buyer explicitly ends the negotiation without agreement.',
+}
+
+
+def format_action_type_descriptions(action_types: Sequence[str]) -> str:
+    """Format action-type descriptions for prompt injection."""
+    lines = []
+    for action_type in action_types:
+        key = str(action_type).strip().upper()
+        if not key:
+            continue
+        desc = ACTION_TYPE_DESCRIPTIONS.get(key, 'No description available.')
+        lines.append(f'- {key}: {desc}')
+    return '\n'.join(lines)
+
 
 def get_action_model(role: RoleType, has_active_offer: bool) -> type[RootModel]:
     """Return the role-constrained action model for current offer state."""
@@ -301,4 +325,3 @@ class Flat(BaseModel):
 
 
     
-

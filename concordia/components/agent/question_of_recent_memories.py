@@ -247,6 +247,8 @@ class QuestionOfRecentMemoriesStructured(
       clock_now: Callable[[], datetime.datetime] | None = None,
       num_memories_to_retrieve: int = 25,
       output_schema: RootModel = None,
+      choice_responses: Sequence[str] = (),
+      randomize_choice_responses: bool = False,
     ):
     """Initializes the QuestionOfRecentMemories component.
 
@@ -270,6 +272,8 @@ class QuestionOfRecentMemoriesStructured(
                      add_to_memory, memory_tag, memory_component_key, components,
                      terminators, clock_now, num_memories_to_retrieve)
     self._output_schema = output_schema
+    self._choice_responses = tuple(str(x) for x in choice_responses if str(x))
+    self._randomize_choice_responses = bool(randomize_choice_responses)
 
   @override
   def _make_pre_act_value(self) -> str:
@@ -310,13 +314,26 @@ class QuestionOfRecentMemoriesStructured(
       prompt.statement(f'Current time: {self._clock_now()}.\n')
     
     question = self._question.format(agent_name=agent_name)
-    result = prompt.structured_question(
-        question,
-        answer_prefix=self._answer_prefix.format(agent_name=agent_name),
-        max_tokens=1000,
-        terminators=self._terminators,
-        output_schema=self._output_schema
-    )
+    if self._choice_responses:
+      idx = prompt.multiple_choice_question(
+          question=question,
+          answers=self._choice_responses,
+          randomize_choices=self._randomize_choice_responses,
+      )
+      result = self._choice_responses[idx]
+    else:
+      if self._output_schema is None:
+        raise ValueError(
+            'QuestionOfRecentMemoriesStructured requires either '
+            '`choice_responses` or `output_schema`.'
+        )
+      result = prompt.structured_question(
+          question,
+          answer_prefix=self._answer_prefix.format(agent_name=agent_name),
+          max_tokens=1000,
+          terminators=self._terminators,
+          output_schema=self._output_schema
+      )
     result_str = self._answer_prefix.format(agent_name=agent_name) + result
     if self._add_to_memory:
       memory.add(f'{self._memory_tag} {result_str}')

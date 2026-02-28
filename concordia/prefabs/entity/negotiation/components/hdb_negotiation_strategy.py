@@ -290,7 +290,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             if rounds_left <= 1:
                 urgency_rule = (
                     "FINAL DECISION TURN: If an offer is active, decide now with "
-                    "ACCEPT_OFFER, REJECT_OFFER, MAKE_COUNTEROFFER, or WALK_AWAY. "
+                    "ACCEPT_OFFER, REJECT_OFFER, or WALK_AWAY. "
                     "If no offer is active, make a concrete MAKE_OFFER now."
                 )
             elif rounds_left <= 2:
@@ -315,7 +315,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         if rounds_left <= 1:
             urgency_rule = (
                 "FINAL DECISION TURN: If an offer is active, decide now with "
-                "ACCEPT_OFFER, REJECT_OFFER, or MAKE_COUNTEROFFER. "
+                "ACCEPT_OFFER, REJECT_OFFER."
                 "If no offer is active, issue MAKE_OFFER now."
             )
         elif rounds_left <= 2:

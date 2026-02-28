@@ -54,6 +54,7 @@ from concordia.utils import measurements as measurements_lib
 from vllm import LLM
 from vllm import SamplingParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
+from vllm.sampling_params import GuidedDecodingParams
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
 
@@ -211,23 +212,104 @@ class VLLMLanguageModel(language_model.LanguageModel):
       seed: int | None = None,
       lora_request: LoRARequest | None = None,
   ) -> tuple[int, str, Mapping[str, Any]]:
-    """Sample a choice from the available responses using log probabilities."""
+    """Sample a choice from available responses using guided decoding.
+
+    Falls back to prompt-logprob scoring when guided choice output does not map
+    cleanly to one of the provided responses.
+    """
 
     if not responses:
       raise ValueError('No responses provided to choose from.')
 
-    # Use sampling params that request logprobs
+    guided_decoding = GuidedDecodingParams(choice=list(responses))
     sampling_params = SamplingParams(
-        max_tokens=1,  # We only need logprobs, not generation
+        guided_decoding=guided_decoding,
         temperature=0.0,
-        prompt_logprobs=0,  # Only get logprob of tokens in the prompt
+        max_tokens=64,
+        seed=seed,
     )
 
-    prompts = []
-    for response in responses:
-      prompts.append(prompt + response)
+    with self._lock:
+      outputs = self._llm.generate(
+          prompts=[prompt],
+          sampling_params=sampling_params,
+          lora_request=lora_request,
+      )
 
-    # Generate to get logprobs (we'll use prompt_logprobs)
+    generated_text = outputs[0].outputs[0].text
+    guided_idx = self._match_guided_choice_output(generated_text, responses)
+    if guided_idx is not None:
+      debug_info = {
+          'method': 'guided_choice',
+          'guided_output': generated_text,
+      }
+      if self._measurements is not None:
+        self._measurements.publish_datum(
+            self._channel,
+            {'choice_method': 'guided_choice', 'num_choices': len(responses)},
+        )
+      return guided_idx, responses[guided_idx], debug_info
+
+    return self._sample_choice_with_logprobs(
+        prompt=prompt,
+        responses=responses,
+        seed=seed,
+        lora_request=lora_request,
+        guided_output=generated_text,
+    )
+
+  @staticmethod
+  def _match_guided_choice_output(
+      generated_text: str, responses: Sequence[str]
+  ) -> int | None:
+    """Match guided choice text to one of the candidate responses."""
+    if not responses:
+      return None
+
+    raw = str(generated_text or '').strip()
+    if raw in responses:
+      return responses.index(raw)
+
+    normalized = raw.strip().strip('`').strip().strip('"').strip("'").strip()
+    if normalized in responses:
+      return responses.index(normalized)
+
+    normalized_fold = normalized.casefold()
+    exact_fold = [
+        idx for idx, response in enumerate(responses)
+        if str(response).strip().casefold() == normalized_fold
+    ]
+    if len(exact_fold) == 1:
+      return exact_fold[0]
+
+    starts_with = [
+        idx for idx, response in enumerate(responses)
+        if normalized_fold.startswith(str(response).strip().casefold())
+    ]
+    if len(starts_with) == 1:
+      return starts_with[0]
+    return None
+
+  def _sample_choice_with_logprobs(
+      self,
+      prompt: str,
+      responses: Sequence[str],
+      *,
+      seed: int | None,
+      lora_request: LoRARequest | None,
+      guided_output: str | None = None,
+  ) -> tuple[int, str, Mapping[str, Any]]:
+    """Fallback choice scorer using prompt log probabilities."""
+    # We only need prompt logprobs, not generation.
+    sampling_params = SamplingParams(
+        max_tokens=1,
+        temperature=0.0,
+        prompt_logprobs=0,
+        seed=seed,
+    )
+
+    prompts = [prompt + response for response in responses]
+
     with self._lock:
       outputs = self._llm.generate(
           prompts=prompts,
@@ -261,21 +343,25 @@ class VLLMLanguageModel(language_model.LanguageModel):
 
         logprobs.append(total_logprob)
 
-    # Find the response with highest log probability
     best_idx = int(max(range(len(logprobs)), key=lambda i: logprobs[i]))
 
-    # Create debug info with all scores
     debug_info = {
         'logprobs': {
             response: logprobs[i] for i, response in enumerate(responses)
         },
         'method': 'logprobs',
     }
+    if guided_output is not None:
+      debug_info['guided_output'] = guided_output
 
     if self._measurements is not None:
       self._measurements.publish_datum(
           self._channel,
-          {'choice_method': 'logprobs', 'num_choices': len(responses)},
+          {
+              'choice_method': 'logprobs',
+              'num_choices': len(responses),
+              'guided_choice_fallback': guided_output is not None,
+          },
       )
 
     return best_idx, responses[best_idx], debug_info
