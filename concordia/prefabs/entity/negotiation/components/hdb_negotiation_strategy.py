@@ -497,8 +497,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         numeric_fields = self._compute_deterministic_numeric_fields()
         numeric_summary = self._numeric_fact_summary(numeric_fields)
         negotiation_numbers = (
-            f"Current Reservation Price (in SGD):{self._state.current_position}\n"
-            f"Opponent Reservation Price (in SGD):{self._display_position(self._state.opponent_position)}\n"
+            f"Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._state.current_position}\n"
+            f"Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_summary}\n"
@@ -617,8 +617,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         '''Get pre-act value with strategy state and numeric facts for prompting.'''
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         return (
-            f"Current Reservation Price (in SGD):{self._state.current_position}\n"
-            f"Opponent Reservation Price (in SGD):{self._display_position(self._state.opponent_position)}\n"
+            f"Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._state.current_position}\n"
+            f"Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
@@ -630,8 +630,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         strategy_summary = getattr(self, 'strategy_summary', '')
         return (
-            f"Current Reservation Price (in SGD):{self._state.current_position}\n"
-            f"Opponent Reservation Price (in SGD):{self._display_position(self._state.opponent_position)}\n"
+            f"Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._state.current_position}\n"
+            f"Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
@@ -648,11 +648,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             key, value = part.split(':', 1)
             key = key.strip()
             value = value.strip()
-            if key == 'Current Reservation Price (in SGD)':
+            if key == 'Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS)':
                 self._state.current_position = float(value)
             elif key == 'Current Reservation Price':
                 self._state.current_position = float(value)
-            elif key == 'Opponent Reservation Price (in SGD)':
+            elif key == 'Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS)':
                 if value != 'Unknown':
                     self._state.opponent_position = float(value)
             elif key == 'Opponent Reservation Price':
