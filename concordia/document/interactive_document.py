@@ -336,7 +336,35 @@ class InteractiveDocument(document.Document):
     self._response(')\n')
     self.debug(f'[{debug}]')
     return original_indices[idx]
+  
+  def structured_multiple_choice_question(
+      self, 
+      question: str, 
+      choices: Sequence[str],
+      answer_prefix: str = '',
+      answer_label: str = 'Answer',
+      max_tokens: int = DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = ('\n',),
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K
+    ) -> str:
+    """Asks a question expecting a structured response."""
+    self._question(f'Question: {question}\n')
+    self._response(f'{answer_label}: {answer_prefix}')
 
+    response = self._model.sample_choice(
+        prompt=self._model_view.text(),
+        max_tokens=max_tokens,
+        terminators=terminators,
+        responses=list(choices),
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+    )
+
+    return response
+  
   def structured_question(
       self, 
       question: str, 

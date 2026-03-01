@@ -34,10 +34,10 @@ DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
 
 HDB_ACTION_CHOICE_GUARDRAILS = (
     "ACTION-CHOICE GUARDRAILS:\n"
-    "- If still interested in negotiating price (and not gathering information), choose MAKE_COUNTEROFFER (or MAKE_OFFER when no active offer).\n"
+    "- If guidance indicates information gathering and you have budget for it, but there is an ACTIVE OFFER, DO NOT MAKE_COUNTEROFFER; choose REJECT_OFFER and then proceed with information gathering.\n"
 )
 HDB_CONTEXT_ANCHOR = (
-    "CONTEXT ANCHOR:\n"
+    "\nNOTE:\n"
     "- You are in an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore and discard ANY off-domain prior context.\n"
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
@@ -240,19 +240,21 @@ class Entity(prefab_lib.Prefab):
             components = [uncertain_key]
         )
 
+        has_active_offer = (
+            str(numeric_facts.fields.get('hasActiveOffer', 'False')).lower()
+            == 'true'
+        )
         if role == RoleType.BUYER:
-            role_action_types = tuple(
-                dict.fromkeys(
-                    hdb_schemas.BUYER_NON_OFFER_ACTIONS
-                    + hdb_schemas.BUYER_OFFER_ACTIONS
-                )
+            role_action_types = (
+                hdb_schemas.BUYER_OFFER_ACTIONS
+                if has_active_offer
+                else hdb_schemas.BUYER_NON_OFFER_ACTIONS
             )
         else:
-            role_action_types = tuple(
-                dict.fromkeys(
-                    hdb_schemas.SELLER_NON_OFFER_ACTIONS
-                    + hdb_schemas.SELLER_OFFER_ACTIONS
-                )
+            role_action_types = (
+                hdb_schemas.SELLER_OFFER_ACTIONS
+                if has_active_offer
+                else hdb_schemas.SELLER_NON_OFFER_ACTIONS
             )
         action_type_descriptions = hdb_schemas.format_action_type_descriptions(
             role_action_types
@@ -261,23 +263,15 @@ class Entity(prefab_lib.Prefab):
         if role == RoleType.SELLER:
             question = (
                 f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, choose exactly one next action type for {agent_name}. '
+                f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}? '
                 f'Action type descriptions:\n{action_type_descriptions}\n'
-                'Rules: \n'
-                '- You must choose one action type from ALLOWED ACTION TYPES in context.\n'
-                '- Return only one action type token (for example: MAKE_COUNTEROFFER).\n'
-                '- Do not return JSON. Do not return explanation.\n'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:
             question = (
                 f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, choose exactly one next action type for {agent_name}. '
+                f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}? '
                 f'Action type descriptions:\n{action_type_descriptions}\n'
-                'Rules: \n'
-                '- You must choose one action type from ALLOWED ACTION TYPES in context.\n'
-                '- Return only one action type token (for example: MAKE_COUNTEROFFER).\n'
-                '- Do not return JSON. Do not return explanation.\n'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
                 f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
             )
@@ -299,14 +293,7 @@ class Entity(prefab_lib.Prefab):
             choice_responses=role_action_types,
             randomize_choice_responses=False,
         )
-
-        # # Recent memories for context 
-        # #TODO: no need for now, since this agent is purely for negotiation purposes; introduce back if needed
-        # recent_memories = agent_components.all_similar_memories.AllSimilarMemories(
-        #     model=model,
-        #     num_memories_to_retrieve=10,
-        # )
-
+        
         # TODO: look into more refined strategy integration on later stage
         # Assemble all components
         components_of_agent = {
@@ -319,7 +306,7 @@ class Entity(prefab_lib.Prefab):
             numeric_facts_key: numeric_facts,
             'situation_perception': question_about_situation,
             'self_perception': question_about_self,
-            'action_reasoning': question_about_action,
+            'action_decisions': question_about_action,
         }
 
         # Add any extra components
@@ -338,7 +325,7 @@ class Entity(prefab_lib.Prefab):
             numeric_facts_key,
             'situation_perception',
             'self_perception',
-            'action_reasoning',
+            'action_decisions',
         ]
 
         # Add extra component names to order
@@ -352,7 +339,7 @@ class Entity(prefab_lib.Prefab):
         act_component = hdb_acting_component.HDBStructuredActComponent(
             model=model,
             role=role,  # RoleType.BUYER or RoleType.SELLER
-            structured_component_key='action_reasoning',
+            structured_component_key='action_decisions',
             component_order=component_order,
             fallback_to_llm_for_free=False,
             structured_component_outputs_action_choice=True,
@@ -363,6 +350,7 @@ class Entity(prefab_lib.Prefab):
             agent_name=agent_name,
             act_component=act_component,
             context_components=components_of_agent,
+            act_component_log_aliases=('action_reasoning',),
         )
 
         return agent

@@ -111,7 +111,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         """Render listing details into a compact prompt block."""
         if not self._flat_listing:
             return ''
-        lines = ['FLAT LISTING DETAILS (FACTUAL):']
+        lines = ['FLAT DETAILS (FACTUAL):']
         for key, value in self._flat_listing.items():
             label = str(key).replace('_', ' ').strip().title()
             if isinstance(value, list):
@@ -156,6 +156,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                 f'SELLER-SPECIFIC GUIDANCE:\n'
                 f'You have full knowledge of the flat condition. The counterpart party does not. Always remember this when negotiating price.'
             )
+
         instructions = ( # Note that description is already provided in the self-perception component.
             f'You are {self._agent_name}.\n\n'
             f'ROLE: {self._role.name}. \n\n'
@@ -174,32 +175,6 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         # TODO: Add HDB-specific policy constraints and guidelines here
         return instructions
 
-    def get_phase_specific_guidance(self) -> str:
-        """Get guidance specific to current negotiation phase."""
-        if self._negotiation_phase == 'opening':
-            return (
-                'OPENING PHASE:\n'
-                '- Build rapport and establish communication norms\n'
-                '- Explore interests and priorities\n'
-                '- Set collaborative or competitive tone\n'
-                '- Make or solicit initial offers carefully\n'
-            )
-        elif self._negotiation_phase == 'middle':
-            return (
-                'MIDDLE PHASE:\n'
-                '- Exchange offers and counteroffers\n'
-                '- Look for trade-offs and package deals\n'
-                '- Test different options and scenarios\n'
-                '- Build on areas of agreement\n'
-            )
-        else:  # closing
-            return (
-                'CLOSING PHASE:\n'
-                '- Finalize remaining issues\n'
-                '- Ensure mutual understanding\n'
-                '- Document the agreement clearly\n'
-                '- Preserve relationship for future\n'
-            )
 
     def get_pre_act_label(self) -> str:
         """Label used when other components reference this pre-act context."""
@@ -211,14 +186,8 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         instructions = self._base_instructions
         instructions += (
             f'\nCURRENT ROUND COUNTER: {self._rounds_completed}\n'
-            'Stay objective-focused: improve your deal while moving toward agreement.\n'
+            'Perform intentional actions over vague repetition.\n'
         )
-
-        # Add tactical reminders
-        instructions += '\nREMEMBER:\n'
-        instructions += '- Make each turn advance the negotiation meaningfully\n'
-        instructions += '- Every concession should get something in return\n'
-        instructions += '- Prefer clear actionable proposals over vague repetition\n'
 
         return instructions
 

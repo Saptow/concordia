@@ -224,7 +224,6 @@ class BuyerActions(RootModel[BuyerActionTypes]):
 class SellerActions(RootModel[SellerActionTypes]):
     pass
 
-
 BUYER_NON_OFFER_ACTIONS = (
     'MAKE_OFFER',
     'INQUIRE_BUYER',
@@ -248,6 +247,8 @@ SELLER_OFFER_ACTIONS = (
     'REJECT_OFFER',
     'MAKE_COUNTEROFFER',
 )
+BUYER_TOTAL_ACTIONS = BUYER_OFFER_ACTIONS + BUYER_NON_OFFER_ACTIONS
+SELLER_TOTAL_ACTIONS = SELLER_OFFER_ACTIONS + SELLER_NON_OFFER_ACTIONS
 
 ACTION_TYPE_DESCRIPTIONS: dict[str, str] = {
     'MAKE_OFFER': 'Start a new price proposal when there is no active offer.',

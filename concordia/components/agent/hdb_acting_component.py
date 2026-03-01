@@ -34,7 +34,7 @@ class HDBStructuredActComponent(
 
     Purpose:
       - Read action intent from a structured context component
-        (default key: ``action_reasoning``).
+        (default key: ``action_decisions``).
       - In action-choice mode, treat that upstream value as a preselected
         ``action_type`` and generate only the remaining payload fields.
       - Optionally validate the resulting payload against role-constrained
@@ -51,7 +51,7 @@ class HDBStructuredActComponent(
         self,
         model: language_model.LanguageModel,
         role: hdb_schemas.RoleType,
-        structured_component_key: str = "action_reasoning",
+        structured_component_key: str = "action_decisions",
         component_order: Sequence[str] | None = None,
         randomize_choices: bool = False,
         fallback_to_llm_for_free: bool = False,

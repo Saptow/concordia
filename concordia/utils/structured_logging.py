@@ -947,15 +947,9 @@ function extractEntityTrace(entry) {
 
   const observed = normalizeTextList(getByPath(payload, ['observation', 'Value']));
 
-  const thought = [];
-  [getByPath(payload, ['situation_perception', 'Summary']),
-   getByPath(payload, ['self_perception', 'Summary']),
-   getByPath(payload, ['action_reasoning', 'Summary'])].forEach(value => {
-    normalizeTextList(value).forEach(item => thought.push(item));
-  });
-
   let action = '';
   const actionCandidates = [
+    getByPath(payload, ['action_decisions', 'State']),
     getByPath(payload, ['action_reasoning', 'State']),
     getByPath(payload, ['__act__', 'Value']),
   ];
@@ -974,7 +968,6 @@ function extractEntityTrace(entry) {
 
   return {
     observed: observed.slice(-4),
-    thought: thought.slice(-4),
     action: action,
   };
 }
@@ -989,11 +982,6 @@ function renderTraceCard(entityName, trace) {
     ? trace.observed.map(item => '<div class="trace-item">' + escapeHtml(item) + '</div>').join('')
     : '<div class="trace-empty">No explicit observation captured.</div>';
   html += '<div class="trace-block"><div class="trace-label">Observed</div>' + observedRows + '</div>';
-
-  const thoughtRows = trace.thought && trace.thought.length
-    ? trace.thought.map(item => '<div class="trace-item">' + escapeHtml(item) + '</div>').join('')
-    : '<div class="trace-empty">No explicit thought summary captured.</div>';
-  html += '<div class="trace-block"><div class="trace-label">Thought</div>' + thoughtRows + '</div>';
 
   const actionRow = trace.action
     ? '<div class="trace-item">' + escapeHtml(trace.action) + '</div>'
@@ -1083,7 +1071,12 @@ function extractEntityPayload(entry) {
   if (resolved.value && typeof resolved.value === 'object') {
     return resolved.value;
   }
-  if (resolved.__act__ || resolved.observation || resolved.action_reasoning) {
+  if (
+    resolved.__act__
+    || resolved.observation
+    || resolved.action_decisions
+    || resolved.action_reasoning
+  ) {
     return resolved;
   }
   return {};

@@ -14,7 +14,7 @@
 
 """A modular entity agent that supports logging from components."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import types
 from typing import Any
 
@@ -38,6 +38,7 @@ class EntityAgentWithLogging(entity_agent.EntityAgent,
       context_components: Mapping[str, entity_component.ContextComponent] = (
           types.MappingProxyType({})
       ),
+      act_component_log_aliases: Sequence[str] = (),
   ):
     """Initializes the agent.
 
@@ -54,6 +55,8 @@ class EntityAgentWithLogging(entity_agent.EntityAgent,
       context_processor: The component that will be used to process contexts. If
         None, a NoOpContextProcessor will be used.
       context_components: The ContextComponents that will be used by the agent.
+      act_component_log_aliases: Additional channels to mirror act-component
+        logs into, besides the default `__act__` channel.
     """
     super().__init__(agent_name=agent_name,
                      act_component=act_component,
@@ -68,9 +71,22 @@ class EntityAgentWithLogging(entity_agent.EntityAgent,
             self._component_logging.get_channel(channel_name).append
         )
     if isinstance(act_component, entity_component.ComponentWithLogging):
-      act_component.set_logging_channel(
-          self._component_logging.get_channel('__act__').append
-      )
+      act_channels = tuple(dict.fromkeys(('__act__', *act_component_log_aliases)))
+      if len(act_channels) == 1:
+        act_component.set_logging_channel(
+            self._component_logging.get_channel(act_channels[0]).append
+        )
+      else:
+        appenders = tuple(
+            self._component_logging.get_channel(channel_name).append
+            for channel_name in act_channels
+        )
+
+        def _publish_act_log(datum: Any) -> None:
+          for append in appenders:
+            append(datum)
+
+        act_component.set_logging_channel(_publish_act_log)
     if isinstance(context_processor, entity_component.ComponentWithLogging):
       context_processor.set_logging_channel(
           self._component_logging.get_channel('__context_processor__').append

@@ -299,7 +299,6 @@ class QuestionOfRecentMemoriesStructured(
     )
     if perception_keys:
       perception_block = '\n'.join([
-          f'{self.get_component_pre_act_label(key)}: '
           f'{self.get_named_component_pre_act_value(key)}'
           for key in perception_keys
       ])
@@ -308,16 +307,16 @@ class QuestionOfRecentMemoriesStructured(
           f'{perception_block}'
       )
 
-    prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
+    prompt.statement(f'\nRecent observations of {agent_name}:\n{mems}')
 
     if self._clock_now is not None:
       prompt.statement(f'Current time: {self._clock_now()}.\n')
     
     question = self._question.format(agent_name=agent_name)
     if self._choice_responses:
-      idx = prompt.multiple_choice_question(
+      idx = prompt.structured_multiple_choice_question(
           question=question,
-          answers=self._choice_responses,
+          choices=self._choice_responses,
           randomize_choices=self._randomize_choice_responses,
       )
       result = self._choice_responses[idx]

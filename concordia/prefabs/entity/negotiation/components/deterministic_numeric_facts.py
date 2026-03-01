@@ -16,6 +16,8 @@ from concordia.typing import entity_component
 
 class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
   """Computes deterministic price facts from structured observation events."""
+  _OFFER_OPEN_ACTIONS = frozenset({'MAKE_OFFER', 'MAKE_COUNTEROFFER'})
+  _OFFER_CLOSE_ACTIONS = frozenset({'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'})
 
   def __init__(
       self,
@@ -34,16 +36,17 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     self._uncertain_component_key = uncertain_component_key
     self._max_observations = max(1, int(max_observations))
     self._emit_pre_act_context = bool(emit_pre_act_context)
+    self._last_fields: dict[str, str] = {}
+    self.fields: dict[str, str] = {}
 
   def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
     if self._emit_pre_act_context:
       return super().pre_act(action_spec)
-    # Keep deterministic facts available to dependent components while avoiding
-    # duplicate context in the global action prompt.
     del action_spec
     _ = self.get_pre_act_value()
     return ''
 
+  # HELPER METHODS #
   @staticmethod
   def _extract_first_json_object(text: str) -> str | None:
     start = text.find('{')
@@ -109,6 +112,10 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
         return parsed
     return None
 
+  @staticmethod
+  def _extract_action_type(payload: dict[str, Any]) -> str:
+    return str(payload.get('type', '')).strip().upper()
+
   def _parse_observed_action(self, memory_text: str) -> tuple[str, dict[str, Any]] | None:
     text = memory_text.strip()
     obs_tag = observation_component.OBSERVATION_TAG
@@ -129,19 +136,19 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
       return None
     return actor.strip(), action
 
-  def _resolve_own_reservation(self) -> float | None:
-    # Primary source: strategy state current_position.
+  def _resolve_strategy_position(self, field_name: str) -> float | None:
     try:
       strategy_component = self.get_entity().get_component(self._strategy_component_key)
     except Exception:
-      strategy_component = None
+      return None
+    strategy_state = getattr(strategy_component, '_state', None)
+    return self._coerce_positive_float(getattr(strategy_state, field_name, None))
 
-    if strategy_component is not None:
-      strategy_state = getattr(strategy_component, '_state', None)
-      current_position = getattr(strategy_state, 'current_position', None)
-      parsed = self._coerce_positive_float(current_position)
-      if parsed is not None:
-        return parsed
+  def _resolve_own_reservation(self) -> float | None:
+    # Primary source: strategy state current_position.
+    parsed = self._resolve_strategy_position('current_position')
+    if parsed is not None:
+      return parsed
 
     # Fallback source from uncertainty components.
     if not self._uncertain_component_key:
@@ -166,17 +173,9 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
 
   def _resolve_opponent_reservation(self) -> float | None:
     # Primary source: strategy state opponent_position.
-    try:
-      strategy_component = self.get_entity().get_component(self._strategy_component_key)
-    except Exception:
-      strategy_component = None
-
-    if strategy_component is not None:
-      strategy_state = getattr(strategy_component, '_state', None)
-      opponent_position = getattr(strategy_state, 'opponent_position', None)
-      parsed = self._coerce_positive_float(opponent_position)
-      if parsed is not None:
-        return parsed
+    parsed = self._resolve_strategy_position('opponent_position')
+    if parsed is not None:
+      return parsed
 
     # Fallback source from uncertainty components.
     if not self._uncertain_component_key:
@@ -231,35 +230,36 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
       return f'{int(round(value))}'
     return f'{value:.2f}'
 
+  def _infer_offer_state(
+      self,
+      recent_memories: list[str],
+  ) -> tuple[bool, float | None, str | None, str | None]:
+    """Infer active offer from latest relevant structured action."""
+    last_action_type: str | None = None
+    for mem in reversed(recent_memories):
+      parsed = self._parse_observed_action(mem)
+      if not parsed:
+        continue
+      _, action = parsed
+      action_type = self._extract_action_type(action)
+      if not action_type:
+        continue
+      if last_action_type is None:
+        last_action_type = action_type
+      if action_type in self._OFFER_OPEN_ACTIONS:
+        return True, self._extract_action_price(action), action_type, last_action_type
+      if action_type in self._OFFER_CLOSE_ACTIONS:
+        return False, None, None, last_action_type
+    return False, None, None, last_action_type
+
   def _make_pre_act_value(self) -> str:
     memory = self.get_entity().get_component(
         self._memory_component_key, type_=memory_component.Memory
     )
     recent_memories = memory.retrieve_recent(limit=self._max_observations)
-
-    active_offer_price: float | None = None
-    active_offer_type: str | None = None
-    last_action_type: str | None = None
-
-    for mem in recent_memories:
-      parsed = self._parse_observed_action(mem)
-      if not parsed:
-        continue
-      _, action = parsed
-      action_type = str(action.get('type', '')).strip().upper()
-      if not action_type:
-        continue
-
-      last_action_type = action_type
-
-      if action_type in {'MAKE_OFFER', 'MAKE_COUNTEROFFER'}:
-        price = self._extract_action_price(action)
-        if price is not None:
-          active_offer_price = price
-          active_offer_type = action_type
-      elif action_type in {'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'}:
-        active_offer_price = None
-        active_offer_type = None
+    has_active_offer, active_offer_price, active_offer_type, last_action_type = (
+        self._infer_offer_state(recent_memories)
+    )
 
     own_reservation = self._resolve_own_reservation()
     opponent_reservation = self._resolve_opponent_reservation()
@@ -272,35 +272,37 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
         opponent_reservation=opponent_reservation,
     )
 
-    lines = [
-      f'OwnVsOpponentReservation={reservation_comparison}',
-      f'ZOPAFeasible={str(zopa_feasible) if zopa_feasible is not None else "Unknown"}',
-      f'LastObservedActionType={last_action_type or "NA"}',
-    ]
+    fields: dict[str, str] = {
+      'OwnVsOpponentReservation': reservation_comparison,
+      'ZOPAFeasible': str(zopa_feasible) if zopa_feasible is not None else 'Unknown',
+      'LastObservedActionType': last_action_type or 'NA',
+      'HasActiveOffer': str(bool(has_active_offer)),
+      'ActiveOfferPrice': (
+          self._format_money(active_offer_price) if has_active_offer else 'NA'
+      ),
+    }
 
-    if active_offer_price is None:
-      lines.append('HasActiveOffer=False')
-      lines.append('ActiveOfferPrice=NA')
-    else:
-      lines.append('HasActiveOffer=True')
-      lines.append(f'ActiveOfferPrice={self._format_money(active_offer_price)}')
-      lines.append(f'ActiveOfferType={active_offer_type or "NA"}')
-      if own_reservation is not None:
+    if has_active_offer:
+      fields['ActiveOfferType'] = active_offer_type or 'NA'
+      if own_reservation is not None and active_offer_price is not None:
         offer_minus_reservation = active_offer_price - own_reservation
-        lines.append(
-            'OfferMinusOwnReservation='
-            f'{self._format_money(offer_minus_reservation)}'
+        fields['OfferMinusOwnReservation'] = self._format_money(
+            offer_minus_reservation
         )
         if self._role == hdb_schemas.RoleType.BUYER:
-          lines.append(
-              f'OfferWithinOwnReservation={str(active_offer_price <= own_reservation)}'
+          fields['OfferWithinOwnReservation'] = str(
+              active_offer_price <= own_reservation
           )
         else:
-          lines.append(
-              f'OfferMeetsOwnReservation={str(active_offer_price >= own_reservation)}'
+          fields['OfferMeetsOwnReservation'] = str(
+              active_offer_price >= own_reservation
           )
-          
-    return '\n'.join(lines)
+
+    self._last_fields = dict(fields)
+    self.fields = {
+      'hasActiveOffer': fields.get('HasActiveOffer', 'False')
+    }
+    return '\n'.join([f'{key}={value}' for key, value in fields.items()])
 
   def get_state(self) -> entity_component.ComponentState:
     return {
