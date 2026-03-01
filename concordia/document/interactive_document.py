@@ -348,22 +348,20 @@ class InteractiveDocument(document.Document):
       temperature: float = language_model.DEFAULT_TEMPERATURE,
       top_p: float = language_model.DEFAULT_TOP_P,
       top_k: int = language_model.DEFAULT_TOP_K
-    ) -> str:
+    ) -> int:
     """Asks a question expecting a structured response."""
+    del max_tokens, terminators, temperature, top_p, top_k
     self._question(f'Question: {question}\n')
     self._response(f'{answer_label}: {answer_prefix}')
 
-    response = self._model.sample_choice(
+    idx, response, debug = self._model.sample_choice(
         prompt=self._model_view.text(),
-        max_tokens=max_tokens,
-        terminators=terminators,
         responses=list(choices),
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
     )
+    self._model_response(response)
+    self.debug(f'[{debug}]')
 
-    return response
+    return idx
   
   def structured_question(
       self, 
