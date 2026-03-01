@@ -54,7 +54,7 @@ from concordia.utils import measurements as measurements_lib
 from vllm import LLM
 from vllm import SamplingParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
-from vllm.sampling_params import StructuredOutputsParams, GuidedDecodingParams
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
 
 _DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
