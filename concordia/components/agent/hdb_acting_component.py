@@ -16,6 +16,7 @@ HDB_FIELD_GENERATION_BASE_GUARDRAILS = (
     "- This is an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore off-domain context and keep content tied to the flat negotiation only.\n"
     "- If mentioning reports/documents, summarize content instead of promising to share files.\n"
+    "- NEVER mention your own internal state (reservation value, preferences etc.) under verbal_explanation. Include ONLY under internal_reasoning."
 )
 
 HDB_FIELD_GENERATION_MONETARY_GUARDRAILS = (
