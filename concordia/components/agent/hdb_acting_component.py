@@ -196,14 +196,43 @@ class HDBStructuredActComponent(
     ) -> str | None:
         """Extract action-type hint from chooser output text/JSON."""
         allowed = {str(x).strip().upper() for x in allowed_types if str(x).strip()}
+        known_types = {
+            str(x).strip().upper()
+            for x in (
+                hdb_schemas.BUYER_NON_OFFER_ACTIONS
+                + hdb_schemas.BUYER_OFFER_ACTIONS
+                + hdb_schemas.SELLER_NON_OFFER_ACTIONS
+                + hdb_schemas.SELLER_OFFER_ACTIONS
+            )
+            if str(x).strip()
+        }
+        candidate_types = allowed or known_types
+
+        def _compact(value: Any) -> str:
+            return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+
+        compact_lookup = {
+            _compact(action_type): action_type
+            for action_type in sorted(candidate_types)
+        }
 
         def _coerce(candidate: Any) -> str | None:
-            normalized = str(candidate or "").strip().upper()
+            upper = str(candidate or "").strip().upper()
+            if not upper:
+                return None
+            normalized = re.sub(r"[^A-Z0-9]+", "_", upper).strip("_")
             if not normalized:
+                return None
+            if normalized in candidate_types:
+                return normalized
+            compact = _compact(upper)
+            if compact in compact_lookup:
+                return compact_lookup[compact]
+            if allowed:
                 return None
             if "_" not in normalized:
                 return None
-            if allowed and normalized not in allowed:
+            if self._schema_for_action_type(normalized) is None:
                 return None
             return normalized
 
@@ -231,9 +260,19 @@ class HDBStructuredActComponent(
             pass
 
         upper_text = text.upper()
-        if allowed:
-            for action_type in sorted(allowed, key=len, reverse=True):
+        compact_text = _compact(upper_text)
+        if candidate_types:
+            for action_type in sorted(candidate_types, key=len, reverse=True):
                 if re.search(rf"\b{re.escape(action_type)}\b", upper_text):
+                    return action_type
+                parts = [part for part in action_type.split("_") if part]
+                if parts:
+                    spaced_pattern = r"\b" + r"[\s_-]*".join(
+                        re.escape(part) for part in parts
+                    ) + r"\b"
+                    if re.search(spaced_pattern, upper_text):
+                        return action_type
+                if _compact(action_type) in compact_text:
                     return action_type
 
         for token in re.findall(r"[A-Z_]{3,}", upper_text):
@@ -372,10 +411,20 @@ class HDBStructuredActComponent(
                     raw, allowed_types=allowed_types
                 )
                 if not preferred_action_type:
-                    raise ValueError(
-                        f'Could not parse chosen action type from "{self._structured_component_key}". '
-                        "question_about_action should return exactly one action type token."
-                    )
+                    if allowed_types:
+                        preferred_action_type = allowed_types[0]
+                        self._logging_channel({
+                            "Summary": (
+                                f'Could not parse chosen action type from "{self._structured_component_key}". '
+                                f"Falling back to first allowed option: {preferred_action_type}."
+                            ),
+                            "Value": str(raw),
+                        })
+                    else:
+                        raise ValueError(
+                            f'Could not parse chosen action type from "{self._structured_component_key}". '
+                            "question_about_action should return exactly one action type token."
+                        )
                 if allowed_types and preferred_action_type not in set(allowed_types):
                     raise ValueError(
                         f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
