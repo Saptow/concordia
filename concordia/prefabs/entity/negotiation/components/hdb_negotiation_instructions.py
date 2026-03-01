@@ -56,12 +56,6 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         self._pre_act_label = pre_act_label
         self._verbose = verbose
 
-        # Track negotiation state
-        self._negotiation_phase = 'opening'
-        self._rounds_completed = 0
-        self._last_offer_made = None
-        self._last_offer_received = None
-
         # Base instructions
         self._base_instructions = self._generate_base_instructions()
 
@@ -93,25 +87,11 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                     return candidate[: idx + 1]
         return None
 
-    @classmethod
-    def _is_offer_action(cls, text: str) -> bool:
-        payload_json = cls._extract_first_json_object(text)
-        if not payload_json:
-            return False
-        try:
-            payload = json.loads(payload_json)
-        except json.JSONDecodeError:
-            return False
-        if not isinstance(payload, dict):
-            return False
-        action_type = str(payload.get('type', '')).strip().upper()
-        return action_type in {'MAKE_OFFER', 'MAKE_COUNTEROFFER'}
-
     def _format_flat_listing_details(self) -> str:
         """Render listing details into a compact prompt block."""
         if not self._flat_listing:
             return ''
-        lines = ['FLAT DETAILS (FACTUAL):']
+        lines = []
         for key, value in self._flat_listing.items():
             label = str(key).replace('_', ' ').strip().title()
             if isinstance(value, list):
@@ -119,15 +99,17 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             else:
                 value_str = str(value)
             lines.append(f'- {label}: {value_str}')
-        return '\n'.join(lines) + '\n\n'
+        return 'Flat Details:\n'+'\n'.join(lines) + '\n\n'
 
     def _generate_base_instructions(self) -> str:
         """Generate base negotiation instructions."""
         additional_instructions = None
         buyer_preferences_block = ''
+        
+        # Buyer-specifc
         if self._role == RoleType.BUYER:
             if self._preferences:
-                preference_lines = ['YOUR FLAT PREFERENCES:']
+                preference_lines = []
                 for key, value in self._preferences.items():
                     label = str(key).replace('_', ' ').strip().title()
                     if isinstance(value, list):
@@ -135,22 +117,26 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                     else:
                         value_str = str(value)
                     preference_lines.append(f'- {label}: {value_str}')
-                buyer_preferences_block = '\n'.join(preference_lines) + '\n'
+                buyer_preferences_block = 'Your ideal preferences are:\n' + '\n'.join(preference_lines) + '\n'
             goal = (
-                "Get the best possible purchase terms for this flat while "
-                "keeping the negotiation moving toward agreement, and learn "
-                "the flat's true value through targeted information gathering."
+                "**Main objective**: Get the best purchase terms for this flat.\n\n"
+                "Informationn to collect:\n"
+                "1. Flat value (in SGD): Recent renovations, Commute Options, Nearby Amenities etc \n"
+                "2. Seller reservation value (in SGD): Minimum price they are willing to accept.\n"
+                "3. Seller constraints: timeline/urgency, flexibility → terms you can offer in exchange for better price/conditions.\n"
             )
             additional_instructions = ( # TODO: expand later with policy-specific aspects of the flat
                 f'BUYER-SPECIFIC GUIDANCE:\n'
-                f'Always **adhere** to your own preferences when evaluating the flat and making offers.\n'
-                f'Remember that the other party has more information about the flat condition than you do. '
-                f'Use questions and observations to reduce uncertainty and refine your valuation while negotiating price.'
+                f'- Always **adhere** to your own preferences when evaluating the flat and making offers.\n'
+                f'- Assume information asymmetry: the seller likely knows more about the flat’. condition and value than you do.'
+                f'- Use targeted questions and on-site observations to surface issues, reduce uncertainty, and update your valuation.'
             )
+        # Seller-specific
         elif self._role == RoleType.SELLER:
             goal = (
-                "Get the best possible sale terms for this flat while keeping "
-                "the negotiation moving toward agreement."
+                "**Main objective**: Get the best purchase terms for this flat.\n\n"
+                "Information to collect:\n"
+                "1. Buyer Reservation Value (in SGD): Maximum price they are willing to pay.\n"
             )
             additional_instructions = ( # TODO: expand later with policy-specific aspects of the flat
                 f'SELLER-SPECIFIC GUIDANCE:\n'
@@ -158,15 +144,15 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             )
 
         instructions = ( # Note that description is already provided in the self-perception component.
-            f'You are {self._agent_name}.\n\n'
-            f'ROLE: {self._role.name}. \n\n'
-            f'PRIMARY GOAL: {goal}\n\n'
-            f'{buyer_preferences_block}'
-            f'ETHICS: {self._ethics}\n\n'
-            'CORE NEGOTIATION PRINCIPLES:\n'
-            '1. Keep your objective clear and consistent each turn\n'
+            f'You are a {self._role.name} in the HDB resale market in Singapore.\n'
+            'Your goals:\n'
+            f'{goal}\n\n'
+            f'{buyer_preferences_block}\n'
+            f'{self._ethics}\n\n'
+            '## Instructions:\n'
+            '1. Treat each round as one week: use the time to gather missing information (if any) and make progress toward your preferred agreement (avoid stalling).\n'
             '2. Infer interests (timeline, certainty, inclusions) behind positions, not just price itself\n'
-            '3. Communicate offers naturally but unambiguously\n\n'
+            '3. Communicate offers naturally and clearly.\n\n'
         )
         instructions += self._format_flat_listing_details()
 
@@ -182,15 +168,8 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
 
     def get_pre_act_value(self) -> str:
         """Pre-act instruction body used by dependent components."""
-        # Build contextual instructions
-        instructions = self._base_instructions
-        instructions += (
-            f'\nCURRENT ROUND COUNTER: {self._rounds_completed}\n'
-            'Perform intentional actions over vague repetition.\n'
-        )
-
-        return instructions
-
+        return self._base_instructions
+    
     def pre_act(self, action_spec) -> str:
         """Provide negotiation instructions before action."""
         del action_spec
@@ -199,21 +178,11 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
     def post_act(self, action_attempt: str) -> str:
         """Update state after action."""
         # Always increment round counter on each action
-        self._rounds_completed += 1
 
-        # Track if we made an offer
-        if self._is_offer_action(action_attempt):
-            self._last_offer_made = action_attempt
-
-        if self._verbose:
-            print(f'[{self._agent_name}] Negotiation round {self._rounds_completed}')
         return ""
-
     def pre_observe(self, observation: str) -> str:
         """Process incoming observations."""
-        # Track if we received an offer
-        if self._is_offer_action(observation):
-            self._last_offer_received = observation
+
         return ""
 
     def post_observe(self) -> str:
@@ -231,42 +200,10 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
 
     def get_state(self) -> str:
         """Get the component state for saving/restoring."""
-        # Persist only objective-relevant state.
-        last_made = self._last_offer_made.replace('|', '\\|') if self._last_offer_made else ''
-        last_received = (
-            self._last_offer_received.replace('|', '\\|')
-            if self._last_offer_received
-            else ''
-        )
-        return (
-            f'rounds={self._rounds_completed}|'
-            f'last_made={last_made}|'
-            f'last_received={last_received}'
-        )
+
+        return ""
 
     def set_state(self, state: str) -> None:
         """Set the component state from a saved string."""
-        if '|' in state:
-            parts = state.split('|')
-            if len(parts) == 2 and '=' not in parts[0]:
-                _, rounds = parts
-                self._rounds_completed = int(rounds)
-                self._last_offer_made = None
-                self._last_offer_received = None
-                return
-
-            parsed: dict[str, str] = {}
-            for part in parts:
-                if '=' in part:
-                    key, value = part.split('=', 1)
-                    parsed[key.strip()] = value
-            self._rounds_completed = int(parsed.get('rounds', '0'))
-            last_made = parsed.get('last_made', '').replace('\\|', '|').strip()
-            last_received = parsed.get('last_received', '').replace('\\|', '|').strip()
-            self._last_offer_made = last_made or None
-            self._last_offer_received = last_received or None
-            return
-
-        self._rounds_completed = int(state.strip() or 0)
-        self._last_offer_made = None
-        self._last_offer_received = None
+        del state
+        pass

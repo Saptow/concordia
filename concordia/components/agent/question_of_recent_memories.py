@@ -298,14 +298,11 @@ class QuestionOfRecentMemoriesStructured(
         if key in self._components
     )
     if perception_keys:
-      perception_block = '\n'.join([
-          f'{self.get_named_component_pre_act_value(key)}'
-          for key in perception_keys
-      ])
-      prompt.statement(
-          'Perception grounding for action selection:\n'
-          f'{perception_block}'
-      )
+      for key in perception_keys:
+        prompt.statement(
+          f"{self.get_component_pre_act_label(key)}:\n"
+          f"{self.get_named_component_pre_act_value(key)}\n"
+        )
 
     prompt.statement(f'\nRecent observations of {agent_name}:\n{mems}')
 

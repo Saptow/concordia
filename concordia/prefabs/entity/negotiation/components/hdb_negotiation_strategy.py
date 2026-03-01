@@ -2,10 +2,13 @@
 
 import abc
 import dataclasses
+import json
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from pydantic import BaseModel, Field
 
+from concordia.components.agent import memory as memory_component
+from concordia.components.agent import observation as observation_component
 from concordia.hdb_simulation.models.schemas import RoleType
 from concordia.prefabs.entity.negotiation.components.uncertain_buyer import UncertainBuyer
 from concordia.prefabs.entity.negotiation.components.uncertain_seller import UncertainSeller
@@ -16,6 +19,7 @@ from concordia.prefabs.entity.negotiation.config import StrategyConfig
 AVG_NEGOTIATION_LENGTH = 12  # average number of rounds in HDB resale negotiation (in weeks)
 MIN_ROUNDS = 8
 MAX_ROUNDS = 15
+
 class UrgencyLevel(BaseModel):
     """Schema for urgency level output."""
     urgency: float = Field(..., ge=0.0, le=1.0, description="Urgency level from 0 (not urgent) to 1 (extremely urgent)")
@@ -206,6 +210,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     """
     Simple Negotiation Strategy for HDB resale market context to prevent long transactions.
     """
+    _OFFER_OPEN_ACTIONS = frozenset({'MAKE_OFFER', 'MAKE_COUNTEROFFER'})
+    _OFFER_CLOSE_ACTIONS = frozenset({'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'})
 
     def __init__(
         self,
@@ -214,6 +220,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         role: RoleType,
         description: str,
         uncertain_context: Union[UncertainBuyer, UncertainSeller],
+        memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
+        max_observations: int = 80,
         verbose: bool = False,
     ):
         """Initializes the negotiation strategy component.
@@ -228,6 +236,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         self._role = role
         self._uncertainty_context = uncertain_context
         self._description = description
+        self._memory_component_key = memory_component_key
+        self._max_observations = max(1, int(max_observations))
+        self._last_numeric_fields: Dict[str, str] = {}
+        self.strategy_summary = ""
+        self.fields: Dict[str, str] = {'hasActiveOffer': 'False'}
         self._verbose = verbose
         self._initialise_strategy(uncertain_context)
     
@@ -265,8 +278,213 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             if self._verbose:
                 print(f"[{self._agent_name}] Failed to parse urgency level, defaulting to 0.5. Error: {e}")
             self._urgency_level = 0.5  # default to medium urgency
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str | None:
+        start = text.find('{')
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == '\\':
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start: idx + 1]
+
+        return None
+
+    @staticmethod
+    def _coerce_positive_float(value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+            if math.isfinite(parsed) and parsed > 0.0:
+                return parsed
+            return None
+        if isinstance(value, str):
+            cleaned = (
+                value.strip()
+                .replace('$', '')
+                .replace('SGD', '')
+                .replace('sgd', '')
+                .replace(',', '')
+            )
+            if not cleaned:
+                return None
+            try:
+                parsed = float(cleaned)
+            except ValueError:
+                return None
+            if math.isfinite(parsed) and parsed > 0.0:
+                return parsed
+        return None
+
+    @staticmethod
+    def _extract_action_type(payload: Dict[str, Any]) -> str:
+        return str(payload.get('type', '')).strip().upper()
+
+    def _extract_action_price(self, payload: Dict[str, Any]) -> float | None:
+        for key in ('counteroffer_price', 'offer_price', 'price_settled'):
+            parsed = self._coerce_positive_float(payload.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _parse_observed_action(self, memory_text: str) -> tuple[str, Dict[str, Any]] | None:
+        text = memory_text.strip()
+        obs_tag = observation_component.OBSERVATION_TAG
+        if text.startswith(f'{obs_tag} '):
+            text = text[len(obs_tag) + 1:].strip()
+
+        actor, sep, payload = text.partition(':')
+        if not sep:
+            return None
+        payload_json = self._extract_first_json_object(payload)
+        if not payload_json:
+            return None
+        try:
+            action = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(action, dict):
+            return None
+        return actor.strip(), action
+
+    @staticmethod
+    def _format_money(value: float | None) -> str:
+        if value is None:
+            return 'NA'
+        if abs(value - round(value)) <= 1e-9:
+            return f'{int(round(value))}'
+        return f'{value:.2f}'
+
+    def _format_reservation_comparison(
+        self,
+        own_reservation: float | None,
+        opponent_reservation: float | None,
+    ) -> str:
+        if own_reservation is None or opponent_reservation is None:
+            return 'Unknown'
+        diff = own_reservation - opponent_reservation
+        if abs(diff) <= 1e-9:
+            return 'Reservation Prices are equal.'
+        if diff > 0:
+            return f'OwnAboveOpponent Reservation Price with Difference of {self._format_money(diff)}'
+        return f'OwnBelowOpponent Reservation Price with Difference of {self._format_money(diff)}'
+
+    def _resolve_zopa_feasible(
+        self,
+        own_reservation: float | None,
+        opponent_reservation: float | None,
+    ) -> bool | None:
+        if own_reservation is None or opponent_reservation is None:
+            return None
+        if self._role == RoleType.BUYER:
+            return own_reservation >= opponent_reservation
+        return opponent_reservation >= own_reservation
+
+    def _infer_offer_state(
+        self,
+        recent_memories: List[str],
+    ) -> tuple[bool, float | None, str | None]:
+        """Infer active offer from the latest relevant structured action."""
+        for mem in reversed(recent_memories):
+            parsed = self._parse_observed_action(mem)
+            if not parsed:
+                continue
+            _, action = parsed
+            action_type = self._extract_action_type(action)
+            if not action_type:
+                continue
+            if action_type in self._OFFER_OPEN_ACTIONS:
+                return True, self._extract_action_price(action), action_type
+            if action_type in self._OFFER_CLOSE_ACTIONS:
+                return False, None, None
+        return False, None, None
+
+    def _compute_deterministic_numeric_fields(self) -> Dict[str, str]:
+        recent_memories: List[str] = []
+        try:
+            memory = self.get_entity().get_component(
+                self._memory_component_key, type_=memory_component.Memory
+            )
+            recent_memories = memory.retrieve_recent(limit=self._max_observations)
+        except Exception:
+            recent_memories = []
+
+        has_active_offer, active_offer_price, active_offer_type = (
+            self._infer_offer_state(recent_memories)
+        )
+
+        own_reservation = self._coerce_positive_float(self._state.current_position)
+        opponent_reservation = self._coerce_positive_float(self._state.opponent_position)
+        reservation_comparison = self._format_reservation_comparison(
+            own_reservation=own_reservation,
+            opponent_reservation=opponent_reservation,
+        )
+        zopa_feasible = self._resolve_zopa_feasible(
+            own_reservation=own_reservation,
+            opponent_reservation=opponent_reservation,
+        )
+
+        fields: Dict[str, str] = {
+            'OwnVsOpponentReservation': reservation_comparison,
+            'ZOPAFeasible': str(zopa_feasible) if zopa_feasible is not None else 'Unknown',
+            'HasActiveOffer': str(bool(has_active_offer)),
+            'ActiveOfferPrice': (
+                self._format_money(active_offer_price) if has_active_offer else 'NA'
+            ),
+        }
+
+        if has_active_offer:
+            fields['ActiveOfferType'] = active_offer_type or 'NA'
+            if own_reservation is not None and active_offer_price is not None:
+                offer_minus_reservation = active_offer_price - own_reservation
+                fields['OfferMinusOwnReservation'] = self._format_money(
+                    offer_minus_reservation
+                )
+                if self._role == RoleType.BUYER:
+                    fields['OfferWithinOwnReservation'] = str(
+                        active_offer_price <= own_reservation
+                    )
+                else:
+                    fields['OfferMeetsOwnReservation'] = str(
+                        active_offer_price >= own_reservation
+                    )
+
+        self._last_numeric_fields = dict(fields)
+        self.fields = {'hasActiveOffer': fields.get('HasActiveOffer', 'False')}
+        return fields
+
+    @staticmethod
+    def _numeric_fact_summary(fields: Dict[str, str]) -> str:
+        return (
+            f"HasActiveOffer: {fields.get('HasActiveOffer', 'False')}\n"
+            f"ActiveOfferPrice: {fields.get('ActiveOfferPrice', 'NA')}\n"
+            f"IsDealPossible: {fields.get('ZOPAFeasible', 'Unknown')}\n"
+        )
+
     def pre_act(self, action_spec) -> str:
         """Provide simple strategy guidance before each action."""
+        del action_spec
         # Update state first
         if self._role==RoleType.BUYER:
             self._state.current_position= self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
@@ -274,66 +492,63 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         elif self._role==RoleType.SELLER:
             self._state.current_position = self._uncertainty_context._own_reservation
             self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
+        
+        # Compute negotiation state
+        numeric_fields = self._compute_deterministic_numeric_fields()
+        numeric_summary = self._numeric_fact_summary(numeric_fields)
+        negotiation_numbers = (
+            f"Current Reservation Price (in SGD):{self._state.current_position}\n"
+            f"Opponent Reservation Price (in SGD):{self._display_position(self._state.opponent_position)}\n"
+            f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
+            f"Current Urgency Level (0-1):{self._urgency_level}\n"
+            f"{numeric_summary}\n"
+        )
 
+        # Get negotiation strategy guidance based on urgency and role
         horizon = self._max_rounds_from_urgency(self._urgency_level)
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, horizon - rounds_elapsed)
         urgency = max(0.0, min(1.0, float(self._urgency_level)))
-
+        
         if self._role == RoleType.BUYER:
             if self.should_walk_away():
-                return (
-                    "STRATEGY GUIDANCE (BUYER): PATIENCE LIMIT REACHED. "
-                    "Use WALK_AWAY now unless you are immediately ACCEPT_OFFER. "
-                )
+                urgency_rule = "Patience horizon **exceeded**. Choose WALK_AWAY."
 
             if rounds_left <= 1:
                 urgency_rule = (
-                    "FINAL DECISION TURN: If an offer is active, decide now with "
-                    "ACCEPT_OFFER, REJECT_OFFER, or WALK_AWAY. "
-                    "If no offer is active, make a concrete MAKE_OFFER now."
+                    "HIGH URGENCY: If an offer is active, decide now with ACCEPT_OFFER or REJECT_OFFER. Do not MAKE_COUNTEROFFER or ask more questions.\n"
                 )
             elif rounds_left <= 2:
                 urgency_rule = (
-                    "HIGH DEADLINE PRESSURE: Stop exploratory loops and move price "
-                    "decisively this turn. Prefer offer/accept/reject/counter over "
-                    "questions or generic answers."
+                    "ELEVATED URGENCY: Prioritize price-closing actions.\n"
+                    "If an offer is active, lean toward ACCEPT_OFFER if it's within reservation, otherwise REJECT_OFFER. "
+                    "Avoid open-ended inquiries.\n"
+                    "If no offer is active, MAKE_OFFER with a price that shows clear progress toward closure.\n"
+                )
+            else:
+                urgency_rule = ""
+        else:  # RoleType.SELLER
+            if rounds_left <= 1:
+                urgency_rule = (
+                    "FINAL DECISION TURN: If an offer is active, decide now with "
+                    "ACCEPT_OFFER, REJECT_OFFER."
+                    "If no offer is active, issue MAKE_OFFER now."
+                )
+            elif rounds_left <= 2:
+                urgency_rule = (
+                    "HIGH DEADLINE PRESSURE: Prioritize price-closing actions and avoid "
+                    "open-ended inquiries."
                 )
             else:
                 urgency_rule = (
-                    "NORMAL PRESSURE: Keep negotiating, but ensure each turn advances "
-                    "toward closure with concrete price progress."
+                    "NORMAL PRESSURE: Keep progressing toward agreement with concrete "
+                    "price movement each turn."
                 )
 
-            return (
-                "STRATEGY GUIDANCE (BUYER): "
-                f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
-                f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
-                f"{urgency_rule}"
-            )
-
-        if rounds_left <= 1:
-            urgency_rule = (
-                "FINAL DECISION TURN: If an offer is active, decide now with "
-                "ACCEPT_OFFER, REJECT_OFFER."
-                "If no offer is active, issue MAKE_OFFER now."
-            )
-        elif rounds_left <= 2:
-            urgency_rule = (
-                "HIGH DEADLINE PRESSURE: Prioritize price-closing actions and avoid "
-                "open-ended inquiries."
-            )
-        else:
-            urgency_rule = (
-                "NORMAL PRESSURE: Keep progressing toward agreement with concrete "
-                "price movement each turn."
-            )
-
+        self.strategy_summary = urgency_rule
         return (
-            "STRATEGY GUIDANCE (SELLER): "
-            f"Urgency={urgency:.2f}, RoundsElapsed={rounds_elapsed}, "
-            f"PatienceHorizon={horizon}, RoundsLeft={rounds_left}. "
-            f"{urgency_rule}"
+            f"{negotiation_numbers}"
+            f"Strategy Summary:{self.strategy_summary}\n"
         )
 
     def post_act(self, action_attempt: str) -> str:
@@ -387,7 +602,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         """Periodic updates if needed."""
         pass
     def get_pre_act_label(self) -> str:
-        return 'NegotiationStrategy'
+        return 'Negotiation Strategy State and Numeric Facts:\n'
 
     @staticmethod
     def _display_position(value: float | None) -> str:
@@ -399,27 +614,68 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         return str(parsed)
     
     def get_pre_act_value(self) -> str:
+        '''Get pre-act value with strategy state and numeric facts for prompting.'''
+        numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         return (
-            f"CurrentPosition:{self._state.current_position}"
-            f"|OpponentPosition:{self._display_position(self._state.opponent_position)}"
-            f"|RoundsElapsed:{self._state.rounds_elapsed}"
-            f"|UrgencyLevel:{self._urgency_level}"
+            f"Current Reservation Price (in SGD):{self._state.current_position}\n"
+            f"Opponent Reservation Price (in SGD):{self._display_position(self._state.opponent_position)}\n"
+            f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
+            f"Current Urgency Level (0-1):{self._urgency_level}\n"
+            f"{numeric_facts}\n"
+            f"Strategy Summary:{self.strategy_summary}\n"
         )
 
     def get_state(self)-> str:
         '''Get component state for saving /restoring.'''
-        return f'CurrentPosition:{self._state.current_position}|OpponentPosition:{self._state.opponent_position}|RoundsElapsed:{self._state.rounds_elapsed}|UrgencyLevel:{self._urgency_level}'
+        numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
+        strategy_summary = getattr(self, 'strategy_summary', '')
+        return (
+            f"Current Reservation Price (in SGD):{self._state.current_position}\n"
+            f"Opponent Reservation Price (in SGD):{self._display_position(self._state.opponent_position)}\n"
+            f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
+            f"Current Urgency Level (0-1):{self._urgency_level}\n"
+            f"{numeric_facts}\n"
+            f"Strategy Summary:{strategy_summary}\n"
+        )
 
     def set_state(self, state: str) -> None:
         '''Set component state from saved string.'''
-        parts = state.split('|')
+        parts = state.split('\n')
+        restored_numeric_fields: Dict[str, str] = {}
         for part in parts:
-            key, value = part.split(':')
-            if key == 'CurrentPosition':
+            if ':' not in part:
+                continue
+            key, value = part.split(':', 1)
+            key = key.strip()
+            value = value.strip()
+            if key == 'Current Reservation Price (in SGD)':
                 self._state.current_position = float(value)
-            elif key == 'OpponentPosition':
+            elif key == 'Current Reservation Price':
+                self._state.current_position = float(value)
+            elif key == 'Opponent Reservation Price (in SGD)':
+                if value != 'Unknown':
+                    self._state.opponent_position = float(value)
+            elif key == 'Opponent Reservation Price':
                 self._state.opponent_position = float(value)
-            elif key == 'RoundsElapsed':
+            elif key == 'Number of weeks since negotiation started':
                 self._state.rounds_elapsed = int(value)
+            elif key == 'Current Urgency Level (0-1)':
+                self._urgency_level = float(value)
             elif key == 'UrgencyLevel':
                 self._urgency_level = float(value)
+            elif key == 'HasActiveOffer':
+                restored_numeric_fields['HasActiveOffer'] = value
+            elif key == 'ActiveOfferPrice':
+                restored_numeric_fields['ActiveOfferPrice'] = value
+            elif key == 'IsDealPossible':
+                restored_numeric_fields['ZOPAFeasible'] = value
+            elif key == 'Strategy Summary':
+                self.strategy_summary = value
+
+        if restored_numeric_fields:
+            self._last_numeric_fields.update(restored_numeric_fields)
+            self.fields = {
+                'hasActiveOffer': self._last_numeric_fields.get(
+                    'HasActiveOffer', 'False'
+                )
+            }

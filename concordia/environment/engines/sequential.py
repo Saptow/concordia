@@ -395,8 +395,6 @@ class Sequential(engine_lib.Engine):
         # Only observe if the observation is not an empty or whitespace string
         if observation and observation.strip():
           tagged_observation = observation.strip()
-          if not tagged_observation.startswith('[OBSERVED]'):
-            tagged_observation = f'[OBSERVED] {tagged_observation}'
           entity.observe(tagged_observation)
 
       entities_to_observe = self._entities_to_observe(game_master, entities)

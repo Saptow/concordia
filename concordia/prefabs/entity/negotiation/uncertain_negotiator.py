@@ -9,7 +9,6 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
 from concordia.prefabs.entity.negotiation.components import (
-    deterministic_numeric_facts,
     uncertain_buyer,
     uncertain_seller,
 )
@@ -142,16 +141,10 @@ class Entity(prefab_lib.Prefab):
             preferences=buyer_preferences if role == RoleType.BUYER else None,
             reservation_value=reservation,
             ethical_constraints=ethics,
+            pre_act_label='# NEGOTIATION INSTRUCTIONS\n',
             verbose=True,
         )
 
-        # Create negotiation memory TODO: (we do not need this for now.)
-        # neg_memory = negotiation_memory.NegotiationMemory(
-        #     agent_name=agent_name,
-        #     memory_bank=memory_bank,
-        #     verbose=True,
-        #     emit_pre_act_context=False,
-        # )
         # Setup uncertainty context if specified (should only be one of buyer/seller)
         # TODO: revise negotiation strategy to include strategy evolution based on past failed negotiations, if any
         uncertain_key, uncertain_context = None, None
@@ -203,23 +196,18 @@ class Entity(prefab_lib.Prefab):
                 role=role,
                 uncertain_context=uncertain_context,
                 description=description,
-                verbose=True,
             )
-        numeric_facts_key = 'numeric_facts'
-        numeric_facts = deterministic_numeric_facts.DeterministicNumericFacts(
-            role=role,
-            uncertain_component_key=uncertain_key,
-            strategy_component_key=strategy_key,
-            emit_pre_act_context=False,
-        )
-
+        # Add buyer preferences 
+        preferences_block = ''
+        if role == RoleType.BUYER:
+            preferences_block = f'Buyer preferences: {buyer_preferences}\n'
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
-            pre_act_label=f'Self-perception as {role}',
+            pre_act_label=f'Who is {agent_name}?\n',
             question=(
+            f'Given the agent description, what kind of {role} is {agent_name}?\n'
             f'Agent description: {description}\n'
-            f'What kind of {role} is {agent_name}?\n'
-            f'Only consider the agent description to infer their personality and values. Provide your answer in 1-5 sentences.'
+            f'{preferences_block}'
             ),
             answer_prefix=f'{agent_name} is a {role} who',
             add_to_memory=False,
@@ -229,19 +217,18 @@ class Entity(prefab_lib.Prefab):
         # Create question components for context and reasoning
         question_about_situation = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
-            pre_act_label=f'Current negotiation situation',
+            pre_act_label=f'What situation is {agent_name} in?\n',
             question=(
                 f'What is the current negotiation situation that {agent_name} is in? '
-                'Respond in 1-5 sentences.'
             ),
-            answer_prefix=f'{agent_name} is currently ',
+            answer_prefix=f'{agent_name} is currently',
             add_to_memory=False,
             memory_tag='[situation perception]',
             components = [uncertain_key]
         )
 
         has_active_offer = (
-            str(numeric_facts.fields.get('hasActiveOffer', 'False')).lower()
+            str(strategy.fields.get('hasActiveOffer', 'False')).lower()
             == 'true'
         )
         if role == RoleType.BUYER:
@@ -262,26 +249,24 @@ class Entity(prefab_lib.Prefab):
 
         if role == RoleType.SELLER:
             question = (
-                f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}? '
+                f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
                 f'Action type descriptions:\n{action_type_descriptions}\n'
+                f'{HDB_CONTEXT_ANCHOR}'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:
             question = (
-                f'{HDB_CONTEXT_ANCHOR}'
-                f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}? '
+                f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
                 f'Action type descriptions:\n{action_type_descriptions}\n'
+                f'{HDB_CONTEXT_ANCHOR}'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
                 f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
             )
         action_components = [
             instructions.name,
-            'situation_perception',
-            'self_perception',
-            strategy_key,
-            numeric_facts_key
+            strategy_key
         ]
+        
         question_about_action = agent_components.question_of_recent_memories.QuestionOfRecentMemoriesStructured(
             model=model,
             pre_act_label=f'Next action choice',
@@ -302,7 +287,6 @@ class Entity(prefab_lib.Prefab):
             instructions.name: instructions,
             uncertain_key: uncertain_context,
             strategy_key: strategy,
-            numeric_facts_key: numeric_facts,
             'situation_perception': question_about_situation,
             'self_perception': question_about_self,
             'action_decisions': question_about_action,
@@ -321,7 +305,6 @@ class Entity(prefab_lib.Prefab):
             instructions.name,
             uncertain_key,
             strategy_key,
-            numeric_facts_key,
             'situation_perception',
             'self_perception',
             'action_decisions',

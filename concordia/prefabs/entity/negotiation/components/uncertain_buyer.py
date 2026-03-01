@@ -316,10 +316,10 @@ class UncertainBuyer(entity_component.ContextComponent):
 
     @staticmethod
     def _extract_observation_actor(observation: str) -> str | None:
-        """Extract actor name from observation text like '[OBSERVED] Alice: ...'."""
+        """Extract actor name from observation text like '[observation] Alice: ...'."""
         text = observation.strip()
-        if text.startswith('[OBSERVED]'):
-            text = text[len('[OBSERVED]'):].strip()
+        if text.startswith('[observation]'):
+            text = text[len('[observation]'):].strip()
         actor, sep, _ = text.partition(':')
         if not sep:
             return None
