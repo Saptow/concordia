@@ -626,7 +626,7 @@ class FixedNextActionSpec(entity_component.ContextComponent):
     )
     policy = offer_tracker.get_action_policy_for_player(active_player)
     allowed_actions = tuple(str(x) for x in policy.get('allowed_action_types', []))
-    shared_guardrails = uncertain_negotiator.HDB_ACTION_DOMAIN_GUARDRAILS.strip()
+    shared_guardrails = uncertain_negotiator.HDB_ACTION_CHOICE_GUARDRAILS.strip()
     if shared_guardrails:
       prompt = (
           f"{prompt}\n\n"
