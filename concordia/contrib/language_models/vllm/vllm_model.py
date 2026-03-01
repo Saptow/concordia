@@ -54,8 +54,7 @@ from concordia.utils import measurements as measurements_lib
 from vllm import LLM
 from vllm import SamplingParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
-from vllm.sampling_params import GuidedDecodingParams
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import StructuredOutputsParams, GuidedDecodingParams
 from vllm.lora.request import LoRARequest
 
 _DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
@@ -221,9 +220,8 @@ class VLLMLanguageModel(language_model.LanguageModel):
     if not responses:
       raise ValueError('No responses provided to choose from.')
 
-    guided_decoding = GuidedDecodingParams(choice=list(responses))
     sampling_params = SamplingParams(
-        guided_decoding=guided_decoding,
+        structured_outputs=StructuredOutputsParams(choices=list(responses)),
         temperature=0.0,
         max_tokens=64,
         seed=seed,
