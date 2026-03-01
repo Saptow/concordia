@@ -207,6 +207,7 @@ class VLLMLanguageModel(language_model.LanguageModel):
       self,
       prompt: str,
       responses: Sequence[str],
+      max_tokens: int = 2000,
       *,
       seed: int | None = None,
       lora_request: LoRARequest | None = None,
@@ -223,7 +224,7 @@ class VLLMLanguageModel(language_model.LanguageModel):
     sampling_params = SamplingParams(
         structured_outputs=StructuredOutputsParams(choices=list(responses)),
         temperature=0.0,
-        max_tokens=64,
+        max_tokens=max_tokens,
         seed=seed,
     )
 
