@@ -317,7 +317,6 @@ class QuestionOfRecentMemoriesStructured(
       idx = prompt.structured_multiple_choice_question(
           question=question,
           choices=self._choice_responses,
-          randomize_choices=self._randomize_choice_responses,
       )
       result = self._choice_responses[idx]
     else:

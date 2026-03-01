@@ -291,7 +291,6 @@ class Entity(prefab_lib.Prefab):
             memory_tag='[action choice]',
             components=action_components,
             choice_responses=role_action_types,
-            randomize_choice_responses=False,
         )
         
         # TODO: look into more refined strategy integration on later stage
