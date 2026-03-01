@@ -42,6 +42,13 @@ HDB_CONTEXT_ANCHOR = (
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
 )
+
+
+def _escape_format_braces(text: str) -> str:
+    """Escape braces so downstream `.format(agent_name=...)` stays safe."""
+    return str(text).replace('{', '{{').replace('}', '}}')
+
+
 @dataclasses.dataclass
 class Entity(prefab_lib.Prefab):
     """
@@ -197,16 +204,26 @@ class Entity(prefab_lib.Prefab):
                 uncertain_context=uncertain_context,
                 description=description,
             )
-        # Add buyer preferences 
+        # Build a formatting-safe self-description prompt block.
+        safe_description = _escape_format_braces(description)
         preferences_block = ''
-        if role == RoleType.BUYER:
-            preferences_block = f'Buyer preferences: {buyer_preferences}\n'
+        if role == RoleType.BUYER and buyer_preferences:
+            preference_lines = []
+            for key, value in buyer_preferences.items():
+                label = str(key).replace('_', ' ').strip().title()
+                if isinstance(value, list):
+                    value_str = ', '.join(str(v) for v in value) if value else 'None'
+                else:
+                    value_str = str(value)
+                preference_lines.append(f'- {label}: {value_str}')
+            preferences_block = 'Buyer preferences:\n' + '\n'.join(preference_lines) + '\n'
+            preferences_block = _escape_format_braces(preferences_block)
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
             pre_act_label=f'Who is {agent_name}?\n',
             question=(
             f'Given the agent description, what kind of {role} is {agent_name}?\n'
-            f'Agent description: {description}\n'
+            f'Agent description: {safe_description}\n'
             f'{preferences_block}'
             ),
             answer_prefix=f'{agent_name} is a {role} who',
