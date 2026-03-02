@@ -148,7 +148,7 @@ class Entity(prefab_lib.Prefab):
             preferences=buyer_preferences if role == RoleType.BUYER else None,
             reservation_value=reservation,
             ethical_constraints=ethics,
-            pre_act_label='# NEGOTIATION INSTRUCTIONS\n',
+            pre_act_label='# NEGOTIATION INSTRUCTIONS',
             verbose=True,
         )
 
@@ -220,7 +220,7 @@ class Entity(prefab_lib.Prefab):
             preferences_block = _escape_format_braces(preferences_block)
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
-            pre_act_label=f'Who is {agent_name}?\n',
+            pre_act_label=f'Who is {agent_name}?',
             question=(
             f'Given the agent description, what kind of {role} is {agent_name}?\n'
             f'Agent description: {safe_description}\n'
@@ -234,7 +234,7 @@ class Entity(prefab_lib.Prefab):
         # Create question components for context and reasoning
         question_about_situation = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
-            pre_act_label=f'What situation is {agent_name} in?\n',
+            pre_act_label=f'What situation is {agent_name} in?',
             question=(
                 f'What is the current negotiation situation that {agent_name} is in? '
             ),

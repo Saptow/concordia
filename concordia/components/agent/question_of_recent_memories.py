@@ -304,8 +304,8 @@ class QuestionOfRecentMemoriesStructured(
           f"{self.get_named_component_pre_act_value(key)}\n"
         )
 
-    prompt.statement(f'\nRecent observations of {agent_name}:\n{mems}')
-
+    prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
+    prompt.statement('') # Ensure there's a newline before the question, which can help with formatting in some cases.
     if self._clock_now is not None:
       prompt.statement(f'Current time: {self._clock_now()}.\n')
     

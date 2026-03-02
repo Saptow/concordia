@@ -120,7 +120,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                 buyer_preferences_block = 'Your ideal preferences are:\n' + '\n'.join(preference_lines) + '\n'
             goal = (
                 "**Main objective**: Get the best purchase terms for this flat.\n\n"
-                "Informationn to collect:\n"
+                "Information to collect:\n"
                 "1. Flat value (in SGD): Recent renovations, Commute Options, Nearby Amenities etc \n"
                 "2. Seller reservation value (in SGD): Minimum price they are willing to accept.\n"
                 "3. Seller constraints: timeline/urgency, flexibility → terms you can offer in exchange for better price/conditions.\n"
@@ -157,7 +157,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         instructions += self._format_flat_listing_details()
 
         if additional_instructions:
-            instructions += additional_instructions + '\n\n'
+            instructions += additional_instructions + '\n'
         # TODO: Add HDB-specific policy constraints and guidelines here
         return instructions
 

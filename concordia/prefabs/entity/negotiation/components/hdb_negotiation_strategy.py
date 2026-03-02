@@ -477,6 +477,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     @staticmethod
     def _numeric_fact_summary(fields: Dict[str, str]) -> str:
         return (
+            f"OwnVsOpponentReservation: {fields.get('OwnVsOpponentReservation', 'Unknown')}\n"
             f"HasActiveOffer: {fields.get('HasActiveOffer', 'False')}\n"
             f"ActiveOfferPrice: {fields.get('ActiveOfferPrice', 'NA')}\n"
             f"IsDealPossible: {fields.get('ZOPAFeasible', 'Unknown')}\n"
@@ -497,8 +498,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         numeric_fields = self._compute_deterministic_numeric_fields()
         numeric_summary = self._numeric_fact_summary(numeric_fields)
         negotiation_numbers = (
-            f"Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._state.current_position}\n"
-            f"Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._display_position(self._state.opponent_position)}\n"
+            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
+            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_summary}\n"
@@ -511,6 +512,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         urgency = max(0.0, min(1.0, float(self._urgency_level)))
         
         if self._role == RoleType.BUYER:
+            base_strategy = (
+                "Base Strategy:\n"
+                "- If you have an active offer, evaluate it against your reservation price and the opponent's position.\n"
+                "- If the offer is favorable (i.e., OwnVsOpponentReservation is positive (> 0)), consider ACCEPT_OFFER.\n"
+                "- If the offer is unfavorable (i.e., OwnVsOpponentReservation is negative (< 0)), consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+            )
             if self.should_walk_away():
                 urgency_rule = "Patience horizon **exceeded**. Choose WALK_AWAY."
 
@@ -521,13 +528,17 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             elif rounds_left <= 2:
                 urgency_rule = (
                     "ELEVATED URGENCY: Prioritize price-closing actions.\n"
-                    "If an offer is active, lean toward ACCEPT_OFFER if it's within reservation, otherwise REJECT_OFFER. "
-                    "Avoid open-ended inquiries.\n"
-                    "If no offer is active, MAKE_OFFER with a price that shows clear progress toward closure.\n"
+                    "If an offer is active and IsDealPossible is True, **HIGHLY** consider ACCEPT_OFFER so long as OwnVsOpponentReservation is positive (> 0)."
                 )
             else:
                 urgency_rule = ""
         else:  # RoleType.SELLER
+            base_strategy = (
+                "Base Strategy:\n"
+                "- If you have an active offer, evaluate it against your reservation price and the opponent's position.\n"
+                "- If the offer is favorable (i.e., OwnVsOpponentReservation is positive (> 0)), consider ACCEPT_OFFER.\n"
+                "- If the offer is unfavorable (i.e., OwnVsOpponentReservation is negative (< 0)), consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+            )
             if rounds_left <= 1:
                 urgency_rule = (
                     "FINAL DECISION TURN: If an offer is active, decide now with "
@@ -540,12 +551,10 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                     "open-ended inquiries."
                 )
             else:
-                urgency_rule = (
-                    "NORMAL PRESSURE: Keep progressing toward agreement with concrete "
-                    "price movement each turn."
-                )
+                urgency_rule = ""
 
-        self.strategy_summary = urgency_rule
+
+        self.strategy_summary = base_strategy + urgency_rule
         return (
             f"{negotiation_numbers}"
             f"Strategy Summary:{self.strategy_summary}\n"
@@ -602,7 +611,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         """Periodic updates if needed."""
         pass
     def get_pre_act_label(self) -> str:
-        return 'Negotiation Strategy State and Numeric Facts:\n'
+        return 'Negotiation Strategy State and Numeric Facts'
 
     @staticmethod
     def _display_position(value: float | None) -> str:
@@ -617,12 +626,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         '''Get pre-act value with strategy state and numeric facts for prompting.'''
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         return (
-            f"Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._state.current_position}\n"
-            f"Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._display_position(self._state.opponent_position)}\n"
+            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
+            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
-            f"Strategy Summary:{self.strategy_summary}\n"
+            f"Strategy Summary:\n{self.strategy_summary}\n"
         )
 
     def get_state(self)-> str:
@@ -630,12 +639,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         strategy_summary = getattr(self, 'strategy_summary', '')
         return (
-            f"Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._state.current_position}\n"
-            f"Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS):{self._display_position(self._state.opponent_position)}\n"
+            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
+            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
-            f"Strategy Summary:{strategy_summary}\n"
+            f"Strategy Summary:\n{strategy_summary}\n"
         )
 
     def set_state(self, state: str) -> None:
@@ -648,11 +657,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             key, value = part.split(':', 1)
             key = key.strip()
             value = value.strip()
-            if key == 'Current Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS)':
+            if key == '(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD)':
                 self._state.current_position = float(value)
             elif key == 'Current Reservation Price':
                 self._state.current_position = float(value)
-            elif key == 'Opponent Reservation Price (in SGD) (DO NOT REVEAL/DISCUSS)':
+            elif key == '(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD)':
                 if value != 'Unknown':
                     self._state.opponent_position = float(value)
             elif key == 'Opponent Reservation Price':
