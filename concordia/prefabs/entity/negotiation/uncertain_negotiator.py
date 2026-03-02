@@ -22,7 +22,7 @@ from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
 DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
-    f'HDB RESALE ETHICAL CONSTRAINTS:'
+    f'HDB RESALE ETHICAL CONSTRAINTS: \n'
     f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).'
     f'- If you are unsure about a fact, say you are unsure instead of guessing or making up an answer.'
     f'- You may withhold private limits (true budget/reservation/urgency), but if you answer a factual question, answer truthfully or say you are unsure.'

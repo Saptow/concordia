@@ -273,7 +273,21 @@ class QuestionOfRecentMemoriesStructured(
                      terminators, clock_now, num_memories_to_retrieve)
     self._output_schema = output_schema
     self._choice_responses = tuple(str(x) for x in choice_responses if str(x))
+    self._runtime_choice_responses: tuple[str, ...] | None = None
     self._randomize_choice_responses = bool(randomize_choice_responses)
+
+  @override
+  def pre_act(
+      self,
+      action_spec: entity_lib.ActionSpec,
+  ) -> str:
+    """Align choice responses with the current action spec when available."""
+    runtime_choices: tuple[str, ...] | None = None
+    if action_spec.output_type in entity_lib.CHOICE_ACTION_TYPES:
+      runtime_choices = tuple(str(x) for x in action_spec.options if str(x))
+    with self._lock:
+      self._runtime_choice_responses = runtime_choices
+    return super().pre_act(action_spec)
 
   @override
   def _make_pre_act_value(self) -> str:
@@ -310,12 +324,17 @@ class QuestionOfRecentMemoriesStructured(
       prompt.statement(f'Current time: {self._clock_now()}.\n')
     
     question = self._question.format(agent_name=agent_name)
-    if self._choice_responses:
+    active_choice_responses = (
+        self._runtime_choice_responses
+        if self._runtime_choice_responses
+        else self._choice_responses
+    )
+    if active_choice_responses:
       idx = prompt.structured_multiple_choice_question(
           question=question,
-          choices=self._choice_responses,
+          choices=active_choice_responses,
       )
-      result = self._choice_responses[idx]
+      result = active_choice_responses[idx]
     else:
       if self._output_schema is None:
         raise ValueError(
@@ -345,6 +364,12 @@ class QuestionOfRecentMemoriesStructured(
     self._logging_channel(log)
 
     return result_str
+
+  @override
+  def update(self) -> None:
+    with self._lock:
+      self._runtime_choice_responses = None
+    super().update()
       
 class QuestionOfRecentMemoriesWithoutPreAct(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging

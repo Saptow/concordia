@@ -144,7 +144,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             )
 
         instructions = ( # Note that description is already provided in the self-perception component.
-            f'You are a {self._role.name} in the HDB resale market in Singapore.\n'
+            f'\nYou are a {self._role.name} in the HDB resale market in Singapore.\n'
             'Your goals:\n'
             f'{goal}\n\n'
             f'{buyer_preferences_block}\n'
