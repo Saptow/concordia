@@ -36,7 +36,7 @@ HDB_ACTION_CHOICE_GUARDRAILS = (
     "- If guidance indicates information gathering and you have budget for it, but there is an ACTIVE OFFER, DO NOT MAKE_COUNTEROFFER; choose REJECT_OFFER and then proceed with information gathering.\n"
 )
 HDB_CONTEXT_ANCHOR = (
-    "\nNOTE:\n"
+    "NOTE:\n"
     "- You are in an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore and discard ANY off-domain prior context.\n"
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
@@ -268,7 +268,7 @@ class Entity(prefab_lib.Prefab):
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
                 f'Action type descriptions:\n{action_type_descriptions}\n'
-                f'{HDB_CONTEXT_ANCHOR}'
+                f'{HDB_CONTEXT_ANCHOR}\n'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:

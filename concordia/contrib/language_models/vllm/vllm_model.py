@@ -223,7 +223,7 @@ class VLLMLanguageModel(language_model.LanguageModel):
 
     sampling_params = SamplingParams(
         structured_outputs=StructuredOutputsParams(choices=list(responses)),
-        temperature=0.0,
+        temperature=language_model.DEFAULT_TEMPERATURE,
         max_tokens=max_tokens,
         seed=seed,
     )
