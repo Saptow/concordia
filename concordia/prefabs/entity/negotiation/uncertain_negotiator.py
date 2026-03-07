@@ -166,7 +166,6 @@ class Entity(prefab_lib.Prefab):
                 confidence =uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
                 risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5), # TODO: determine based on personality metadata
                 information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
-                description=description,
                 preferences=uncertain_configs.get('preferences', {}),
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
                 own_reservation_std=uncertain_configs.get('own_reservation_std', 1000.0),
@@ -193,7 +192,6 @@ class Entity(prefab_lib.Prefab):
                 confidence=uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
                 risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5),
                 information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
-                description=description,
                 own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
                 mu=uncertain_configs.get('cp_reservation_', 0.0),
                 lambda_=uncertain_configs.get('lambda_', 1.0),

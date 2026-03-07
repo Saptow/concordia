@@ -5,6 +5,7 @@ import dataclasses
 import json
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
+from pydantic import BaseModel, Field
 
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
@@ -18,6 +19,10 @@ from concordia.prefabs.entity.negotiation.config import StrategyConfig
 AVG_NEGOTIATION_LENGTH = 12  # average number of rounds in HDB resale negotiation (in weeks)
 MIN_ROUNDS = 8
 MAX_ROUNDS = 15
+
+class UrgencyLevel(BaseModel):
+    """Schema for urgency level output."""
+    urgency: float = Field(..., ge=0.0, le=1.0, description="Urgency level from 0 (not urgent) to 1 (extremely urgent)")
 
 # TODO: think about integrating the evolution strategies mentioned 
 @dataclasses.dataclass
@@ -230,10 +235,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         self._agent_name = agent_name
         self._role = role
         self._uncertainty_context = uncertain_context
+        self._description = description
         self._memory_component_key = memory_component_key
         self._max_observations = max(1, int(max_observations))
         self._last_numeric_fields: Dict[str, str] = {}
-        self._last_urgency_level = self._get_urgency_level()
+        self._urgency_level = 0.5
         self.strategy_summary = ""
         self.fields: Dict[str, str] = {'hasActiveOffer': 'False'}
         self._verbose = verbose
@@ -250,6 +256,27 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
 
         self._state = SimpleStrategyState(current_position=current_position, opponent_position=counterpart_position)
+
+        prompt = (
+            f"You are given the description of a {self._role} in an HDB resale negotiation:\n"
+            f"Description: {self._description}\n"
+            f"Determine how urgent {self._agent_name} is to close the negotiation from 0 to 1 (0 = not urgent, 1 = extremely urgent)."
+            f"Output using the schema provided."
+        )
+
+        response = self._model.sample_text(
+            prompt=prompt,
+            json_schema=UrgencyLevel.model_json_schema(),
+            max_tokens=100,
+        )
+
+        try:
+            urgency_output = UrgencyLevel.model_validate_json(response)
+            self._urgency_level = urgency_output.urgency
+        except Exception as e:
+            if self._verbose:
+                print(f"[{self._agent_name}] Failed to parse urgency level, defaulting to 0.5. Error: {e}")
+            self._urgency_level = 0.5
 
     @staticmethod
     def _extract_first_json_object(text: str) -> str | None:
@@ -449,10 +476,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     def _get_uncertainty_strategy_summary(
         self,
         action_context: str,
+        allowed_info_budget: float,
     ) -> Dict[str, Any]:
         try:
             return self._uncertainty_context.get_strategy_uncertainty_summary(
-                action_context
+                action_context,
+                allowed_info_budget=allowed_info_budget,
             )
         except Exception:
             return {
@@ -460,23 +489,43 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 'info_items': [],
                 'recommend_information_gathering': False,
                 'avg_uncertainty': 1.0,
-                'urgency_level': self._get_urgency_level(),
             }
 
-    def _get_urgency_level(self) -> float:
+    def _get_base_info_budget(self) -> float:
         try:
-            urgency_level = float(self._uncertainty_context.get_urgency_level())
+            base_budget = float(self._uncertainty_context.get_information_gathering_budget())
         except Exception:
-            urgency_level = getattr(self, '_last_urgency_level', 0.5)
-        return max(0.0, min(1.0, urgency_level))
+            base_budget = 0.0
+        return max(0.0, base_budget)
+
+    def _compute_allowed_info_budget(
+        self,
+        base_budget: float,
+        rounds_left: int,
+        horizon: int,
+        has_active_offer: bool,
+    ) -> float:
+        """Transform base exploration capacity into a turn-level allowed budget."""
+        if base_budget <= 0.0 or rounds_left <= 0:
+            return 0.0
+
+        urgency_multiplier = max(0.0, 1.0 - self._urgency_level)
+        time_multiplier = min(1.0, rounds_left / max(1, horizon))
+        offer_multiplier = 0.35 if has_active_offer else 1.0
+
+        allowed_budget = base_budget * urgency_multiplier * time_multiplier * offer_multiplier
+        if rounds_left <= 2:
+            allowed_budget = min(allowed_budget, base_budget * 0.25)
+        return max(0.0, allowed_budget)
 
     @staticmethod
     def _build_information_focus(
         info_items: List[str],
         recommend_information_gathering: bool,
         rounds_left: int,
+        allowed_info_budget: float,
     ) -> str:
-        if rounds_left <= 1:
+        if rounds_left <= 1 or allowed_info_budget == 0.0:
             return 'No more information gathering; decide with current beliefs.'
         if not info_items:
             return 'No question cleared the current information budget.'
@@ -514,11 +563,20 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         
         # Compute negotiation state
         numeric_fields = self._compute_deterministic_numeric_fields()
-        uncertainty_summary = self._get_uncertainty_strategy_summary(action_context)
-        urgency_level = float(
-            uncertainty_summary.get('urgency_level', self._get_urgency_level())
+        horizon = self._max_rounds_from_urgency(self._urgency_level)
+        rounds_elapsed = self._state.rounds_elapsed
+        rounds_left = max(0, horizon - rounds_elapsed)
+        has_active_offer = numeric_fields.get('HasActiveOffer') == 'True'
+        allowed_info_budget = self._compute_allowed_info_budget(
+            base_budget=self._get_base_info_budget(),
+            rounds_left=rounds_left,
+            horizon=horizon,
+            has_active_offer=has_active_offer,
         )
-        self._last_urgency_level = max(0.0, min(1.0, urgency_level))
+        uncertainty_summary = self._get_uncertainty_strategy_summary(
+            action_context,
+            allowed_info_budget=allowed_info_budget,
+        )
         numeric_fields['DealScenarios'] = uncertainty_summary.get(
             'scenario_summary', 'Unknown'
         )
@@ -528,18 +586,16 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
             f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
-            f"Current Urgency Level (0-1):{self._last_urgency_level}\n"
+            f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_summary}\n"
         )
 
         # Get negotiation strategy guidance based on urgency and role
-        horizon = self._max_rounds_from_urgency(self._last_urgency_level)
-        rounds_elapsed = self._state.rounds_elapsed
-        rounds_left = max(0, horizon - rounds_elapsed)
         information_focus = self._build_information_focus(
             uncertainty_summary.get('info_items', []),
             bool(uncertainty_summary.get('recommend_information_gathering', False)),
             rounds_left,
+            allowed_info_budget,
         )
         
         if self._role == RoleType.BUYER:
@@ -632,7 +688,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         if self._role != RoleType.BUYER:
             return False
 
-        horizon = self._max_rounds_from_urgency(self._get_urgency_level())
+        horizon = self._max_rounds_from_urgency(self._urgency_level)
 
         # Walk away when we've hit or exceeded the horizon
         return self._state.rounds_elapsed >= horizon
@@ -668,7 +724,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
             f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
-            f"Current Urgency Level (0-1):{self._last_urgency_level}\n"
+            f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
             f"Strategy Summary:\n{self.strategy_summary}\n"
         )
@@ -681,7 +737,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
             f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
-            f"Current Urgency Level (0-1):{self._last_urgency_level}\n"
+            f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
             f"Strategy Summary:\n{strategy_summary}\n"
         )
@@ -708,17 +764,9 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             elif key == 'Number of weeks since negotiation started':
                 self._state.rounds_elapsed = int(value)
             elif key == 'Current Urgency Level (0-1)':
-                self._last_urgency_level = float(value)
-                try:
-                    self._uncertainty_context.set_urgency_level(self._last_urgency_level)
-                except Exception:
-                    pass
+                self._urgency_level = float(value)
             elif key == 'UrgencyLevel':
-                self._last_urgency_level = float(value)
-                try:
-                    self._uncertainty_context.set_urgency_level(self._last_urgency_level)
-                except Exception:
-                    pass
+                self._urgency_level = float(value)
             elif key == 'HasActiveOffer':
                 restored_numeric_fields['HasActiveOffer'] = value
             elif key == 'ActiveOfferPrice':

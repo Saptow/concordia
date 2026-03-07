@@ -322,13 +322,6 @@ class UpdateOpposingBeliefInfo(BaseModel):
     trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
     # flexibility_info: Optional[UpdateOpposingBeliefInfoMetadata] = None # TODO: to implement later if needed
 
-class UrgencyLevel(BaseModel):
-    """Schema for urgency level output."""
-    urgency: float = Field(
-        ..., ge=0.0, le=1.0,
-        description="Urgency level from 0 (not urgent) to 1 (extremely urgent)",
-    )
-
 class UncertainSeller(entity_component.ContextComponent):
     """Component for probabilistic reasoning and uncertainty management in negotiations. (seller's side)"""
 
@@ -338,7 +331,6 @@ class UncertainSeller(entity_component.ContextComponent):
         confidence: float = 0.7,
         risk_tolerance: float = 0.3,
         information_gathering_budget: float = 0.1,
-        description: str = "",
         own_reservation_: float = 0.0, # note that this is the minimum reservation price for the seller
         mu: float = 0.0,
         lambda_: float = 1.0,
@@ -360,11 +352,9 @@ class UncertainSeller(entity_component.ContextComponent):
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
-        self._description = description
         self._emit_pre_act_context = emit_pre_act_context
         self._pre_act_value: Optional[str] = None
         self._last_observation_hash: int | None = None
-        self._urgency_level = self._infer_urgency_level(description)
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
@@ -403,34 +393,8 @@ class UncertainSeller(entity_component.ContextComponent):
             b=max(1e-6, b)
         )
 
-    def _infer_urgency_level(self, description: str) -> float:
-        """Infer urgency from agent description once at initialization."""
-        if not str(description).strip():
-            return 0.5
-
-        prompt = (
-            "You are given the description of a seller in an HDB resale negotiation:\n"
-            f"Description: {description}\n"
-            "Determine how urgent this seller is to close the negotiation from 0 to 1 "
-            "(0 = not urgent, 1 = extremely urgent). "
-            "Output using the schema provided."
-        )
-        response = self._model.sample_text(
-            prompt=prompt,
-            json_schema=UrgencyLevel.model_json_schema(),
-            max_tokens=100,
-        )
-        try:
-            urgency_output = UrgencyLevel.model_validate_json(response)
-            return urgency_output.urgency
-        except ValidationError:
-            return 0.5
-
-    def get_urgency_level(self) -> float:
-        return self._urgency_level
-
-    def set_urgency_level(self, urgency_level: float) -> None:
-        self._urgency_level = max(0.0, min(1.0, float(urgency_level)))
+    def get_information_gathering_budget(self) -> float:
+        return max(0.0, float(self._info_budget))
 
     def _analyze_uncertainty_context(self, context: str) -> UncertaintyContext:
         """Analyze context for uncertainty indicators and information gaps."""
@@ -633,11 +597,15 @@ class UncertainSeller(entity_component.ContextComponent):
     def _select_budgeted_information_values(
         self,
         info_values: List[InformationValue],
+        budget: float | None = None,
         limit: int = 3,
     ) -> List[InformationValue]:
         """Return top information opportunities that fit the current budget."""
         selected: List[InformationValue] = []
-        frac_of_budget = max(0.0, self._info_budget * (1.0 - self._urgency_level))
+        frac_of_budget = max(
+            0.0,
+            self._info_budget if budget is None else float(budget),
+        )
         for info in info_values[:limit]:
             frac_of_budget -= info.cost_factor
             if frac_of_budget > 0:
@@ -665,12 +633,16 @@ class UncertainSeller(entity_component.ContextComponent):
         self,
         context: str,
         max_info_items: int = 2,
+        allowed_info_budget: float | None = None,
     ) -> Dict[str, Any]:
         """Build a concise uncertainty summary for the strategy component."""
         uncertainty_analysis = self._analyze_uncertainty_context(context)
         scenarios = self._generate_scenarios()
         info_values = self._calculate_information_values(context, uncertainty_analysis)
-        budgeted_info_values = self._select_budgeted_information_values(info_values)
+        budgeted_info_values = self._select_budgeted_information_values(
+            info_values,
+            budget=allowed_info_budget,
+        )
         avg_uncertainty = self._calculate_average_uncertainty(uncertainty_analysis)
 
         scenario_summary = '; '.join(
@@ -692,7 +664,6 @@ class UncertainSeller(entity_component.ContextComponent):
                 avg_uncertainty > self._risk_tolerance and bool(info_items)
             ),
             'avg_uncertainty': avg_uncertainty,
-            'urgency_level': self._urgency_level,
         }
 
     def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
@@ -753,7 +724,6 @@ class UncertainSeller(entity_component.ContextComponent):
             'own_reservation': self._own_reservation,
             'avg_confidence': avg_confidence,
             'uncertainty_level': 1.0 - avg_confidence,
-            'urgency_level': self._urgency_level,
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
@@ -774,10 +744,6 @@ class UncertainSeller(entity_component.ContextComponent):
                     belief.lambda_ = max(1e-6, belief_data.get('lambda_', belief.lambda_))
                     belief.a = max(1e-6, belief_data.get('a', belief.a))
                     belief.b = max(1e-6, belief_data.get('b', belief.b))
-        self._urgency_level = max(
-            0.0,
-            min(1.0, float(state.get('urgency_level', self._urgency_level))),
-        )
 
 
     def update(self) -> None:
