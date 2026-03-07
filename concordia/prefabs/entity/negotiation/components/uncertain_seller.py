@@ -2,13 +2,11 @@
 
 import dataclasses
 import math
-import random
 from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from concordia.typing import entity_component
-from concordia.typing import entity as entity_lib
 from pydantic import BaseModel, ValidationError, Field
 
 # To model pricing distribution beliefs
@@ -336,7 +334,6 @@ class UncertainSeller(entity_component.ContextComponent):
         lambda_: float = 1.0,
         a: float = 1.0,
         b: float = 1.0,
-        emit_pre_act_context: bool = True,
     ):
         """Initialize uncertainty-aware component.
 
@@ -352,23 +349,13 @@ class UncertainSeller(entity_component.ContextComponent):
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
-        self._emit_pre_act_context = emit_pre_act_context
-        self._pre_act_value: Optional[str] = None
         self._last_observation_hash: int | None = None
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
-        self._uncertainty_sources: List[str] = []
-        self._information_gaps: List[str] = []
 
         # Initialize common negotiation beliefs
         self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_)
-
-    def get_pre_act_label(self) -> str:
-        return "uncertain_seller"
-    
-    def get_pre_act_value(self) -> str:
-        return self._pre_act_value if self._pre_act_value else ""
 
     @staticmethod
     def _extract_observation_actor(observation: str) -> str | None:
@@ -591,6 +578,70 @@ class UncertainSeller(entity_component.ContextComponent):
         info_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
         return info_opportunities
 
+    def _select_budgeted_information_values(
+        self,
+        info_values: List[InformationValue],
+        limit: int = 3,
+    ) -> List[InformationValue]:
+        """Return top information opportunities that fit the current budget."""
+        selected: List[InformationValue] = []
+        frac_of_budget = self._info_budget
+        for info in info_values[:limit]:
+            frac_of_budget -= info.cost_factor
+            if frac_of_budget > 0:
+                selected.append(info)
+        return selected
+
+    def _calculate_average_uncertainty(
+        self,
+        uncertainty_analysis: UncertaintyContext,
+    ) -> float:
+        """Compute average uncertainty level for current beliefs/context."""
+        uncertainty_levels = [
+            1 - info.confidence_level
+            for info in uncertainty_analysis.uncertainty_sources
+        ]
+        if uncertainty_levels:
+            return float(np.mean(uncertainty_levels))
+
+        belief_confidences = [belief.confidence for belief in self._beliefs.values()]
+        if not belief_confidences:
+            return 1.0
+        return 1.0 - float(np.mean(belief_confidences))
+
+    def get_strategy_uncertainty_summary(
+        self,
+        context: str,
+        max_info_items: int = 2,
+    ) -> Dict[str, Any]:
+        """Build a concise uncertainty summary for the strategy component."""
+        uncertainty_analysis = self._analyze_uncertainty_context(context)
+        scenarios = self._generate_scenarios()
+        info_values = self._calculate_information_values(context, uncertainty_analysis)
+        budgeted_info_values = self._select_budgeted_information_values(info_values)
+        avg_uncertainty = self._calculate_average_uncertainty(uncertainty_analysis)
+
+        scenario_summary = '; '.join(
+            f'{scenario.scenario_name} (EV {scenario.value:.0f})'
+            for scenario in scenarios
+        )
+        info_items = [
+            (
+                f'"{info.question[:50]}..." '
+                f'[P={info.priority_score:.2f}, C={info.cost_factor:.2f}]'
+            )
+            for info in budgeted_info_values[:max(1, max_info_items)]
+        ]
+
+        return {
+            'scenario_summary': scenario_summary or 'Unknown',
+            'info_items': info_items,
+            'recommend_information_gathering': (
+                avg_uncertainty > self._risk_tolerance and bool(info_items)
+            ),
+            'avg_uncertainty': avg_uncertainty,
+        }
+
     def _generate_uncertainty_guidance(self, context: str) -> str:
         """Generate comprehensive uncertainty-aware guidance."""
         # Analyze uncertainty in context
@@ -657,18 +708,9 @@ class UncertainSeller(entity_component.ContextComponent):
         guidance += f"• Balance information gathering with negotiation progress\n"
 
         return guidance
-
-    def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
-        """Provide uncertainty-aware guidance before action."""
-        context = action_spec.call_to_action
-
-        # Beliefs are updated only when new observations arrive (pre_observe).
-        guidance = self._generate_uncertainty_guidance(context)
-        self._pre_act_value=guidance
-        if self._emit_pre_act_context:
-            return f"\n{guidance}"
-        return ""
-
+    def pre_act(self, action_spec) -> str:
+        """No need for this since its done in pre_observe."""
+        pass
     def post_act(self, action_attempt: str) -> str:
         """No-op: uncertainty updates are observation-driven (pre_observe only)."""
         del action_attempt

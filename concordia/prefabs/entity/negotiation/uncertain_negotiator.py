@@ -33,7 +33,7 @@ DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
 
 HDB_ACTION_CHOICE_GUARDRAILS = (
     "ACTION-CHOICE GUARDRAILS:\n"
-    "- Follow **Strategy Summary** guidance on action choice.\n"
+    "- Follow **Negotiation Strategy State and Numeric Facts** guidance on action choice.\n"
     "- If **Strategy Summary** indicates information gathering and you have budget for it, but there is an ACTIVE OFFER, DO NOT MAKE_COUNTEROFFER; choose REJECT_OFFER and then proceed with information gathering.\n"
     "- If **Strategy Summary** has [IMPORTANT] tag, priortise following that guidance over ALL other strategy guidance."
 )
@@ -173,7 +173,6 @@ class Entity(prefab_lib.Prefab):
                 lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
-                emit_pre_act_context=False,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -197,7 +196,6 @@ class Entity(prefab_lib.Prefab):
                 lambda_=uncertain_configs.get('lambda_', 1.0),
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
-                emit_pre_act_context=False,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,

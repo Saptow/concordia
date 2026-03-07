@@ -474,18 +474,56 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         self.fields = {'hasActiveOffer': fields.get('HasActiveOffer', 'False')}
         return fields
 
+    def _get_uncertainty_strategy_summary(
+        self,
+        action_context: str,
+    ) -> Dict[str, Any]:
+        try:
+            return self._uncertainty_context.get_strategy_uncertainty_summary(
+                action_context
+            )
+        except Exception:
+            return {
+                'scenario_summary': 'Unknown',
+                'info_items': [],
+                'recommend_information_gathering': False,
+                'avg_uncertainty': 1.0,
+            }
+
+    @staticmethod
+    def _build_information_focus(
+        info_items: List[str],
+        recommend_information_gathering: bool,
+        rounds_left: int,
+    ) -> str:
+        if rounds_left <= 1:
+            return 'No more information gathering; decide with current beliefs.'
+        if not info_items:
+            return 'No question cleared the current information budget.'
+        if rounds_left <= 2:
+            return (
+                'If you still need information, ask at most one question: '
+                f'{info_items[0]}'
+            )
+        if recommend_information_gathering:
+            return (
+                '[IMPORTANT] Information gathering is recommended. Prioritise: '
+                + '; '.join(info_items[:2])
+            )
+        return 'If gathering information, prioritize: ' + '; '.join(info_items[:2])
+
     @staticmethod
     def _numeric_fact_summary(fields: Dict[str, str]) -> str:
         return (
             f"OwnVsOpponentReservation: {fields.get('OwnVsOpponentReservation', 'Unknown')}\n"
             f"HasActiveOffer: {fields.get('HasActiveOffer', 'False')}\n"
             f"ActiveOfferPrice: {fields.get('ActiveOfferPrice', 'NA')}\n"
-            f"IsDealPossible: {fields.get('ZOPAFeasible', 'Unknown')}\n"
+            f"IsDealPossible: {fields.get('DealScenarios', fields.get('ZOPAFeasible', 'Unknown'))}\n"
         )
 
     def pre_act(self, action_spec) -> str:
         """Provide simple strategy guidance before each action."""
-        del action_spec
+        action_context = action_spec.call_to_action
         # Update state first
         if self._role==RoleType.BUYER:
             self._state.current_position= self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
@@ -496,6 +534,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         
         # Compute negotiation state
         numeric_fields = self._compute_deterministic_numeric_fields()
+        uncertainty_summary = self._get_uncertainty_strategy_summary(action_context)
+        numeric_fields['DealScenarios'] = uncertainty_summary.get(
+            'scenario_summary', 'Unknown'
+        )
+        self._last_numeric_fields = dict(numeric_fields)
         numeric_summary = self._numeric_fact_summary(numeric_fields)
         negotiation_numbers = (
             f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
@@ -509,17 +552,25 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         horizon = self._max_rounds_from_urgency(self._urgency_level)
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, horizon - rounds_elapsed)
-        urgency = max(0.0, min(1.0, float(self._urgency_level)))
+        information_focus = self._build_information_focus(
+            uncertainty_summary.get('info_items', []),
+            bool(uncertainty_summary.get('recommend_information_gathering', False)),
+            rounds_left,
+        )
         
         if self._role == RoleType.BUYER:
             base_strategy = (
                 "Base Strategy:\n"
-                "- If you have an active offer, evaluate it against your reservation price and the opponent's position.\n"
+                "- Evaluate the offer against your reservation price and the opponent's position.\n"
                 "- If the offer is favorable (i.e., OwnVsOpponentReservation is positive (> 0)), consider ACCEPT_OFFER.\n"
                 "- If the offer is unfavorable (i.e., OwnVsOpponentReservation is negative (< 0)), consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                f"- {information_focus}\n"
+            ) if numeric_fields.get('HasActiveOffer') == 'True' else (
+                "Base Strategy:\n"
+                f"- {information_focus}\n"
             )
             if self.should_walk_away():
-                urgency_rule = "Patience horizon **exceeded**. Choose WALK_AWAY."
+                urgency_rule = "[IMPORTANT] Patience horizon **exceeded**. Choose WALK_AWAY."
 
             if rounds_left <= 1:
                 urgency_rule = (
@@ -528,16 +579,20 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             elif rounds_left <= 2:
                 urgency_rule = (
                     "[IMPORTANT] Prioritize price-closing actions."
-                    "If an offer is active and IsDealPossible is True, **HIGHLY** consider ACCEPT_OFFER so long as OwnVsOpponentReservation is positive (> 0)."
+                    "If an offer is active and the realistic scenario remains Deal Possible, **HIGHLY** consider ACCEPT_OFFER so long as OwnVsOpponentReservation is positive (> 0)."
                 )
             else:
                 urgency_rule = ""
         else:  # RoleType.SELLER
             base_strategy = (
                 "Base Strategy:\n"
-                "- If you have an active offer, evaluate it against your reservation price and the opponent's position.\n"
+                "- Evaluate the offer against your reservation price and the opponent's position.\n"
                 "- If the offer is favorable (i.e., OwnVsOpponentReservation is positive (> 0)), consider ACCEPT_OFFER.\n"
                 "- If the offer is unfavorable (i.e., OwnVsOpponentReservation is negative (< 0)), consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                f"- {information_focus}\n"
+            ) if numeric_fields.get('HasActiveOffer') == 'True' else (
+                "Base Strategy:\n"
+                f"- {information_focus}\n"
             )
             if rounds_left <= 1:
                 urgency_rule = (
@@ -677,7 +732,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             elif key == 'ActiveOfferPrice':
                 restored_numeric_fields['ActiveOfferPrice'] = value
             elif key == 'IsDealPossible':
-                restored_numeric_fields['ZOPAFeasible'] = value
+                restored_numeric_fields['DealScenarios'] = value
             elif key == 'Strategy Summary':
                 self.strategy_summary = value
 
