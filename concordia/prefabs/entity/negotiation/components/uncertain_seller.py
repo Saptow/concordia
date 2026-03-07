@@ -2,11 +2,13 @@
 
 import dataclasses
 import math
+import random
 from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from concordia.typing import entity_component
+from concordia.typing import entity as entity_lib
 from pydantic import BaseModel, ValidationError, Field
 
 # To model pricing distribution beliefs
@@ -320,6 +322,13 @@ class UpdateOpposingBeliefInfo(BaseModel):
     trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
     # flexibility_info: Optional[UpdateOpposingBeliefInfoMetadata] = None # TODO: to implement later if needed
 
+class UrgencyLevel(BaseModel):
+    """Schema for urgency level output."""
+    urgency: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="Urgency level from 0 (not urgent) to 1 (extremely urgent)",
+    )
+
 class UncertainSeller(entity_component.ContextComponent):
     """Component for probabilistic reasoning and uncertainty management in negotiations. (seller's side)"""
 
@@ -329,11 +338,13 @@ class UncertainSeller(entity_component.ContextComponent):
         confidence: float = 0.7,
         risk_tolerance: float = 0.3,
         information_gathering_budget: float = 0.1,
+        description: str = "",
         own_reservation_: float = 0.0, # note that this is the minimum reservation price for the seller
         mu: float = 0.0,
         lambda_: float = 1.0,
         a: float = 1.0,
         b: float = 1.0,
+        emit_pre_act_context: bool = True,
     ):
         """Initialize uncertainty-aware component.
 
@@ -349,13 +360,25 @@ class UncertainSeller(entity_component.ContextComponent):
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
+        self._description = description
+        self._emit_pre_act_context = emit_pre_act_context
+        self._pre_act_value: Optional[str] = None
         self._last_observation_hash: int | None = None
+        self._urgency_level = self._infer_urgency_level(description)
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
+        self._uncertainty_sources: List[str] = []
+        self._information_gaps: List[str] = []
 
         # Initialize common negotiation beliefs
         self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_)
+
+    def get_pre_act_label(self) -> str:
+        return "uncertain_seller"
+    
+    def get_pre_act_value(self) -> str:
+        return self._pre_act_value if self._pre_act_value else ""
 
     @staticmethod
     def _extract_observation_actor(observation: str) -> str | None:
@@ -379,6 +402,35 @@ class UncertainSeller(entity_component.ContextComponent):
             a=max(1e-6, a),
             b=max(1e-6, b)
         )
+
+    def _infer_urgency_level(self, description: str) -> float:
+        """Infer urgency from agent description once at initialization."""
+        if not str(description).strip():
+            return 0.5
+
+        prompt = (
+            "You are given the description of a seller in an HDB resale negotiation:\n"
+            f"Description: {description}\n"
+            "Determine how urgent this seller is to close the negotiation from 0 to 1 "
+            "(0 = not urgent, 1 = extremely urgent). "
+            "Output using the schema provided."
+        )
+        response = self._model.sample_text(
+            prompt=prompt,
+            json_schema=UrgencyLevel.model_json_schema(),
+            max_tokens=100,
+        )
+        try:
+            urgency_output = UrgencyLevel.model_validate_json(response)
+            return urgency_output.urgency
+        except ValidationError:
+            return 0.5
+
+    def get_urgency_level(self) -> float:
+        return self._urgency_level
+
+    def set_urgency_level(self, urgency_level: float) -> None:
+        self._urgency_level = max(0.0, min(1.0, float(urgency_level)))
 
     def _analyze_uncertainty_context(self, context: str) -> UncertaintyContext:
         """Analyze context for uncertainty indicators and information gaps."""
@@ -585,7 +637,7 @@ class UncertainSeller(entity_component.ContextComponent):
     ) -> List[InformationValue]:
         """Return top information opportunities that fit the current budget."""
         selected: List[InformationValue] = []
-        frac_of_budget = self._info_budget
+        frac_of_budget = max(0.0, self._info_budget * (1.0 - self._urgency_level))
         for info in info_values[:limit]:
             frac_of_budget -= info.cost_factor
             if frac_of_budget > 0:
@@ -640,77 +692,12 @@ class UncertainSeller(entity_component.ContextComponent):
                 avg_uncertainty > self._risk_tolerance and bool(info_items)
             ),
             'avg_uncertainty': avg_uncertainty,
+            'urgency_level': self._urgency_level,
         }
 
-    def _generate_uncertainty_guidance(self, context: str) -> str:
-        """Generate comprehensive uncertainty-aware guidance."""
-        # Analyze uncertainty in context
-        uncertainty_analysis = self._analyze_uncertainty_context(context)
-
-        # Generate scenarios
-        scenarios = self._generate_scenarios()
-
-        # Calculate information values
-        info_values = self._calculate_information_values(context, uncertainty_analysis)
-
-        # Generate guidance
-        guidance = f""" Uncertainty-Aware Analysis
-**Current Belief State:**
-"""
-
-        for name, belief in self._beliefs.items():
-            std = math.sqrt(max(0.0, belief.get_expected_variance))
-            guidance += (
-                f"• {belief.name}: Mean={belief.get_expected_mean:.1f}, "
-                f"Std={std:.1f}\n"
-            )
-            guidance += (
-                f"  95% CI: [{belief.get_confidence_interval()[0]:.1f}, "
-                f"{belief.get_confidence_interval()[1]:.1f}]\n"
-            )
-
-        guidance += f"\n**Scenario Analysis:**\n"
-        for scenario in scenarios:
-            guidance += f"• {scenario.scenario_name} ({scenario.likelihood:.1%}): "
-            guidance += f"Expected value {scenario.value:.0f}, "
-
-        guidance += f"\n**Information Gathering Opportunities:**\n"
-        frac_of_budget = self._info_budget
-        for info in info_values[:3]:  # Top 3 opportunities
-            frac_of_budget -= info.cost_factor
-            if frac_of_budget > 0:
-                guidance += f"• \"{info.question[:50]}...\"\n"
-                guidance += f"  Priority Score: ${info.priority_score:.0f}, Cost Factor: +{info.cost_factor:.2f}\n"
-
-        guidance += f"\n**Uncertainty Management Strategy:**\n"
-
-        # Calculate overall uncertainty level
-        uncertainty_levels = [1 - info.confidence_level for info in uncertainty_analysis.uncertainty_sources]
-        if uncertainty_levels:
-            avg_uncertainty = float(np.mean(uncertainty_levels))
-        else:
-            belief_confidences = [belief.confidence for belief in self._beliefs.values()]
-            avg_uncertainty = 1.0 - float(np.mean(belief_confidences)) if belief_confidences else 1.0
-
-        if avg_uncertainty > self._risk_tolerance:
-            guidance += f"• HIGH UNCERTAINTY DETECTED (uncertainty: {avg_uncertainty:.1%})\n"
-            guidance += f"• Recommend information gathering before major commitments\n"
-            guidance += f"• Consider contingent offers and flexible terms\n"
-            guidance += f"• Focus on robust strategies that work across scenarios\n"
-        else:
-            guidance += f"• Moderate uncertainty (uncertainty: {1-avg_uncertainty:.1%})\n"
-            guidance += f"• Proceed with standard negotiation approach\n"
-            guidance += f"• Monitor for new information that could change beliefs\n"
-
-        guidance += f"\n**Robust Decision Principles:**\n"
-        guidance += f"• Base decisions on {1-avg_uncertainty:.1%} confidence in current beliefs\n"
-        guidance += f"• Maintain flexibility for belief updates\n"
-        guidance += f"• Balance information gathering with negotiation progress\n"
-
-        return guidance
-    def pre_act(self, action_spec) -> str:
-        """No need for this since its done in pre_observe."""
-        pass
+    def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
+        return ""
+    
     def post_act(self, action_attempt: str) -> str:
         """No-op: uncertainty updates are observation-driven (pre_observe only)."""
         del action_attempt
@@ -766,6 +753,7 @@ class UncertainSeller(entity_component.ContextComponent):
             'own_reservation': self._own_reservation,
             'avg_confidence': avg_confidence,
             'uncertainty_level': 1.0 - avg_confidence,
+            'urgency_level': self._urgency_level,
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
@@ -786,101 +774,12 @@ class UncertainSeller(entity_component.ContextComponent):
                     belief.lambda_ = max(1e-6, belief_data.get('lambda_', belief.lambda_))
                     belief.a = max(1e-6, belief_data.get('a', belief.a))
                     belief.b = max(1e-6, belief_data.get('b', belief.b))
+        self._urgency_level = max(
+            0.0,
+            min(1.0, float(state.get('urgency_level', self._urgency_level))),
+        )
 
-    # def get_action_attempt(
-    #         self,
-    #         context: Any, 
-    #         action_spec: entity_lib.ActionSpec
-    #     ) -> str:
-    #     """Generate action attempt with uncertainty considerations."""
-    #     situation = action_spec.call_to_action
-
-    #     self._update_counterpart_reservation_from_context(situation)
-    #     self._update_own_reservation_from_context(situation)
-
-    #     uncertainty_analysis = self._analyze_uncertainty_context(situation)
-
-    #     scenarios = self._generate_scenarios()
-
-    #     info_values = self._calculate_information_values(situation, uncertainty_analysis)
-
-    #     # generate average uncertainty level
-    #     avg_uncertainty = np.mean([1 - confidence_level for info in uncertainty_analysis.uncertainty_sources for confidence_level in [info.confidence_level]])
-
-    #     should_gather_info = avg_uncertainty > (1 - self._confidence_threshold and info_values and info_values[0].net_value > 0)
-
-    #     if should_gather_info:
-    #         # generate info gathering action
-    #         top_info = info_values[0]
-    #         prompt = f""" Based on uncertainty analysis, generate an information gathering action towards the counterpart. 
-
-    #         Situation: {situation}
-
-    #         Uncertainty Analysis: {uncertainty_analysis.model_dump_json()}
-
-    #         Most Valuable Information to Gather:
-    #         Question: {top_info.question}
-    #         Priority Score: {top_info.priority_score}
-    #         Cost Factor: {top_info.cost_factor}
-
-    #         Generate a negotiation action that:
-    #         1. Asks the most valuable information-gathering question
-    #         2. Explains why this information would help both parties
-    #         3. Demonstrates thoughtful preparation and analysis
-    #         4. Maintains negotiation momentum while reducing uncertainty
-    #         5. Shows professional competence despite information gaps
-
-    #         Action:"""
-    #     else:
-    #         # generate based on scenarios
-    #         best_scenario = max(scenarios, key=lambda x: x.likelihood * x.value)
-    #         worst_scenario = min(scenarios, key=lambda x: x.likelihood * x.value)
-
-    #         # get confidence intervals of counterpart
-    #         cp_belief=self._beliefs['counterpart_reservation']
-    #         cp_ci = cp_belief.get_confidence_interval()
-    #         prompt = f""" Based on uncertainty analysis, generate a robust negotiation action towards the counterpart.
-
-    #         Situation: {situation}
-
-    #         Current Belief of counterpart State:
-    #         • {cp_belief.name}: Mean = {cp_belief.get_expected_mean:.1f}, Variance = {cp_belief.get_expected_variance:.1f}
-    #         • 95% CI: [{cp_ci[0]:.1f}, {cp_ci[1]:.1f}]
-
-    #         Scenario Analysis:
-    #         Best Case: {best_scenario.scenario_name} (Value: {best_scenario.value:.0f}, Likelihood: {best_scenario.likelihood:.1%})
-    #         Worst Case: {worst_scenario.scenario_name} (Value: {worst_scenario.value:.0f}, Likelihood: {worst_scenario.likelihood:.1%})
-
-    #         Risk Management: 
-    #         - Risk Tolerance Level: {self._risk_tolerance:.2f}
-    #         - Key Uncertainties: {', '.join([info.claim for info in uncertainty_analysis.uncertainty_sources])}
-
-    #         Generate a negotiation action that:
-    #         1. Makes a robust proposal that works across scenarios
-    #         2. Acknowledges and manages key uncertainties
-    #         3. Includes contingencies for different outcomes  
-    #         4. Demonstrates analytical sophistication
-    #         5. Balances confidence with appropriate caution given uncertainty level
-
-    #         Action:"""
-
-    #         response = self._model.sample_text(prompt)
-
-    #             # Clean up response
-    #     action = response.strip()
-    #     if action.lower().startswith('action:'):
-    #         action = action[7:].strip()
-        
-    #     # Add uncertainty framing based on confidence level
-    #     if should_gather_info:
-    #         action = f"To make the best decision for both of us, {action.lower()}"
-
-    #     return action
 
     def update(self) -> None:
         """Update uncertainty-aware component state."""
-        # # Gradually decay confidence over time if no new evidence
-        # for belief in self._beliefs.values():
-        #     if belief.evidence_count == 0:
-        #         belief.confidence *= 0.99  # Slow decay
-        #         belief.std = min(belief.std * 1.01, belief.std * 2)  # Increase uncertainty
+        pass
