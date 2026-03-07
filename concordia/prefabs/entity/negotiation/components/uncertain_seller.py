@@ -4,7 +4,7 @@ import dataclasses
 import math
 import random
 from statistics import NormalDist
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import numpy as np
 
 from concordia.typing import entity_component
@@ -282,11 +282,9 @@ class UncertaintyContext(BaseModel):
 @dataclasses.dataclass
 class ScenarioAnalysis:
     """Analysis of different negotiation scenarios under uncertainty."""
-    scenario_name: str
+    scenario_type: Literal['Pessimistic', 'Realistic', 'Optimistic']
+    outcome: Literal['Deal Possible', 'No Deal']
     likelihood: float
-    value: float
-    key_assumptions: List[str]
-    risk_factors: List[str]
 
 
 class InformationValue(BaseModel):
@@ -526,40 +524,23 @@ class UncertainSeller(entity_component.ContextComponent):
         z_width = NormalDist(mu=0, sigma=1).inv_cdf(p_upper)
         
         val_optimistic = zopa_dist.mean + (z_width * zopa_dist.stdev)
-        val_realistic  = zopa_dist.mean 
+        val_realistic  = zopa_dist.mean
         val_pessimistic = zopa_dist.mean - (z_width * zopa_dist.stdev)
+        scenario_values = {
+            'Pessimistic': val_pessimistic,
+            'Realistic': val_realistic,
+            'Optimistic': val_optimistic,
+        }
         # generate scenarios based on mean and std deviations
         for name, likelihood in likelihoods.items():
-            if name == 'Pessimistic': 
-                scenarios.append(
-                    ScenarioAnalysis(
-                        scenario_name=f"{name}: Deal Possible" if val_pessimistic > 0 else f"{name}: No Deal",
-                        likelihood=likelihood,
-                        value=max(0.0, val_pessimistic),
-                        key_assumptions=[f"Counterpart reservation at {cp_belief.get_expected_mean:.2f}", f"Your reservation at {own_reservation:.2f}"],
-                        risk_factors=[f"Counterpart reservation uncertainty (std: {math.sqrt(cp_belief.get_expected_variance):.2f})"]
-                    )
+            scenario_value = scenario_values[name]
+            scenarios.append(
+                ScenarioAnalysis(
+                    scenario_type=name,
+                    outcome='Deal Possible' if scenario_value > 0 else 'No Deal',
+                    likelihood=likelihood,
                 )
-            elif name == 'Realistic':
-                scenarios.append(
-                    ScenarioAnalysis(
-                        scenario_name=f"{name}: Deal Possible" if val_realistic > 0 else f"{name}: No Deal",
-                        likelihood=likelihood,
-                        value=max(0.0, val_realistic),
-                        key_assumptions=[f"Counterpart reservation at {cp_belief.get_expected_mean:.2f}", f"Your reservation at {own_reservation:.2f}"],
-                        risk_factors=[f"Counterpart reservation uncertainty (std: {math.sqrt(cp_belief.get_expected_variance):.2f})"]
-                    )
-                )
-            else:
-                scenarios.append(
-                    ScenarioAnalysis(
-                        scenario_name=f"{name}: Deal Possible" if val_optimistic > 0 else f"{name}: No Deal",
-                        likelihood=likelihood,
-                        value=max(0.0, val_optimistic),
-                        key_assumptions=[f"Counterpart reservation at {cp_belief.get_expected_mean:.2f}", f"Your reservation at {own_reservation:.2f}"],
-                        risk_factors=[f"Counterpart reservation uncertainty (std: {math.sqrt(cp_belief.get_expected_variance):.2f})"]
-                    )
-                )
+            )
         return scenarios
     
     def _calculate_information_values(self, context: str, uncertainty_analysis: UncertaintyContext) -> List[InformationValue]:
@@ -644,10 +625,17 @@ class UncertainSeller(entity_component.ContextComponent):
             budget=allowed_info_budget,
         )
         avg_uncertainty = self._calculate_average_uncertainty(uncertainty_analysis)
-
-        scenario_summary = '; '.join(
-            f'{scenario.scenario_name} (EV {scenario.value:.0f})'
+        scenario_lookup = {
+            scenario.scenario_type: scenario
             for scenario in scenarios
+        }
+        scenario_summary = ' | '.join(
+            (
+                f'{name}: {scenario_lookup[name].outcome} ({scenario_lookup[name].likelihood:.0%} Chance)'
+                if name in scenario_lookup
+                else f'{name}: Unknown'
+            )
+            for name in ('Pessimistic', 'Realistic', 'Optimistic')
         )
         info_items = [
             (
