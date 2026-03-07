@@ -523,11 +523,11 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
 
             if rounds_left <= 1:
                 urgency_rule = (
-                    "HIGH URGENCY: If an offer is active, decide now with ACCEPT_OFFER or REJECT_OFFER. Do not MAKE_COUNTEROFFER or ask more questions.\n"
+                    "[IMPORTANT] If an offer is active, decide now with ACCEPT_OFFER or REJECT_OFFER. Do not MAKE_COUNTEROFFER or ask more questions.\n"
                 )
             elif rounds_left <= 2:
                 urgency_rule = (
-                    "ELEVATED URGENCY: Prioritize price-closing actions.\n"
+                    "[IMPORTANT] Prioritize price-closing actions."
                     "If an offer is active and IsDealPossible is True, **HIGHLY** consider ACCEPT_OFFER so long as OwnVsOpponentReservation is positive (> 0)."
                 )
             else:
@@ -541,13 +541,13 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             )
             if rounds_left <= 1:
                 urgency_rule = (
-                    "FINAL DECISION TURN: If an offer is active, decide now with "
+                    "[IMPORTANT] If an offer is active, decide now with "
                     "ACCEPT_OFFER, REJECT_OFFER."
                     "If no offer is active, issue MAKE_OFFER now."
                 )
             elif rounds_left <= 2:
                 urgency_rule = (
-                    "HIGH DEADLINE PRESSURE: Prioritize price-closing actions and avoid "
+                    "[IMPORTANT] [HIGH DEADLINE PRESSURE] Prioritize price-closing actions and avoid "
                     "open-ended inquiries."
                 )
             else:
@@ -555,7 +555,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
 
 
         self.strategy_summary = base_strategy + urgency_rule
-        return (
+        return ('\n'
             f"{negotiation_numbers}"
             f"Strategy Summary:{self.strategy_summary}\n"
         )
@@ -625,7 +625,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     def get_pre_act_value(self) -> str:
         '''Get pre-act value with strategy state and numeric facts for prompting.'''
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
-        return (
+        return ('\n'
             f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
             f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"

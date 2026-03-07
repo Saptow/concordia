@@ -23,17 +23,19 @@ from concordia.prefabs.entity.negotiation.components import hdb_negotiation_inst
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
 DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
     f'HDB RESALE ETHICAL CONSTRAINTS: \n'
-    f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).'
-    f'- If you are unsure about a fact, say you are unsure instead of guessing or making up an answer.'
-    f'- You may withhold private limits (true budget/reservation/urgency), but if you answer a factual question, answer truthfully or say you are unsure.'
-    f'- Do not propose or encourage terms that contradict HDB’s prescribed OTP/deposit framework or any side payments; keep commitments realistic within HDB timelines.'
-    f'- Treat inferences as hypotheses; ask clarifying questions instead of asserting unverified claims.'
+    f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).\n'
+    f'- If you are unsure about a fact, say you are unsure instead of guessing or making up an answer.\n'
+    f'- You may withhold private limits (true budget/reservation/urgency), but if you answer a factual question, answer truthfully or say you are unsure.\n'
+    f'- Do not propose or encourage terms that contradict HDB’s prescribed OTP/deposit framework or any side payments; keep commitments realistic within HDB timelines.\n'
+    f'- Treat inferences as hypotheses; ask clarifying questions instead of asserting unverified claims.\n'
     f'- No coercion/harassment or exploitation of vulnerability; keep a clear written record of offers and key terms.'
 )
 
 HDB_ACTION_CHOICE_GUARDRAILS = (
     "ACTION-CHOICE GUARDRAILS:\n"
-    "- If guidance indicates information gathering and you have budget for it, but there is an ACTIVE OFFER, DO NOT MAKE_COUNTEROFFER; choose REJECT_OFFER and then proceed with information gathering.\n"
+    "- Follow **Strategy Summary** guidance on action choice.\n"
+    "- If **Strategy Summary** indicates information gathering and you have budget for it, but there is an ACTIVE OFFER, DO NOT MAKE_COUNTEROFFER; choose REJECT_OFFER and then proceed with information gathering.\n"
+    "- If **Strategy Summary** has [IMPORTANT] tag, priortise following that guidance over ALL other strategy guidance."
 )
 HDB_CONTEXT_ANCHOR = (
     "NOTE:\n"
@@ -293,6 +295,7 @@ class Entity(prefab_lib.Prefab):
             memory_tag='[action choice]',
             components=action_components,
             choice_responses=role_action_types,
+            num_memories_to_retrieve=6 # TODO: make this adaptive based on personality metadata and recency of relevant context, note that this is even number because this is in negotiation pairs
         )
         
         # TODO: look into more refined strategy integration on later stage
@@ -344,7 +347,7 @@ class Entity(prefab_lib.Prefab):
             structured_component_outputs_action_choice=True,
             disable_action_validation=True,
         )
-                # Create the agent
+        # Create the agent
         agent = entity_agent_with_logging.EntityAgentWithLogging(
             agent_name=agent_name,
             act_component=act_component,
