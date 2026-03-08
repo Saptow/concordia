@@ -398,7 +398,7 @@ class HDBStructuredActComponent(
         if preferred_type in info_actions:
             action_specific_guardrails += HDB_FIELD_GENERATION_INFO_GUARDRAILS
         meaningful_counteroffer_rule = (
-            "- For MAKE_COUNTEROFFER, avoid tiny token changes; make a meaningful price move (at least SGD 5,000 or 5% of the current offer price, whichever is larger).\n"
+            "- For MAKE_COUNTEROFFER, avoid tiny changes; make a meaningful price move (at least SGD 5,000 or 5% of the current offer price, whichever is larger).\n"
             if preferred_type == "MAKE_COUNTEROFFER"
             else ""
         )

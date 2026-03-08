@@ -336,6 +336,27 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
             for scenario in scenarios
         )
 
+    def _make_pre_act_value(self) -> str:
+        own_reservation = self._beliefs['own_reservation']
+        counterpart_reservation = self._beliefs['counterpart_reservation']
+        belief_confidences = [belief.confidence for belief in self._beliefs.values()]
+        avg_confidence = float(np.mean(belief_confidences)) if belief_confidences else 0.0
+
+        lines = [
+            'Perspective=Buyer',
+            f'OwnReservationMean={self._format_money(own_reservation.get_expected_mean)}',
+            f'OwnReservationCI95={self._format_interval(own_reservation.get_confidence_interval())}',
+            f'OwnReservationConfidence={own_reservation.confidence:.2f}',
+            f'CounterpartReservationMean={self._format_money(counterpart_reservation.get_expected_mean)}',
+            f'CounterpartReservationCI95={self._format_interval(counterpart_reservation.get_confidence_interval())}',
+            f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
+            f'InformationGatheringBudget={self._info_budget:.2f}',
+            f'RiskTolerance={self._risk_tolerance:.2f}',
+            f'AverageBeliefConfidence={avg_confidence:.2f}',
+            f'ScenarioOutlook={self._format_scenario_summary()}',
+        ]
+        return '\n'.join(lines)
+
     def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
         if self._emit_pre_act_context:
             return super().pre_act(action_spec)
