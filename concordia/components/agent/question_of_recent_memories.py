@@ -16,8 +16,8 @@
 
 from collections.abc import Callable, Collection, Sequence
 import datetime
-from typing import override
-from pydantic import BaseModel,RootModel
+from typing import Literal, override
+from pydantic import BaseModel, Field, RootModel, create_model
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
@@ -330,11 +330,44 @@ class QuestionOfRecentMemoriesStructured(
         else self._choice_responses
     )
     if active_choice_responses:
-      idx = prompt.structured_multiple_choice_question(
-          question=question,
-          choices=active_choice_responses,
-      )
-      result = active_choice_responses[idx]
+      if self._output_schema is not None:
+        output_schema = self._output_schema
+        if 'chosen_action_type' in getattr(output_schema, 'model_fields', {}):
+          literal_choices = Literal.__getitem__(tuple(active_choice_responses))
+          field_info = output_schema.model_fields['chosen_action_type']
+          output_schema = create_model(
+              f'{output_schema.__name__}RuntimeChoices',
+              __base__=output_schema,
+              chosen_action_type=(
+                  literal_choices,
+                  Field(
+                      ...,
+                      description=field_info.description,
+                  ),
+              ),
+          )
+        allowed_choices_block = '\n'.join(
+            f'- {choice}' for choice in active_choice_responses
+        )
+        result = prompt.structured_question(
+            question=(
+                f'{question}\n'
+                'Allowed action types for this turn:\n'
+                f'{allowed_choices_block}\n'
+                'Return a structured response that selects exactly one of the '
+                'allowed action types and explains the decision briefly.'
+            ),
+            answer_prefix=self._answer_prefix.format(agent_name=agent_name),
+            max_tokens=1000,
+            terminators=self._terminators,
+            output_schema=output_schema,
+        )
+      else:
+        idx = prompt.structured_multiple_choice_question(
+            question=question,
+            choices=active_choice_responses,
+        )
+        result = active_choice_responses[idx]
     else:
       if self._output_schema is None:
         raise ValueError(

@@ -44,6 +44,7 @@ HDB_CONTEXT_ANCHOR = (
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
 )
+ACTION_REASONING_MEMORY_WINDOW = 6
 
 
 def _escape_format_braces(text: str) -> str:
@@ -174,6 +175,7 @@ class Entity(prefab_lib.Prefab):
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
                 emit_pre_act_context=False,
+                recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -198,6 +200,7 @@ class Entity(prefab_lib.Prefab):
                 a=uncertain_configs.get('a', 3.0),
                 b=uncertain_configs.get('b', 5000.0),
                 emit_pre_act_context=False,
+                recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -294,8 +297,9 @@ class Entity(prefab_lib.Prefab):
             add_to_memory=False,
             memory_tag='[action choice]',
             components=action_components,
+            output_schema=hdb_schemas.ActionChoiceWithRationale,
             choice_responses=role_action_types,
-            num_memories_to_retrieve=6 # TODO: make this adaptive based on personality metadata and recency of relevant context, note that this is even number because this is in negotiation pairs
+            num_memories_to_retrieve=ACTION_REASONING_MEMORY_WINDOW # TODO: make this adaptive based on personality metadata and recency of relevant context, note that this is even number because this is in negotiation pairs
         )
         
         # TODO: look into more refined strategy integration on later stage

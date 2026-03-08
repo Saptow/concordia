@@ -40,6 +40,23 @@ class VerbalExplanationFields(ActionReasoningFields):
     )
 
 
+class ActionChoiceWithRationale(BaseModel):
+    chosen_action_type: str = Field(
+        ...,
+        description=(
+            "The single action type selected for this turn. Must match exactly one "
+            "allowed action type from the prompt."
+        ),
+    )
+    decision_rationale: str = Field(
+        ...,
+        description=(
+            "Concise private summary of why this action type was chosen over nearby "
+            "alternatives for this turn."
+        ),
+    )
+
+
 # Decisions (actions) that buyers and sellers can take during the negotiation process when no offer is on the table. 
 class MakeOffer(VerbalExplanationFields):
     type: Annotated[

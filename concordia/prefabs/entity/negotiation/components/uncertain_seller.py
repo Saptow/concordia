@@ -7,6 +7,8 @@ from statistics import NormalDist
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import numpy as np
 
+from concordia.components.agent import action_spec_ignored
+from concordia.components.agent import memory as memory_component
 from concordia.typing import entity_component
 from concordia.typing import entity as entity_lib
 from pydantic import BaseModel, ValidationError, Field
@@ -320,8 +322,15 @@ class UpdateOpposingBeliefInfo(BaseModel):
     trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
     # flexibility_info: Optional[UpdateOpposingBeliefInfoMetadata] = None # TODO: to implement later if needed
 
-class UncertainSeller(entity_component.ContextComponent):
+class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
     """Component for probabilistic reasoning and uncertainty management in negotiations. (seller's side)"""
+    _PLACEHOLDER_INFO_QUESTION_TOKENS = (
+        'question text',
+        'placeholder',
+        'your question here',
+        'example question',
+        'insert question',
+    )
 
     def __init__(
         self,
@@ -334,6 +343,8 @@ class UncertainSeller(entity_component.ContextComponent):
         lambda_: float = 1.0,
         a: float = 1.0,
         b: float = 1.0,
+        memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
+        recent_memory_window: int = 6,
         emit_pre_act_context: bool = True,
     ):
         """Initialize uncertainty-aware component.
@@ -344,6 +355,7 @@ class UncertainSeller(entity_component.ContextComponent):
             risk_tolerance: Tolerance for uncertainty (0-1)
             information_gathering_budget: Fraction of value to spend on info gathering
         """
+        super().__init__(pre_act_label='uncertain_seller')
         self._model = model
         self._confidence = confidence
         self._risk_tolerance = risk_tolerance
@@ -351,7 +363,8 @@ class UncertainSeller(entity_component.ContextComponent):
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
         self._emit_pre_act_context = emit_pre_act_context
-        self._pre_act_value: Optional[str] = None
+        self._memory_component_key = memory_component_key
+        self._recent_memory_window = max(1, int(recent_memory_window))
         self._last_observation_hash: int | None = None
 
         # Belief state tracking
@@ -362,11 +375,29 @@ class UncertainSeller(entity_component.ContextComponent):
         # Initialize common negotiation beliefs
         self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_)
 
-    def get_pre_act_label(self) -> str:
-        return "uncertain_seller"
-    
-    def get_pre_act_value(self) -> str:
-        return self._pre_act_value if self._pre_act_value else ""
+    @staticmethod
+    def _format_money(value: float) -> str:
+        return f'{float(value):.2f}'
+
+    @classmethod
+    def _format_interval(cls, interval: Tuple[float, float]) -> str:
+        return f'{cls._format_money(interval[0])}-{cls._format_money(interval[1])}'
+
+    def _format_scenario_summary(self) -> str:
+        scenarios = self._generate_scenarios()
+        if not scenarios:
+            return 'Unknown'
+        return ' | '.join(
+            f'{scenario.scenario_type}: {scenario.outcome} ({scenario.likelihood:.0%})'
+            for scenario in scenarios
+        )
+
+    def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
+        if self._emit_pre_act_context:
+            return super().pre_act(action_spec)
+        del action_spec
+        _ = self.get_pre_act_value()
+        return ""
 
     @staticmethod
     def _extract_observation_actor(observation: str) -> str | None:
@@ -393,6 +424,87 @@ class UncertainSeller(entity_component.ContextComponent):
 
     def get_information_gathering_budget(self) -> float:
         return max(0.0, float(self._info_budget))
+
+    def _build_belief_summary_for_strategy(self) -> str:
+        counterpart_reservation = self._beliefs['counterpart_reservation']
+        lines = [
+            f'OwnReservation={self._format_money(self._own_reservation)}',
+            f'CounterpartReservationMean={self._format_money(counterpart_reservation.get_expected_mean)}',
+            f'CounterpartReservationCI95={self._format_interval(counterpart_reservation.get_confidence_interval())}',
+            f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
+            f'RiskTolerance={self._risk_tolerance:.2f}',
+            f'InformationGatheringBudget={self._info_budget:.2f}',
+            f'ScenarioOutlook={self._format_scenario_summary()}',
+        ]
+        return '\n'.join(lines)
+
+    def _retrieve_recent_memories(self) -> List[str]:
+        try:
+            memory = self.get_entity().get_component(
+                self._memory_component_key,
+                type_=memory_component.Memory,
+            )
+            return list(memory.retrieve_recent(limit=self._recent_memory_window))
+        except Exception:
+            return []
+
+    def _build_strategy_context(self) -> str:
+        recent_memories = self._retrieve_recent_memories()
+        memory_lines = [
+            f'- {memory_text}'
+            for memory_text in recent_memories
+        ] or ['- None']
+        return (
+            'Current belief summary:\n'
+            f'{self._build_belief_summary_for_strategy()}\n'
+            'Recent negotiation memories:\n'
+            + '\n'.join(memory_lines)
+        )
+
+    @classmethod
+    def _normalize_information_question(cls, question: str) -> str:
+        normalized = ' '.join(str(question).split()).strip().strip('"').strip("'")
+        return normalized
+
+    @classmethod
+    def _is_placeholder_information_value(cls, info: InformationValue) -> bool:
+        question = cls._normalize_information_question(info.question)
+        lowered = question.lower().rstrip('.')
+        if not question or len(question) < 8:
+            return True
+        if any(token in lowered for token in cls._PLACEHOLDER_INFO_QUESTION_TOKENS):
+            return True
+        if lowered in {'question', 'string', 'text', 'n/a', 'none'}:
+            return True
+        if info.priority_score <= 0.0 and info.cost_factor <= 0.0:
+            return True
+        return False
+
+    @classmethod
+    def _sanitize_information_values(
+        cls,
+        info_values: List[InformationValue],
+    ) -> List[InformationValue]:
+        sanitized: List[InformationValue] = []
+        seen_questions: set[str] = set()
+        for info in info_values:
+            if cls._is_placeholder_information_value(info):
+                continue
+            normalized_question = cls._normalize_information_question(info.question)
+            dedupe_key = normalized_question.lower().rstrip('?.!')
+            if dedupe_key in seen_questions:
+                continue
+            seen_questions.add(dedupe_key)
+            info.question = normalized_question
+            sanitized.append(info)
+        return sanitized
+
+    @staticmethod
+    def _format_information_item(info: InformationValue) -> str:
+        question = info.question
+        if len(question) > 90:
+            question = question[:87].rstrip() + '...'
+        return f'"{question}" [P={info.priority_score:.2f}, C={info.cost_factor:.2f}]'
 
     def _analyze_uncertainty_context(self, context: str) -> UncertaintyContext:
         """Analyze context for uncertainty indicators and information gaps."""
@@ -560,6 +672,8 @@ class UncertainSeller(entity_component.ContextComponent):
         2. cost_factor (0-1): the relative cost of obtaining this information based off how tedious/difficult it is to obtain.
 
         Return a list of information gathering opportunities in the JSON schema provided.
+        Do not output placeholders such as "question text..." or dummy zero-score rows.
+        If there are no useful questions, return an empty list.
         """
 
         response = self._model.sample_text(prompt, json_schema=InformationValueResponse.model_json_schema())
@@ -571,6 +685,7 @@ class UncertainSeller(entity_component.ContextComponent):
             # current fallback TODO: improve error handling
             info_opportunities = []
 
+        info_opportunities = self._sanitize_information_values(info_opportunities)
         # Sort by rank
         info_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
         return info_opportunities
@@ -617,9 +732,14 @@ class UncertainSeller(entity_component.ContextComponent):
         allowed_info_budget: float | None = None,
     ) -> Dict[str, Any]:
         """Build a concise uncertainty summary for the strategy component."""
-        uncertainty_analysis = self._analyze_uncertainty_context(context)
+        del context
+        strategy_context = self._build_strategy_context()
+        uncertainty_analysis = self._analyze_uncertainty_context(strategy_context)
         scenarios = self._generate_scenarios()
-        info_values = self._calculate_information_values(context, uncertainty_analysis)
+        info_values = self._calculate_information_values(
+            strategy_context,
+            uncertainty_analysis,
+        )
         budgeted_info_values = self._select_budgeted_information_values(
             info_values,
             budget=allowed_info_budget,
@@ -638,10 +758,7 @@ class UncertainSeller(entity_component.ContextComponent):
             for name in ('Pessimistic', 'Realistic', 'Optimistic')
         )
         info_items = [
-            (
-                f'"{info.question[:50]}..." '
-                f'[P={info.priority_score:.2f}, C={info.cost_factor:.2f}]'
-            )
+            self._format_information_item(info)
             for info in budgeted_info_values[:max(1, max_info_items)]
         ]
 
@@ -654,9 +771,6 @@ class UncertainSeller(entity_component.ContextComponent):
             'avg_uncertainty': avg_uncertainty,
         }
 
-    def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
-        return ""
-    
     def post_act(self, action_attempt: str) -> str:
         """No-op: uncertainty updates are observation-driven (pre_observe only)."""
         del action_attempt
@@ -736,4 +850,4 @@ class UncertainSeller(entity_component.ContextComponent):
 
     def update(self) -> None:
         """Update uncertainty-aware component state."""
-        pass
+        super().update()

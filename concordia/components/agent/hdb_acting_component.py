@@ -241,7 +241,14 @@ class HDBStructuredActComponent(
         if isinstance(normalized_raw, (BaseModel, RootModel)):
             normalized_raw = normalized_raw.model_dump()
         if isinstance(normalized_raw, dict):
-            for key in ("type", "action_type", "action", "name"):
+            for key in (
+                "type",
+                "action_type",
+                "chosen_action_type",
+                "preferred_action_type",
+                "action",
+                "name",
+            ):
                 hint = _coerce(normalized_raw.get(key))
                 if hint:
                     return hint
@@ -253,7 +260,14 @@ class HDBStructuredActComponent(
         try:
             payload = json.loads(self._extract_json(text))
             if isinstance(payload, dict):
-                for key in ("type", "action_type", "action", "name"):
+                for key in (
+                    "type",
+                    "action_type",
+                    "chosen_action_type",
+                    "preferred_action_type",
+                    "action",
+                    "name",
+                ):
                     hint = _coerce(payload.get(key))
                     if hint:
                         return hint
@@ -282,6 +296,47 @@ class HDBStructuredActComponent(
                 return hint
         return None
 
+    @staticmethod
+    def _coerce_mapping_payload(raw: Any) -> dict[str, Any]:
+        if isinstance(raw, RootModel):
+            raw = raw.root
+        elif isinstance(raw, BaseModel):
+            raw = raw.model_dump()
+
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                return {}
+            if isinstance(payload, dict):
+                return payload
+        return {}
+
+    def _extract_decision_brief(
+        self,
+        raw: Any,
+        preferred_action_type: str | None,
+    ) -> str:
+        payload = self._coerce_mapping_payload(raw)
+        if not payload:
+            return ""
+
+        chosen_type = (
+            self._extract_action_type_hint(payload)
+            or str(preferred_action_type or "").strip().upper()
+        )
+        lines = []
+        if chosen_type:
+            lines.append(f"ChosenActionType={chosen_type}")
+        value = str(payload.get("decision_rationale", "")).strip()
+        if value:
+            lines.append(f"DecisionRationale={value}")
+        if not lines:
+            return ""
+        return "Decision Brief:\n" + "\n".join(lines)
+
     def _schema_for_turn(self, has_active_offer: bool | None) -> type[RootModel]:
         """Pick role schema for this turn; fallback to broad schema if unknown."""
         if has_active_offer is None:
@@ -308,6 +363,7 @@ class HDBStructuredActComponent(
         has_active_offer: bool | None,
         allowed_types: Sequence[str] = (),
         preferred_action_type: str | None = None,
+        decision_brief: str = "",
     ) -> str:
         """Generate payload fields for one already-chosen action type."""
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
@@ -334,11 +390,6 @@ class HDBStructuredActComponent(
             if preferred_type
             else ""
         )
-        action_type_desc_hint = (
-            f"\nChosen action description:\n{chosen_action_description}\n"
-            if chosen_action_description
-            else ""
-        )
         offer_actions = {"MAKE_OFFER", "MAKE_COUNTEROFFER", "ACCEPT_OFFER"}
         info_actions = {"INQUIRE_BUYER", "INQUIRE_SELLER", "QUESTION_BUYER", "NORMAL_ANSWER"}
         action_specific_guardrails = ""
@@ -353,21 +404,30 @@ class HDBStructuredActComponent(
         )
         prompt = interactive_document.InteractiveDocument(self._model)
         prompt.statement(self._context_for_action(contexts) + "\n")
+        if decision_brief:
+            prompt.statement(decision_brief + "\n")
+        prompt.statement(HDB_FIELD_GENERATION_BASE_GUARDRAILS)
+        if action_specific_guardrails:
+            prompt.statement(action_specific_guardrails)
+        prompt.statement(call_to_action)
+        if chosen_action_description:
+            prompt.statement(f"Chosen action description:\n{chosen_action_description}\n")
+        prompt.statement(
+            "Field-generation instructions:\n"
+            f"- The chosen action type is fixed: {preferred_type}\n"
+            "- Keep the final wording aligned with the decision rationale.\n"
+            "- Use internal_reasoning to explain why the final wording supports the chosen action.\n"
+            "- Do not use internal_reasoning to re-open the action choice unless the context makes the chosen action impossible.\n"
+            "- Return using 1st person perspective (I, me, my, etc.).\n"
+            f"- Return only the fields required by {preferred_type}.\n"
+            "- Include extra type-specific fields where required.\n"
+            "- Any numeric price field must be a positive integer.\n"
+            f"{meaningful_counteroffer_rule}"
+        )
         generated = prompt.structured_question(
             question=(
-                f"{HDB_FIELD_GENERATION_BASE_GUARDRAILS}"
-                f"{action_specific_guardrails}"
-                f"{call_to_action}{action_type_desc_hint}\n"
-                f"Chosen action type: {preferred_type}\n"
-                "Instructions: Given the context and the chosen action type, generate the fields required for this action.\n"
-                "Rules:\n"
-                f"- The action type is already chosen and MUST remain {preferred_type}.\n"
-                "- Return using 1st person perspective (I, me, my, etc.).\n"
-                f"- Return only the fields required by {preferred_type}.\n"
-                "- Include extra type-specific fields where required (for example offer/counteroffer/settled price or inquiry/question/answer details).\n"
-                "- Any numeric price field must be a positive integer.\n"
-                f"{meaningful_counteroffer_rule}"
-                "Return exactly one JSON object matching the expected schema."
+                "Generate the fields required for exactly one JSON object for the chosen action type "
+                f"{preferred_type}, using the context and decision brief above."
             ),
             output_schema=specific_schema,
             max_tokens=2200,
@@ -428,12 +488,17 @@ class HDBStructuredActComponent(
                     raise ValueError(
                         f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
                     )
+                decision_brief = self._extract_decision_brief(
+                    raw,
+                    preferred_action_type=preferred_action_type,
+                )
                 out = self._regenerate_structured_action(
                     contexts=contexts,
                     action_spec=action_spec,
                     has_active_offer=has_active_offer,
                     allowed_types=allowed_types,
                     preferred_action_type=preferred_action_type,
+                    decision_brief=decision_brief,
                 )
                 self._logging_channel({
                     "Summary": (
@@ -464,6 +529,7 @@ class HDBStructuredActComponent(
                         has_active_offer=has_active_offer,
                         allowed_types=allowed_types,
                         preferred_action_type=preferred_action_type,
+                        decision_brief="",
                     )
                 self._logging_channel({
                     "Summary": f"Using structured output from {self._structured_component_key}",
@@ -481,6 +547,7 @@ class HDBStructuredActComponent(
                 has_active_offer=has_active_offer,
                 allowed_types=allowed_types,
                 preferred_action_type=None,
+                decision_brief="",
             )
             self._logging_channel({
                 "Summary": "Regenerated structured output from action spec context",
