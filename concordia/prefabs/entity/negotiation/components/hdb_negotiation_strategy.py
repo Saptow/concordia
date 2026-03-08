@@ -225,6 +225,12 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             return f'{int(round(value))}'
         return f'{value:.2f}'
 
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() == 'true'
+
     def _format_reservation_comparison(
         self,
         own_reservation: float | None,
@@ -437,7 +443,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         expected_horizon = AVG_NEGOTIATION_LENGTH
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, expected_horizon - rounds_elapsed)
-        has_active_offer = numeric_fields.get('HasActiveOffer') == 'True'
+        has_active_offer = self._coerce_bool(numeric_fields.get('HasActiveOffer'))
         allowed_info_budget = self._compute_allowed_info_budget(
             base_budget=self._get_base_info_budget(),
             rounds_left=rounds_left,
@@ -477,7 +483,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 "- If OfferWithinOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
                 "- Use OwnVsOpponentReservation and IsDealPossible to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
-            ) if numeric_fields.get('HasActiveOffer') == 'True' else (
+            ) if has_active_offer else (
                 "Base Strategy:\n"
                 f"- {information_focus}\n"
             )
@@ -503,7 +509,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 "- If OfferMeetsOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
                 "- Use OwnVsOpponentReservation and IsDealPossible to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
-            ) if numeric_fields.get('HasActiveOffer') == 'True' else (
+            ) if has_active_offer else (
                 "Base Strategy:\n"
                 f"- {information_focus}\n"
             )
