@@ -55,8 +55,13 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     """
     Simple Negotiation Strategy for HDB resale market context to prevent long transactions.
     """
+    # Parameters
     _OFFER_OPEN_ACTIONS = frozenset({'MAKE_OFFER', 'MAKE_COUNTEROFFER'})
     _OFFER_CLOSE_ACTIONS = frozenset({'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'})
+    _INFO_HAZARD_STEEPNESS = 10.0
+    _INFO_HAZARD_MIDPOINT = 0.7
+    _ACTIVE_OFFER_INFO_MULTIPLIER = 0.6
+    _LATE_STAGE_INFO_BUDGET_CAP = 0.2
 
     def __init__(
         self,
@@ -102,7 +107,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
 
         self._state = SimpleStrategyState(current_position=current_position, opponent_position=counterpart_position)
 
-        prompt = (
+        prompt = ( #TODO: rewrite prompt, instead of description, use previous listing scenario and existing scenario condition to determine urgency level instead. 
             f"You are given the description of a {self._role} in an HDB resale negotiation:\n"
             f"Description: {self._description}\n"
             f"Determine how urgent {self._agent_name} is to close the negotiation from 0 to 1 (0 = not urgent, 1 = extremely urgent)."
@@ -354,13 +359,27 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         if base_budget <= 0.0 or rounds_left <= 0:
             return 0.0
 
-        urgency_multiplier = max(0.0, 1.0 - self._urgency_level)
-        time_multiplier = min(1.0, rounds_left / max(1, horizon))
-        offer_multiplier = 0.35 if has_active_offer else 1.0
+        progress_used = 1.0 - (rounds_left / max(1, horizon))
+        progress_used = max(0.0, min(1.0, progress_used))
 
-        allowed_budget = base_budget * urgency_multiplier * time_multiplier * offer_multiplier
+        closure_hazard = 1.0 / (
+            1.0
+            + math.exp(
+                -self._INFO_HAZARD_STEEPNESS
+                * (progress_used - self._INFO_HAZARD_MIDPOINT)
+            )
+        )
+        time_multiplier = 1.0 - closure_hazard
+        offer_multiplier = (
+            self._ACTIVE_OFFER_INFO_MULTIPLIER if has_active_offer else 1.0
+        )
+
+        allowed_budget = base_budget * time_multiplier * offer_multiplier
         if rounds_left <= 2:
-            allowed_budget = min(allowed_budget, base_budget * 0.25)
+            allowed_budget = min(
+                allowed_budget,
+                base_budget * self._LATE_STAGE_INFO_BUDGET_CAP,
+            )
         return max(0.0, allowed_budget)
 
     @staticmethod
@@ -386,12 +405,21 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
 
     @staticmethod
     def _numeric_fact_summary(fields: Dict[str, str]) -> str:
-        return (
+        summary = (
             f"OwnVsOpponentReservation: {fields.get('OwnVsOpponentReservation', 'Unknown')}\n"
             f"HasActiveOffer: {fields.get('HasActiveOffer', 'False')}\n"
             f"ActiveOfferPrice: {fields.get('ActiveOfferPrice', 'NA')}\n"
             f"IsDealPossible: {fields.get('DealScenarios', fields.get('ZOPAFeasible', 'Unknown'))}\n"
         )
+        if 'OfferWithinOwnReservation' in fields:
+            summary += (
+                f"OfferWithinOwnReservation: {fields.get('OfferWithinOwnReservation', 'Unknown')}\n"
+            )
+        if 'OfferMeetsOwnReservation' in fields:
+            summary += (
+                f"OfferMeetsOwnReservation: {fields.get('OfferMeetsOwnReservation', 'Unknown')}\n"
+            )
+        return summary
 
     def pre_act(self, action_spec) -> str:
         """Provide simple strategy guidance before each action."""
@@ -406,14 +434,14 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         
         # Compute negotiation state
         numeric_fields = self._compute_deterministic_numeric_fields()
-        horizon = self._max_rounds_from_urgency(self._urgency_level)
+        expected_horizon = AVG_NEGOTIATION_LENGTH
         rounds_elapsed = self._state.rounds_elapsed
-        rounds_left = max(0, horizon - rounds_elapsed)
+        rounds_left = max(0, expected_horizon - rounds_elapsed)
         has_active_offer = numeric_fields.get('HasActiveOffer') == 'True'
         allowed_info_budget = self._compute_allowed_info_budget(
             base_budget=self._get_base_info_budget(),
             rounds_left=rounds_left,
-            horizon=horizon,
+            horizon=expected_horizon,
             has_active_offer=has_active_offer,
         )
         uncertainty_summary = self._get_uncertainty_strategy_summary(
@@ -444,9 +472,10 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         if self._role == RoleType.BUYER:
             base_strategy = (
                 "Base Strategy:\n"
-                "- Evaluate the offer against your reservation price and the opponent's position.\n"
-                "- If the offer is favorable (i.e., OwnVsOpponentReservation is positive (> 0)), consider ACCEPT_OFFER.\n"
-                "- If the offer is unfavorable (i.e., OwnVsOpponentReservation is negative (< 0)), consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
+                "- If OfferWithinOwnReservation is True, consider ACCEPT_OFFER.\n"
+                "- If OfferWithinOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                "- Use OwnVsOpponentReservation and IsDealPossible to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
             ) if numeric_fields.get('HasActiveOffer') == 'True' else (
                 "Base Strategy:\n"
@@ -462,16 +491,17 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             elif rounds_left <= 2:
                 urgency_rule = (
                     "[IMPORTANT] Prioritize price-closing actions."
-                    "If an offer is active and the realistic scenario remains Deal Possible, **HIGHLY** consider ACCEPT_OFFER so long as OwnVsOpponentReservation is positive (> 0)."
+                    "If an offer is active and OfferWithinOwnReservation is True, **HIGHLY** consider ACCEPT_OFFER."
                 )
             else:
                 urgency_rule = ""
         else:  # RoleType.SELLER
             base_strategy = (
                 "Base Strategy:\n"
-                "- Evaluate the offer against your reservation price and the opponent's position.\n"
-                "- If the offer is favorable (i.e., OwnVsOpponentReservation is positive (> 0)), consider ACCEPT_OFFER.\n"
-                "- If the offer is unfavorable (i.e., OwnVsOpponentReservation is negative (< 0)), consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
+                "- If OfferMeetsOwnReservation is True, consider ACCEPT_OFFER.\n"
+                "- If OfferMeetsOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                "- Use OwnVsOpponentReservation and IsDealPossible to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
             ) if numeric_fields.get('HasActiveOffer') == 'True' else (
                 "Base Strategy:\n"

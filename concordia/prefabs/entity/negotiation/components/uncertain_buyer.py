@@ -270,7 +270,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         self,
         model: Any,
         confidence: float = 0.7,
-        risk_tolerance: float = 0.3,
+        risk_tolerance: float = 0.8,
         preferences: Optional[dict] = None,
         information_gathering_budget: float = 0.1,
         own_reservation_: float=0.0,
@@ -291,7 +291,7 @@ class UncertainBuyer(entity_component.ContextComponent):
         """
         self._model = model
         self._confidence = confidence
-        self._risk_tolerance = risk_tolerance
+        self._risk_tolerance = risk_tolerance #TODO: to determine based on personality metadata; THIS IS NOT TO BE UPDATED DURING THE NEGOTIATION.
         self._preferences = preferences or {}
         self._info_budget = information_gathering_budget
         self._emit_pre_act_context = emit_pre_act_context
