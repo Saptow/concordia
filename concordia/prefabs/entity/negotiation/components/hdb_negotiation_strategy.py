@@ -460,8 +460,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         self._last_numeric_fields = dict(numeric_fields)
         numeric_summary = self._numeric_fact_summary(numeric_fields)
         negotiation_numbers = (
-            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
-            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
+            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position:.2f}\n"
+            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position):.2f}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_summary}\n"
@@ -600,8 +600,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         '''Get pre-act value with strategy state and numeric facts for prompting.'''
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         return ('\n'
-            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
-            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
+            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position:.2f}\n"
+            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position):.2f}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"
@@ -613,8 +613,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
         strategy_summary = getattr(self, 'strategy_summary', '')
         return (
-            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position}\n"
-            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
+            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position:.2f}\n"
+            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position):.2f}\n"
             f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
             f"Current Urgency Level (0-1):{self._urgency_level}\n"
             f"{numeric_facts}\n"

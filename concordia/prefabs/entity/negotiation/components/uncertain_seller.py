@@ -337,7 +337,7 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
         model: Any,
         confidence: float = 0.7,
         risk_tolerance: float = 0.3,
-        information_gathering_budget: float = 0.1,
+        information_gathering_budget: float = 0.5, # fraction of value to spend on information gathering
         own_reservation_: float = 0.0, # note that this is the minimum reservation price for the seller
         mu: float = 0.0,
         lambda_: float = 1.0,

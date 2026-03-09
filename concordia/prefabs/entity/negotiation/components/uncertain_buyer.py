@@ -281,7 +281,7 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         confidence: float = 0.7,
         risk_tolerance: float = 0.8,
         preferences: Optional[dict] = None,
-        information_gathering_budget: float = 0.1,
+        information_gathering_budget: float = 0.5, # fraction of value to spend on information gathering
         own_reservation_: float=0.0,
         own_reservation_std: float=1000.0,
         mu: float = 0.0,
