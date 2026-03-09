@@ -26,6 +26,7 @@ import enum
 from absl import logging
 from concordia.document import interactive_document
 from concordia.language_model import language_model
+from concordia.typing import prefab as prefab_lib
 from concordia.utils import concurrency
 import numpy as np
 import pandas as pd
@@ -192,6 +193,7 @@ def get_package_classes(module: types.ModuleType):
             # If it's a class from our package, add it
             elif (inspect.isclass(var) and 
                   not issubclass(var, enum.Enum) and 
+                  issubclass(var, prefab_lib.Prefab) and
                   hasattr(var, '__module__') and 
                   var.__module__.startswith(package_name)):
                 full_path = var.__module__

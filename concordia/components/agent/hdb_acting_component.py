@@ -179,7 +179,7 @@ class HDBStructuredActComponent(
     def _schema_for_action_type(action_type: str) -> type[BaseModel] | None:
         """Return the concrete payload model for a canonical action type."""
         mapping: dict[str, type[BaseModel]] = {
-            "MAKE_OFFER": negotiation_schemas.MakeOffer,
+            "MAKE_OFFER": negotiation_schemas.MawhkeOffer,
             "NORMAL_ANSWER": negotiation_schemas.NormalAnswer,
             "INQUIRE_BUYER": negotiation_schemas.BuyerInquiry,
             "QUESTION_BUYER": negotiation_schemas.BuyerQuestion,

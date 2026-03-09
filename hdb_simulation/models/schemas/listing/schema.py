@@ -165,6 +165,17 @@ class PortalSearchResult(BaseModel):
   summary: str
 
 
+class BuyerMarketBeliefState(BaseModel):
+  buyer_id: str
+  base_reservation_price: float = Field(ge=0.0)
+  effective_reservation_price: float = Field(ge=0.0)
+  latest_market_feedback: str = 'No market feedback yet.'
+  feedback_history: list[str] = Field(default_factory=list)
+  latest_observed_min_price: float | None = Field(default=None, ge=0.0)
+  latest_observed_avg_price: float | None = Field(default=None, ge=0.0)
+  latest_observed_max_price: float | None = Field(default=None, ge=0.0)
+
+
 class ListingSchedulerSnapshot(BaseModel):
   week_number: int = Field(ge=0)
   active_player_names: list[str] = Field(default_factory=list)
@@ -180,6 +191,7 @@ class ListingBuyerState(BaseModel):
   player_name: str
   budget_min_price: float
   budget_max_price: float
+  effective_reservation_price: float
   preferred_flat_types: list[str] = Field(default_factory=list)
   preferred_towns: list[str] = Field(default_factory=list)
   latest_search_results: list[PortalSearchResult] = Field(default_factory=list)

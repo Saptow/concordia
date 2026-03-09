@@ -270,7 +270,7 @@ class ListingPortalTracker(action_spec_ignored.ActionSpecIgnored):
         search_query,
         preferred_flat_types=buyer.preferences.flat_type,
         preferred_towns=buyer.preferences.towns,
-        max_budget=buyer.budget.max_price,
+        max_budget=self._portal.effective_reservation_price_for_buyer(buyer),
         limit=5,
     )
 
@@ -280,7 +280,7 @@ class ListingPortalTracker(action_spec_ignored.ActionSpecIgnored):
       results: Sequence[listing_schemas.PortalSearchResult],
   ) -> list[str]:
     requested_ids: list[str] = []
-    max_budget = float(buyer.budget.max_price)
+    max_budget = self._portal.effective_reservation_price_for_buyer(buyer)
     for result in results:
       if result.listing_price > max_budget:
         continue
@@ -390,6 +390,9 @@ class ListingPortalTracker(action_spec_ignored.ActionSpecIgnored):
         player_name=buyer.name,
         budget_min_price=buyer.budget.min_price,
         budget_max_price=buyer.budget.max_price,
+        effective_reservation_price=self._portal.effective_reservation_price_for_buyer(
+            buyer
+        ),
         preferred_flat_types=list(buyer.preferences.flat_type),
         preferred_towns=list(buyer.preferences.towns),
         latest_search_results=list(

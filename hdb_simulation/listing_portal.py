@@ -295,8 +295,11 @@ class ListingPortal:
     self.listings: dict[str, ListingRecord] = {}
     self.requests_by_listing: dict[str, list[listing_schemas.NegotiationRequest]] = {}
     self.search_results_by_buyer: dict[str, list[listing_schemas.PortalSearchResult]] = {}
+    self.private_buyer_market_states: dict[str, listing_schemas.BuyerMarketBeliefState] = {}
     self.market_feedback_by_buyer: dict[str, str] = {}
     self.matched_pairs: list[listing_schemas.NegotiationMatch] = []
+    # Closed participants are temporarily inactive in the portal workflow.
+    # They can be reopened later, e.g. after a failed bilateral negotiation.
     self.closed_buyers: set[str] = set()
     self.closed_sellers: set[str] = set()
 
@@ -328,6 +331,27 @@ class ListingPortal:
         if request.buyer_id not in self.closed_buyers
     )
 
+  def _buyer_market_state(
+      self,
+      buyer: listing_schemas.PortalBuyer,
+  ) -> listing_schemas.BuyerMarketBeliefState:
+    state = self.private_buyer_market_states.get(buyer.id)
+    if state is None:
+      base_reservation_price = float(buyer.budget.max_price)
+      state = listing_schemas.BuyerMarketBeliefState(
+          buyer_id=buyer.id,
+          base_reservation_price=base_reservation_price,
+          effective_reservation_price=base_reservation_price,
+      )
+      self.private_buyer_market_states[buyer.id] = state
+    return state
+
+  def effective_reservation_price_for_buyer(
+      self,
+      buyer: listing_schemas.PortalBuyer,
+  ) -> float:
+    return float(self._buyer_market_state(buyer).effective_reservation_price)
+
   @staticmethod
   def _derive_query_from_preferences(
       buyer: listing_schemas.PortalBuyer,
@@ -357,7 +381,7 @@ class ListingPortal:
 
   @staticmethod
   def _market_feedback(
-      buyer: listing_schemas.PortalBuyer,
+      effective_reservation_price: float,
       results: Sequence[listing_schemas.PortalSearchResult],
   ) -> str:
     if not results:
@@ -370,7 +394,7 @@ class ListingPortal:
     avg_price = sum(prices) / len(prices)
     min_price = min(prices)
     max_price = max(prices)
-    if avg_price <= buyer.budget.max_price:
+    if avg_price <= effective_reservation_price:
       affordability = 'Most matching listings remain within your upper budget bound.'
     else:
       affordability = (
@@ -380,6 +404,91 @@ class ListingPortal:
     return (
         f"Observed portal valuation band this week: SGD {min_price:.0f} to "
         f"SGD {max_price:.0f}, average SGD {avg_price:.0f}. {affordability}"
+    )
+
+  def _update_buyer_market_state(
+      self,
+      buyer: listing_schemas.PortalBuyer,
+      results: Sequence[listing_schemas.PortalSearchResult],
+      feedback: str,
+  ) -> listing_schemas.BuyerMarketBeliefState:
+    state = self._buyer_market_state(buyer)
+    state.latest_market_feedback = feedback
+    state.feedback_history.append(feedback)
+
+    if not results:
+      return state
+
+    prices = [float(result.listing_price) for result in results]
+    observed_min_price = min(prices)
+    observed_avg_price = sum(prices) / len(prices)
+    observed_max_price = max(prices)
+
+    state.latest_observed_min_price = observed_min_price
+    state.latest_observed_avg_price = observed_avg_price
+    state.latest_observed_max_price = observed_max_price
+
+    current_effective = float(state.effective_reservation_price)
+    target_price = observed_avg_price
+    learning_rate = 0.35
+    upward_cap = max(float(buyer.budget.max_price), current_effective) * 1.25
+    updated_effective = current_effective + (
+        learning_rate * (target_price - current_effective)
+    )
+    state.effective_reservation_price = max(
+        float(buyer.budget.min_price),
+        min(updated_effective, upward_cap),
+    )
+    return state
+
+  def reopen_buyer(self, buyer_id: str) -> None:
+    self.closed_buyers.discard(buyer_id)
+
+  def reopen_seller(self, seller_id: str) -> None:
+    self.closed_sellers.discard(seller_id)
+
+  def reopen_after_failed_negotiation(
+      self,
+      *,
+      buyer_id: str,
+      seller: listing_schemas.PortalSeller,
+      week: int,
+      relist_price: float | None = None,
+      listing_summary: str | None = None,
+      clear_stale_requests: bool = True,
+  ) -> ListFlatResult:
+    self.reopen_buyer(buyer_id)
+    self.reopen_seller(seller.id)
+    listing_id = self.listing_id_for_seller(seller.id)
+    record = self.listings.get(listing_id)
+    if record is None:
+      return self.list_flat(
+          seller,
+          listing_price=relist_price or seller.expectations.max_price,
+          listing_summary=listing_summary or seller.flat.description,
+          week=week,
+      )
+
+    if clear_stale_requests:
+      self.requests_by_listing[listing_id] = []
+    record.active = True
+    record.listed_week = week
+    if relist_price is not None:
+      record.listing_price = float(relist_price)
+    if listing_summary is not None:
+      record.listing_summary = listing_summary.strip() or record.listing_summary
+    self.retriever.upsert_listing(record)
+    return ListFlatResult(
+        listing_id=listing_id,
+        notifications=[
+            (
+                seller.name,
+                (
+                    f"[portal] Week {week}: Your listing {listing_id} has been "
+                    'reactivated after a failed negotiation.'
+                ),
+            ),
+        ],
     )
 
   def list_flat(
@@ -427,16 +536,18 @@ class ListingPortal:
       week: int,
   ) -> SearchAndRequestResult:
     buyer_id = buyer.id
+    effective_reservation_price = self.effective_reservation_price_for_buyer(buyer)
     effective_query = self._derive_query_from_preferences(buyer, search_query)
     results = self.retriever.search(
         effective_query,
         preferred_flat_types=buyer.preferences.flat_type,
         preferred_towns=buyer.preferences.towns,
-        max_budget=buyer.budget.max_price,
+        max_budget=effective_reservation_price,
         limit=5,
     )
     self.search_results_by_buyer[buyer_id] = results
-    feedback = self._market_feedback(buyer, results)
+    feedback = self._market_feedback(effective_reservation_price, results)
+    self._update_buyer_market_state(buyer, results, feedback)
     self.market_feedback_by_buyer[buyer_id] = feedback
     notifications = [
         (
@@ -483,7 +594,7 @@ class ListingPortal:
           seller_id=seller_id,
           week_submitted=week,
           message=market_valuation_notes.strip(),
-          market_valuation_notes=feedback,
+          market_valuation_notes=market_valuation_notes.strip(),
       )
       existing_requests.append(request)
       notifications.append((
@@ -606,6 +717,10 @@ class ListingPortal:
             buyer_id: [result.model_dump() for result in results]
             for buyer_id, results in self.search_results_by_buyer.items()
         },
+        'private_buyer_market_states': {
+            buyer_id: state.model_dump()
+            for buyer_id, state in self.private_buyer_market_states.items()
+        },
         'market_feedback_by_buyer': dict(self.market_feedback_by_buyer),
         'matched_pairs': [match.model_dump() for match in self.matched_pairs],
         'closed_buyers': sorted(self.closed_buyers),
@@ -657,6 +772,12 @@ class ListingPortal:
         ]
         for buyer_id, results in dict(
             state.get('search_results_by_buyer', {})
+        ).items()
+    }
+    restored.private_buyer_market_states = {
+        buyer_id: listing_schemas.BuyerMarketBeliefState.model_validate(payload)
+        for buyer_id, payload in dict(
+            state.get('private_buyer_market_states', {})
         ).items()
     }
     restored.market_feedback_by_buyer = dict(
