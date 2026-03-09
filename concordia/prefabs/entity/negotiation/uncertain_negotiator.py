@@ -148,7 +148,7 @@ class Entity(prefab_lib.Prefab):
             role = role,
             description=description,
             flat_listing=flat_listing,
-            preferences=buyer_preferences if role == RoleType.BUYER else None,
+            preferences=buyer_preferences if role == common_schemas.RoleType.BUYER else None,
             reservation_value=reservation,
             ethical_constraints=ethics,
             pre_act_label='# NEGOTIATION INSTRUCTIONS',
