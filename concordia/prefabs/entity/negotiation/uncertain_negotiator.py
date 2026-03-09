@@ -8,12 +8,12 @@ from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
+from concordia.hdb_simulation.models.schemas import common as common_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import (
     uncertain_buyer,
     uncertain_seller,
 )
-from concordia.hdb_simulation.models import schemas as hdb_schemas
-from concordia.hdb_simulation.models.schemas import RoleType
 from concordia.language_model import language_model
 from concordia.typing import prefab as prefab_lib
 
@@ -116,11 +116,11 @@ class Entity(prefab_lib.Prefab):
             module_configs = {}
         
         if 'uncertain_buyer' in modules:
-            role = RoleType.BUYER
+            role = common_schemas.RoleType.BUYER
         elif 'uncertain_seller' in modules:
-            role = RoleType.SELLER
+            role = common_schemas.RoleType.SELLER
         buyer_preferences = {}
-        if role == RoleType.BUYER:
+        if role == common_schemas.RoleType.BUYER:
             buyer_module_config = module_configs.get('uncertain_buyer', {})
             if isinstance(buyer_module_config, dict):
                 raw_preferences = buyer_module_config.get('preferences', {})
@@ -212,7 +212,7 @@ class Entity(prefab_lib.Prefab):
         # Build a formatting-safe self-description prompt block.
         safe_description = _escape_format_braces(description)
         preferences_block = ''
-        if role == RoleType.BUYER and buyer_preferences:
+        if role == common_schemas.RoleType.BUYER and buyer_preferences:
             preference_lines = []
             for key, value in buyer_preferences.items():
                 label = str(key).replace('_', ' ').strip().title()
@@ -253,33 +253,33 @@ class Entity(prefab_lib.Prefab):
             str(strategy.fields.get('hasActiveOffer', 'False')).lower()
             == 'true'
         )
-        if role == RoleType.BUYER:
+        if role == common_schemas.RoleType.BUYER:
             role_action_types = (
-                hdb_schemas.BUYER_OFFER_ACTIONS
+                negotiation_schemas.BUYER_OFFER_ACTIONS
                 if has_active_offer
-                else hdb_schemas.BUYER_NON_OFFER_ACTIONS
+                else negotiation_schemas.BUYER_NON_OFFER_ACTIONS
             )
         else:
             role_action_types = (
-                hdb_schemas.SELLER_OFFER_ACTIONS
+                negotiation_schemas.SELLER_OFFER_ACTIONS
                 if has_active_offer
-                else hdb_schemas.SELLER_NON_OFFER_ACTIONS
+                else negotiation_schemas.SELLER_NON_OFFER_ACTIONS
             )
-        action_type_descriptions = hdb_schemas.format_action_type_descriptions(
+        negotiation_action_type_descriptions = negotiation_schemas.format_action_type_descriptions(
             role_action_types
         )
 
-        if role == RoleType.SELLER:
+        if role == common_schemas.RoleType.SELLER:
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
-                f'Action type descriptions:\n{action_type_descriptions}\n'
+                f'Action type descriptions:\n{negotiation_action_type_descriptions}\n'
                 f'{HDB_CONTEXT_ANCHOR}\n'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
-                f'Action type descriptions:\n{action_type_descriptions}\n'
+                f'Action type descriptions:\n{negotiation_action_type_descriptions}\n'
                 f'{HDB_CONTEXT_ANCHOR}'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
                 f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
@@ -297,7 +297,7 @@ class Entity(prefab_lib.Prefab):
             add_to_memory=False,
             memory_tag='[action choice]',
             components=action_components,
-            output_schema=hdb_schemas.ActionChoiceWithRationale,
+            output_schema=common_schemas.ActionChoiceWithRationale,
             choice_responses=role_action_types,
             num_memories_to_retrieve=ACTION_REASONING_MEMORY_WINDOW # TODO: make this adaptive based on personality metadata and recency of relevant context, note that this is even number because this is in negotiation pairs
         )
@@ -344,7 +344,7 @@ class Entity(prefab_lib.Prefab):
         # Custom acting component for uncertain negotiator that can handle structured outputs for actions
         act_component = hdb_acting_component.HDBStructuredActComponent(
             model=model,
-            role=role,  # RoleType.BUYER or RoleType.SELLER
+            role=role,
             structured_component_key='action_decisions',
             component_order=component_order,
             fallback_to_llm_for_free=False,

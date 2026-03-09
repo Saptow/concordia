@@ -6,7 +6,8 @@ from typing import Any, override
 from pydantic import BaseModel, RootModel
 
 from concordia.document import interactive_document
-from concordia.hdb_simulation.models import schemas as hdb_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.language_model import language_model
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -51,7 +52,7 @@ class HDBStructuredActComponent(
     def __init__(
         self,
         model: language_model.LanguageModel,
-        role: hdb_schemas.RoleType,
+        role: RoleType,
         structured_component_key: str = "action_decisions",
         component_order: Sequence[str] | None = None,
         randomize_choices: bool = False,
@@ -162,12 +163,12 @@ class HDBStructuredActComponent(
         normalized = {str(opt).strip().upper() for opt in options if str(opt).strip()}
         if not normalized:
             return None
-        if self._role == hdb_schemas.RoleType.BUYER:
-            offer_set = set(hdb_schemas.BUYER_OFFER_ACTIONS)
-            non_offer_set = set(hdb_schemas.BUYER_NON_OFFER_ACTIONS)
+        if self._role == RoleType.BUYER:
+            offer_set = set(negotiation_schemas.BUYER_OFFER_ACTIONS)
+            non_offer_set = set(negotiation_schemas.BUYER_NON_OFFER_ACTIONS)
         else:
-            offer_set = set(hdb_schemas.SELLER_OFFER_ACTIONS)
-            non_offer_set = set(hdb_schemas.SELLER_NON_OFFER_ACTIONS)
+            offer_set = set(negotiation_schemas.SELLER_OFFER_ACTIONS)
+            non_offer_set = set(negotiation_schemas.SELLER_NON_OFFER_ACTIONS)
         if normalized <= offer_set:
             return True
         if normalized <= non_offer_set:
@@ -178,17 +179,30 @@ class HDBStructuredActComponent(
     def _schema_for_action_type(action_type: str) -> type[BaseModel] | None:
         """Return the concrete payload model for a canonical action type."""
         mapping: dict[str, type[BaseModel]] = {
-            "MAKE_OFFER": hdb_schemas.MakeOffer,
-            "NORMAL_ANSWER": hdb_schemas.NormalAnswer,
-            "INQUIRE_BUYER": hdb_schemas.BuyerInquiry,
-            "QUESTION_BUYER": hdb_schemas.BuyerQuestion,
-            "INQUIRE_SELLER": hdb_schemas.SellerInquiry,
-            "ACCEPT_OFFER": hdb_schemas.AcceptOffer,
-            "REJECT_OFFER": hdb_schemas.RejectOffer,
-            "MAKE_COUNTEROFFER": hdb_schemas.MakeCounteroffer,
-            "WALK_AWAY": hdb_schemas.BuyerWalkAway,
+            "MAKE_OFFER": negotiation_schemas.MakeOffer,
+            "NORMAL_ANSWER": negotiation_schemas.NormalAnswer,
+            "INQUIRE_BUYER": negotiation_schemas.BuyerInquiry,
+            "QUESTION_BUYER": negotiation_schemas.BuyerQuestion,
+            "INQUIRE_SELLER": negotiation_schemas.SellerInquiry,
+            "ACCEPT_OFFER": negotiation_schemas.AcceptOffer,
+            "REJECT_OFFER": negotiation_schemas.RejectOffer,
+            "MAKE_COUNTEROFFER": negotiation_schemas.MakeCounteroffer,
+            "WALK_AWAY": negotiation_schemas.BuyerWalkAway,
         }
         return mapping.get(str(action_type).strip().upper())
+
+    @staticmethod
+    def _format_action_type_descriptions(action_types: Sequence[str]) -> str:
+        lines = []
+        for action_type in action_types:
+            key = str(action_type).strip().upper()
+            if not key:
+                continue
+            description = negotiation_schemas.NEGOTIATION_ACTION_TYPE_DESCRIPTIONS.get(
+                key, "No description available."
+            )
+            lines.append(f"- {key}: {description}")
+        return "\n".join(lines)
 
     def _extract_action_type_hint(
         self,
@@ -200,10 +214,10 @@ class HDBStructuredActComponent(
         known_types = {
             str(x).strip().upper()
             for x in (
-                hdb_schemas.BUYER_NON_OFFER_ACTIONS
-                + hdb_schemas.BUYER_OFFER_ACTIONS
-                + hdb_schemas.SELLER_NON_OFFER_ACTIONS
-                + hdb_schemas.SELLER_OFFER_ACTIONS
+                negotiation_schemas.BUYER_NON_OFFER_ACTIONS
+                + negotiation_schemas.BUYER_OFFER_ACTIONS
+                + negotiation_schemas.SELLER_NON_OFFER_ACTIONS
+                + negotiation_schemas.SELLER_OFFER_ACTIONS
             )
             if str(x).strip()
         }
@@ -340,10 +354,10 @@ class HDBStructuredActComponent(
     def _schema_for_turn(self, has_active_offer: bool | None) -> type[RootModel]:
         """Pick role schema for this turn; fallback to broad schema if unknown."""
         if has_active_offer is None:
-            if self._role == hdb_schemas.RoleType.BUYER:
-                return hdb_schemas.BuyerActions
-            return hdb_schemas.SellerActions
-        return hdb_schemas.get_action_model(self._role, has_active_offer)
+            if self._role == RoleType.BUYER:
+                return negotiation_schemas.NegotiationBuyerActions
+            return negotiation_schemas.NegotiationSellerActions
+        return negotiation_schemas.get_action_model(self._role, has_active_offer)
 
     def _validate_action_for_turn(
         self,
@@ -386,12 +400,17 @@ class HDBStructuredActComponent(
                 f"Unsupported action type for structured generation: {preferred_type!r}."
             )
         chosen_action_description = (
-            hdb_schemas.format_action_type_descriptions((preferred_type,))
+            self._format_action_type_descriptions((preferred_type,))
             if preferred_type
             else ""
         )
         offer_actions = {"MAKE_OFFER", "MAKE_COUNTEROFFER", "ACCEPT_OFFER"}
-        info_actions = {"INQUIRE_BUYER", "INQUIRE_SELLER", "QUESTION_BUYER", "NORMAL_ANSWER"}
+        info_actions = {
+            "INQUIRE_BUYER",
+            "INQUIRE_SELLER",
+            "QUESTION_BUYER",
+            "NORMAL_ANSWER",
+        }
         action_specific_guardrails = ""
         if preferred_type in offer_actions:
             action_specific_guardrails += HDB_FIELD_GENERATION_MONETARY_GUARDRAILS
@@ -412,12 +431,15 @@ class HDBStructuredActComponent(
         prompt.statement(call_to_action)
         if chosen_action_description:
             prompt.statement(f"Chosen action description:\n{chosen_action_description}\n")
+        internal_reasoning_instructions = (
+            "- Use internal_reasoning to explain why the final wording supports the chosen action.\n"
+            "- Do not use internal_reasoning to re-open the action choice unless the context makes the chosen action impossible.\n"
+        )
         prompt.statement(
             "Field-generation instructions:\n"
             f"- The chosen action type is fixed: {preferred_type}\n"
             "- Keep the final wording aligned with the decision rationale.\n"
-            "- Use internal_reasoning to explain why the final wording supports the chosen action.\n"
-            "- Do not use internal_reasoning to re-open the action choice unless the context makes the chosen action impossible.\n"
+            f"{internal_reasoning_instructions}"
             "- Return using 1st person perspective (I, me, my, etc.).\n"
             f"- Return only the fields required by {preferred_type}.\n"
             "- Include extra type-specific fields where required.\n"
@@ -596,7 +618,7 @@ class HDBStructuredActComponent(
     def set_state(self, state: entity_component.ComponentState) -> None:
         """Restores component state from a dictionary."""
         if 'role' in state:
-            self._role = hdb_schemas.RoleType(state['role'])
+            self._role = RoleType(state['role'])
         if 'structured_component_key' in state:
             self._structured_component_key = state['structured_component_key']
         if 'component_order' in state:

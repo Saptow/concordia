@@ -16,17 +16,21 @@
 
 from . import negotiation
 from . import hdb_negotiation
+from . import hdb_listing_portal
 
 # Export the main negotiation game master
 NegotiationGameMaster = negotiation.NegotiationGameMaster
 HDBNegotiationGameMaster = hdb_negotiation.GameMaster
+HDBListingPortalGameMaster = hdb_listing_portal.GameMaster
 
 __all__ = [
     # Modules
     'negotiation',
     'hdb_negotiation',
+    'hdb_listing_portal',
 
     # Prefabs
     'NegotiationGameMaster',
     'HDBNegotiationGameMaster',
+    'HDBListingPortalGameMaster',
 ]

@@ -1,21 +1,8 @@
-# Copyright 2025 DeepMind Technologies Limited.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""A lightweight HDB negotiation game master focused on turn scheduling."""
+"""A lightweight HDB listing-portal game master focused on weekly batch actions."""
 
 from collections.abc import Mapping, Sequence
 import dataclasses
+import json
 from typing import Any
 
 from concordia.agents import entity_agent_with_logging
@@ -23,58 +10,45 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as actor_components
 from concordia.components import game_master as gm_components
 from concordia.language_model import language_model
-from concordia.prefabs.game_master.negotiation.components import hdb_negotiation_state
+from concordia.concordia.prefabs.game_master.negotiation.components import hdb_listing_gm
 from concordia.typing import prefab as prefab_lib
 
 
 @dataclasses.dataclass
 class GameMaster(prefab_lib.Prefab):
-  """Prefab for a scheduler-first negotiation game master.
-
-  This GM is intentionally minimal:
-  - deterministic next-actor scheduling by pair and round
-  - fixed next-action-spec generation (free or choice)
-  - simple pass-through event resolution
-  - compact scheduler state tracker for prompt context
-  """
+  """Prefab for the HDB listing portal workflow."""
 
   description: str = (
-      'A lightweight game master that enforces negotiation turn order.'
+      'A lightweight game master that manages weekly listing-portal batches. '
+      'Use this prefab with Concordia\'s simultaneous engine.'
   )
   params: Mapping[str, Any] = dataclasses.field(
       default_factory=lambda: {
-          'name': 'HDB Negotiation Scheduler',
+          'name': 'HDB Listing Portal Scheduler',
           'instructions': (
-              'You are the game master for an HDB negotiation simulation. '
-              'Your primary responsibility is to enforce turn order and keep '
-              'the simulation flow consistent.'
+              'You are the game master for the HDB listing portal stage. '
+              'Your primary responsibility is to execute weekly market batches, '
+              'track listings, and hand off matched pairs into negotiation. '
+              'This workflow assumes all open listing participants act in the '
+              'same simulated week.'
           ),
-          # If omitted, pairs are inferred from player order in consecutive
-          # chunks of two: (0,1), (2,3), ...
-          'negotiation_pairs': (),
-          # Optional IDs aligned with entities; if provided, pair entries can
-          # reference IDs instead of names.
           'player_ids': (),
-          # Action spec behavior for the active entity.
-          'action_mode': 'choice',  # "free" or "choice"
-          'action_prompt': 'What should {name} do next?',
-          'action_options': (),
-          # Kept for compatibility with prior callers.
+          'action_mode': 'choice',
+          'action_prompt': 'Acknowledge the weekly listing-portal batch step.',
+          'buyer_profiles': {},
+          'seller_profiles': {},
           'max_rounds': 0,
           'extra_components': {},
           'extra_components_index': {},
       }
   )
-  entities: (
-      Sequence[entity_agent_with_logging.EntityAgentWithLogging]
-  ) = ()
+  entities: Sequence[entity_agent_with_logging.EntityAgentWithLogging] = ()
 
   def build(
       self,
       model: language_model.LanguageModel,
       memory_bank: basic_associative_memory.AssociativeMemoryBank,
   ) -> entity_agent_with_logging.EntityAgentWithLogging:
-    """Builds the scheduler-first negotiation game master."""
     extra_components = self.params.get('extra_components', {})
     extra_components_index = self.params.get('extra_components_index', {})
     if extra_components_index and extra_components:
@@ -83,23 +57,26 @@ class GameMaster(prefab_lib.Prefab):
             'extra_components_index must have the same keys as extra_components.'
         )
 
-    name = str(self.params.get('name', 'HDB Negotiation Scheduler'))
+    name = str(self.params.get('name', 'HDB Listing Portal Scheduler'))
     custom_instructions = self.params.get('instructions')
     player_names = [entity.name for entity in self.entities]
     if not player_names:
       raise ValueError('No player entities were provided to the game master.')
 
-    negotiation_pairs = self.params.get('negotiation_pairs') or None
     player_ids = self.params.get('player_ids') or None
     max_rounds = int(self.params.get('max_rounds', 0) or 0)
+    action_prompt = str(
+        self.params.get(
+            'action_prompt', 'Acknowledge the weekly listing-portal batch step.'
+        )
+    )
+    buyer_profiles = self.params.get('buyer_profiles', {})
+    seller_profiles = self.params.get('seller_profiles', {})
+    if isinstance(buyer_profiles, str):
+      buyer_profiles = json.loads(buyer_profiles) if buyer_profiles else {}
+    if isinstance(seller_profiles, str):
+      seller_profiles = json.loads(seller_profiles) if seller_profiles else {}
 
-    action_mode = str(self.params.get('action_mode', 'choice')).strip().lower()
-    action_prompt = str(self.params.get('action_prompt', 'What should {name} do next?'))
-    action_options = self.params.get('action_options', ())
-    if isinstance(action_options, str):
-      action_options = [opt.strip() for opt in action_options.split(',') if opt.strip()]
-
-    # Core GM components.
     instructions_key = 'instructions'
     instructions = gm_components.instructions.Instructions()
     if custom_instructions is not None:
@@ -138,52 +115,47 @@ class GameMaster(prefab_lib.Prefab):
     make_observation = gm_components.make_observation.MakeObservation(
         model=model,
         player_names=player_names,
-        # Keep entity-facing observations strictly event-queue driven to avoid
-        # leaking scheduler/global state across independent negotiation pairs.
         components=[],
-        # Resolution queues exact events to players and disables free-form
-        # fallback when queue is empty to preserve pair isolation.
         allow_llm_fallback=False,
     )
 
     next_actor_key = gm_components.next_acting.DEFAULT_NEXT_ACTING_COMPONENT_KEY
-    scheduler_state_key = 'turn_order_state'
-    next_action_spec_key = gm_components.next_acting.DEFAULT_NEXT_ACTION_SPEC_COMPONENT_KEY
-    event_resolution_key = gm_components.switch_act.DEFAULT_RESOLUTION_COMPONENT_KEY
-    terminate_key = gm_components.terminate.DEFAULT_TERMINATE_COMPONENT_KEY
-
-    next_actor = hdb_negotiation_state.PairRoundRobinNextActing(
+    next_actor = hdb_listing_gm.ListingBatchScheduler(
         model=model,
         player_names=player_names,
-        negotiation_pairs=negotiation_pairs,
         player_ids=player_ids,
         max_rounds=max_rounds if max_rounds > 0 else None,
     )
 
-    scheduler_state = hdb_negotiation_state.TurnOrderStateTracker(
+    scheduler_state_key = 'week_state'
+    scheduler_state = hdb_listing_gm.PortalWeekStateTracker(
         scheduler_component_key=next_actor_key,
     )
-    offer_state_key = 'pair_offer_state'
-    offer_state = hdb_negotiation_state.PairActiveOfferTracker(
+
+    portal_state_key = 'listing_portal_state'
+    portal_state = hdb_listing_gm.ListingPortalTracker(
+        buyer_profiles=buyer_profiles,
+        seller_profiles=seller_profiles,
         scheduler_component_key=next_actor_key,
     )
-    next_action_spec = hdb_negotiation_state.FixedNextActionSpec(
-        action_mode=action_mode,
+
+    next_action_spec_key = gm_components.next_acting.DEFAULT_NEXT_ACTION_SPEC_COMPONENT_KEY
+    next_action_spec = hdb_listing_gm.PortalBatchActionSpec(
         call_to_action=action_prompt,
-        choice_options=tuple(action_options),
-        next_acting_component_key=next_actor_key,
-        offer_tracker_component_key=offer_state_key,
     )
-    event_resolution = hdb_negotiation_state.PassthroughResolution(
-        memory_component_key=memory_component_key,
+
+    event_resolution_key = gm_components.switch_act.DEFAULT_RESOLUTION_COMPONENT_KEY
+    event_resolution = hdb_listing_gm.PortalBatchResolution(
         make_observation_component_key=make_observation_key,
-        offer_tracker_component_key=offer_state_key,
-        notify_players=True,
+        portal_tracker_component_key=portal_state_key,
     )
-    terminate_component = hdb_negotiation_state.TerminateWhenAllPairsClosed(
-        offer_tracker_component_key=offer_state_key,
+
+    terminate_key = gm_components.terminate.DEFAULT_TERMINATE_COMPONENT_KEY
+    terminate_component = hdb_listing_gm.TerminateWhenPortalClosed(
+        portal_tracker_component_key=portal_state_key,
         scheduler_component_key=next_actor_key,
     )
+
     components_of_game_master = {
         instructions_key: instructions,
         player_characters_key: player_characters,
@@ -191,7 +163,7 @@ class GameMaster(prefab_lib.Prefab):
         observation_to_memory_key: observation_to_memory,
         observation_component_key: observation,
         scheduler_state_key: scheduler_state,
-        offer_state_key: offer_state,
+        portal_state_key: portal_state,
         display_events_key: display_events,
         make_observation_key: make_observation,
         next_actor_key: next_actor,

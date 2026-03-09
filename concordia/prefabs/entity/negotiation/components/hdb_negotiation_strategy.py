@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
-from concordia.hdb_simulation.models.schemas import RoleType
+from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.prefabs.entity.negotiation.components.uncertain_buyer import UncertainBuyer
 from concordia.prefabs.entity.negotiation.components.uncertain_seller import UncertainSeller
 from concordia.typing import entity_component

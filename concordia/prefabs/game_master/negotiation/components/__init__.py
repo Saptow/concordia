@@ -29,6 +29,7 @@ from concordia.prefabs.game_master.negotiation.components import gm_strategy_evo
 
 # Custom HDB negotiation game master components
 from concordia.prefabs.game_master.negotiation.components import hdb_negotiation_state
+from concordia.concordia.prefabs.game_master.negotiation.components import hdb_listing_gm
 
 __all__ = [
     'negotiation_state',
@@ -41,4 +42,5 @@ __all__ = [
     'gm_collective_intelligence',
     'gm_strategy_evolution',
     'hdb_negotiation_state',
+    'hdb_listing_gm',
 ]

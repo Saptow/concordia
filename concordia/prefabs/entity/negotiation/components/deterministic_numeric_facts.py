@@ -9,7 +9,7 @@ from typing import Any
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
-from concordia.hdb_simulation.models import schemas as hdb_schemas
+from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 
@@ -21,7 +21,7 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
 
   def __init__(
       self,
-      role: hdb_schemas.RoleType,
+      role: RoleType,
       memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
       strategy_component_key: str = 'NegotiationStrategy',
       uncertain_component_key: str | None = None,
@@ -158,7 +158,7 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     except Exception:
       return None
 
-    if self._role == hdb_schemas.RoleType.BUYER:
+    if self._role == RoleType.BUYER:
       beliefs = getattr(uncertain_component, '_beliefs', None)
       if isinstance(beliefs, dict):
         own_res = beliefs.get('own_reservation')
@@ -216,7 +216,7 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
     """Return reservation-overlap feasibility (same logic as realistic ZOPA check)."""
     if own_reservation is None or opponent_reservation is None:
       return None
-    if self._role == hdb_schemas.RoleType.BUYER:
+    if self._role == RoleType.BUYER:
       # Buyer reservation is max willingness to pay.
       return own_reservation >= opponent_reservation
     # Seller reservation is minimum acceptable price.
@@ -289,7 +289,7 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
         fields['OfferMinusOwnReservation'] = self._format_money(
             offer_minus_reservation
         )
-        if self._role == hdb_schemas.RoleType.BUYER:
+        if self._role == RoleType.BUYER:
           fields['OfferWithinOwnReservation'] = str(
               active_offer_price <= own_reservation
           )
@@ -316,7 +316,7 @@ class DeterministicNumericFacts(action_spec_ignored.ActionSpecIgnored):
 
   def set_state(self, state: entity_component.ComponentState) -> None:
     if 'role' in state:
-      self._role = hdb_schemas.RoleType(str(state['role']))
+      self._role = RoleType(str(state['role']))
     if 'memory_component_key' in state:
       self._memory_component_key = str(state['memory_component_key'])
     if 'strategy_component_key' in state:
