@@ -441,6 +441,20 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
             + '\n'.join(memory_lines)
         )
 
+    @staticmethod
+    def _merge_live_context(
+        strategy_context: str,
+        context: str,
+    ) -> str:
+        live_context = str(context).strip()
+        if not live_context:
+            return strategy_context
+        return (
+            f'{strategy_context}\n'
+            'Current action context:\n'
+            f'{live_context}'
+        )
+
     @classmethod
     def _normalize_information_question(cls, question: str) -> str:
         normalized = ' '.join(str(question).split()).strip().strip('"').strip("'")
@@ -753,8 +767,10 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         allowed_info_budget: float | None = None,
     ) -> Dict[str, Any]:
         """Build a concise uncertainty summary for the strategy component."""
-        del context
-        strategy_context = self._build_strategy_context()
+        strategy_context = self._merge_live_context(
+            self._build_strategy_context(),
+            context,
+        )
         uncertainty_analysis = self._analyze_uncertainty_context(strategy_context)
         scenarios = self._generate_scenarios()
         info_values = self._calculate_information_values(
