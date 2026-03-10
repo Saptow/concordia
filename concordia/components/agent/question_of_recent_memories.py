@@ -346,14 +346,12 @@ class QuestionOfRecentMemoriesStructured(
                   ),
               ),
           )
-        allowed_choices_block = '\n'.join(
-            f'- {choice}' for choice in active_choice_responses
-        )
+    #     allowed_choices_block = '\n'.join(
+    #         f'- {choice}' for choice in active_choice_responses
+    #     )
         result = prompt.structured_question(
             question=(
                 f'{question}\n'
-                'Allowed action types for this turn:\n'
-                f'{allowed_choices_block}\n'
                 'Return a structured response that selects exactly one of the '
                 'allowed action types and explains the decision briefly.'
             ),

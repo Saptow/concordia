@@ -1,0 +1,92 @@
+"""Qdrant-facing listing record schemas."""
+
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel
+from qdrant_client import models
+
+from concordia.hdb_simulation.models.schemas.common import Flat
+from concordia.hdb_simulation.models.schemas.listing import schema as listing_schemas
+
+DENSE_EMBEDDINGS_KEY = 'dense_vector'
+SPARSE_EMBEDDINGS_KEY = 'sparse_vector'
+DEFAULT_COLLECTION_NAME = 'hdb_listing_portal'
+DEFAULT_DB_PATH = Path('concordia/hdb_simulation/.qdrant/listing_portal')
+
+
+class ListingRecord(BaseModel):
+    """Canonical listing metadata record stored in the portal index."""
+
+    listing_id: str
+    seller_id: str
+    seller_name: str
+    listing_price: float
+    listing_summary: str # use this for vector and keyword indexing
+    flat: Flat
+    listed_week: int
+    active: bool = True
+
+    @staticmethod
+    def _format_field_name(field_name: str) -> str:
+        return field_name.replace('_', ' ').strip().title()
+
+    def flat_metadata(self) -> dict[str, Any]:
+        metadata = self.flat.model_dump(mode='python')
+        metadata['flat_type'] = str(self.flat.flat_type)
+        return metadata
+
+    def qdrant_payload(self) -> dict[str, Any]:
+      
+        return {
+            'listing_id': self.listing_id,
+            'seller_id': self.seller_id,
+            'seller_name': self.seller_name,
+            'listing_price': float(self.listing_price),
+            'listing_summary': self.listing_summary,
+            'listed_week': int(self.listed_week),
+            'active': bool(self.active),
+            **self.flat_metadata(),
+        }
+
+    def to_document(self) -> str:
+        '''
+        Render the listing record into a string for embedding and indexing.
+        '''
+        lines = [
+            f'Listing ID: {self.listing_id}',
+            f'Listing Price: SGD {self.listing_price:.0f}',
+        ]
+        for key, value in self.flat_metadata().items():
+            if isinstance(value, list):
+                rendered = ', '.join(str(item) for item in value) if value else 'None listed'
+            elif value is None:
+                rendered = 'None'
+            else:
+                rendered = str(value)
+            lines.append(f'{self._format_field_name(key)}: {rendered}')
+        lines.append(f'Summary: {self.listing_summary}')
+        return '\n'.join(lines)
+
+    def to_qdrant_point(
+        self,
+        embedding: Sequence[float],
+    ) -> models.PointStruct:
+        return models.PointStruct(
+            id=self.listing_id,
+            vector={DENSE_EMBEDDINGS_KEY: [float(value) for value in embedding]},
+            payload=self.qdrant_payload(),
+        )
+
+    def to_search_result(self, score: float) -> listing_schemas.PortalSearchResult:
+        return listing_schemas.PortalSearchResult(
+            listing_id=self.listing_id,
+            seller_id=self.seller_id,
+            seller_name=self.seller_name,
+            score=float(score),
+            listing_price=float(self.listing_price),
+            flat_type=str(self.flat.flat_type),
+            town=self.flat.town,
+            summary=self.listing_summary,
+        )
