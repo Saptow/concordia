@@ -430,6 +430,15 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'last_outcome': self._last_outcome.model_dump(),
     }
 
+  def get_dynamic_state(self) -> entity_component.ComponentState:
+    return {
+        'enabled': int(self._enabled),
+        'max_rounds': self._max_rounds or 0,
+        'completed_weeks': self._completed_weeks,
+        'last_run_week': self._last_run_week,
+        'stage_exhausted': int(self._stage_exhausted),
+    }
+
   def set_state(self, state: entity_component.ComponentState) -> None:
     if 'portal_state' in state:
       self._portal_state = dict(state.get('portal_state', {}))

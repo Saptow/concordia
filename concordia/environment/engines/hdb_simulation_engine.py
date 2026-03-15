@@ -9,6 +9,7 @@ from absl import logging
 from concordia.components.game_master import event_resolution as event_resolution_components
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.environment import engine as engine_lib
+from concordia.environment import step_controller as step_controller_lib
 from concordia.prefabs.game_master.negotiation.components import hdb_coordinator_helper
 from concordia.typing import entity as entity_lib
 from concordia.utils import concurrency
@@ -155,6 +156,10 @@ class HDBSimulationEngine(engine_lib.Engine):
       verbose: bool = False,
       log: list[Mapping[str, Any]] | None = None,
       checkpoint_callback: Callable[[int], None] | None = None,
+      step_controller: step_controller_lib.StepController | None = None,
+      step_callback: (
+          Callable[[step_controller_lib.StepData], None] | None
+      ) = None,
   ):
     if not game_masters:
       logging.error('HDBSimulationEngine.run_loop called with no game masters.')
@@ -166,6 +171,10 @@ class HDBSimulationEngine(engine_lib.Engine):
     #   game_master.observe(f'{EVENT_TAG} {premise}')
 
     while not self.terminate(game_master) and steps < max_steps:
+      if step_controller is not None:
+        if not step_controller.wait_for_step_permission():
+          break
+
       summary, active_negotiation_player_ids, listing_player_ids = self._run_week(
           game_master,
           verbose=verbose,
@@ -178,14 +187,14 @@ class HDBSimulationEngine(engine_lib.Engine):
       )
 
       steps += 1
+      coordinator = self._get_coordinator(game_master)
+      entity_logs = self._collect_entity_logs(
+          coordinator=coordinator,
+          entities=entities,
+          active_negotiation_player_ids=active_negotiation_player_ids,
+          listing_player_ids=listing_player_ids,
+      )
       if log is not None:
-        coordinator = self._get_coordinator(game_master)
-        entity_logs = self._collect_entity_logs(
-            coordinator=coordinator,
-            entities=entities,
-            active_negotiation_player_ids=active_negotiation_player_ids,
-            listing_player_ids=listing_player_ids,
-        )
         log_entry: dict[str, Any] = {
             'Step': steps,
             game_master.name: {'week_summary': summary},
@@ -197,6 +206,16 @@ class HDBSimulationEngine(engine_lib.Engine):
 
       if checkpoint_callback is not None:
         checkpoint_callback(steps)
+
+      if step_callback is not None:
+        step_callback(
+            self._build_step_data(
+                steps=steps,
+                game_master=game_master,
+                summary=summary,
+                entity_logs=entity_logs,
+            )
+        )
 
   def _get_coordinator(
       self,
@@ -318,4 +337,31 @@ class HDBSimulationEngine(engine_lib.Engine):
         summary,
         active_negotiation_player_ids,
         list(week_context['listing_player_ids']),
+    )
+
+  def _build_step_data(
+      self,
+      *,
+      steps: int,
+      game_master: entity_lib.Entity,
+      summary: Mapping[str, Any],
+      entity_logs: Mapping[str, Mapping[str, Any]],
+  ) -> step_controller_lib.StepData:
+    """Builds step data for the real-time debug UI after each weekly step."""
+    week_number = summary.get('week_number', steps)
+    entity_actions = {}
+    for entity_name, entity_log in entity_logs.items():
+      value = entity_log.get('Value')
+      if value is None:
+        continue
+      entity_actions[entity_name] = str(value)
+
+    action = json.dumps(summary, ensure_ascii=False, indent=2)
+    return step_controller_lib.StepData(
+        step=steps,
+        acting_entity=game_master.name,
+        action=f'Completed week {week_number}:\n{action}',
+        entity_actions=entity_actions,
+        entity_logs={name: dict(log) for name, log in entity_logs.items()},
+        game_master=game_master.name,
     )

@@ -390,6 +390,12 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         'last_week_summary': dict(self._last_week_summary),
     }
 
+  def get_dynamic_state(self) -> entity_component.ComponentState:
+    return {
+        'week_number': self._week_number,
+        'pending_matches': list(self._pending_matches),
+    }
+
   def set_state(self, state: entity_component.ComponentState) -> None:
     # Restore only the coordinator-owned global state. Module internals are
     # restored by their own components.

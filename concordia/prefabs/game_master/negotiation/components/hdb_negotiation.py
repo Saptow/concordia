@@ -683,6 +683,12 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'enabled': int(self._enabled),
     }
 
+  def get_dynamic_state(self) -> entity_component.ComponentState:
+    return {
+        'action_prompt': self._action_prompt,
+        'enabled': int(self._enabled),
+    }
+
   def set_state(self, state: entity_component.ComponentState) -> None:
     """Restores module state and re-initializes entities for tracked pairs."""
     if 'participant_specs' in state:
