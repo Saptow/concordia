@@ -50,11 +50,26 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Negotiation module',
   ):
     super().__init__(pre_act_label=pre_act_label)
-    self._enabled = bool(enabled)
-    if not self._enabled:
-      return # skip setup if module is disabled; allows for dynamic enabling later with less overhead
     self._model = model
     self._memory_bank = memory_bank
+    self._action_prompt = action_prompt
+    self._make_observation_component_key = make_observation_component_key
+    self._enabled = bool(enabled)
+    self._participant_specs: dict[str, dict[str, Any]] = {}
+    self._player_ids: tuple[str, ...] = ()
+    self._player_names: tuple[str, ...] = ()
+    self._id_to_name: dict[str, str] = {}
+    self._entities_by_id: dict[str, Any] = {}
+    self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
+        player_names=(),
+        negotiation_pairs=None,
+        player_ids=(),
+        max_rounds=max_rounds if max_rounds > 0 else None,
+    )
+    self._offer_tracker = hdb_negotiation_helpers.ActiveOfferTracker(self._scheduler)
+    if not self._enabled:
+      return
+
     self._participant_specs = self._normalize_participant_specs(participant_specs)
     if not self._participant_specs:
       logging.error('NegotiationModule requires at least one participant spec.')
@@ -66,11 +81,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         player_id: str(spec['name']) for player_id, spec in self._participant_specs.items()
     }
     self._player_names = tuple(self._id_to_name[player_id] for player_id in self._player_ids)
-
-    self._action_prompt = action_prompt
-    self._make_observation_component_key = make_observation_component_key
-
-    self._entities_by_id: dict[str, Any] = {}
 
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=self._player_names,

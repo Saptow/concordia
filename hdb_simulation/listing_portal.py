@@ -47,6 +47,7 @@ class ListingPortalRetriever:
             client = QdrantClient(
                 location=qdrant_schemas.DEFAULT_DB_PATH,
             )
+        
         self._dense_embedder=dense_embedding_model
         self._collection_name = collection_name
         self._client = client
@@ -54,11 +55,11 @@ class ListingPortalRetriever:
         # Ensure collection exists
         if not self._client.collection_exists(collection_name):
             logging.exception(f"Qdrant collection '{collection_name}' does not exist. Please create it before using the retriever.")
-            
-    def _embed_text(self, text: str, prefix: str = 'listing') -> np.ndarray:
+
+    def _embed_dense_text(self, text: str) -> np.ndarray:
             if self._dense_embedder is None:
-                  raise ValueError("Dense embedder is not initialized.")
-            return self._dense_embedder.encode(f"{prefix}: {text}")
+                logging.exception("Attempted to embed text but no dense embedding model was provided.")
+            return self._dense_embedder.encode(text)
 
     @staticmethod
     def _seller_filter(seller_id: str) -> qdrant_models.Filter:
@@ -74,7 +75,7 @@ class ListingPortalRetriever:
     def upsert_listing(self, record: listing_schemas.ListingRecord) -> None:
         """Insert or replace a seller listing in the portal index."""
         document = record.to_document()
-        embedding = self._embed_text(document)
+        embedding = self._embed_dense_text(document)
         self._client.upsert(
             collection_name=self._collection_name,
             points=[record.to_qdrant_point(embedding)],
@@ -133,7 +134,7 @@ class ListingPortalRetriever:
         Search active listings using Qdrant vector retrieval plus local BM25.
         This method assumes that vector indices for both sparse and dense embeddings are implemented already.
         """
-
+        dense_query=self._embed_dense_text(query)
         results = self._client.query_points(
             collection_name=self._collection_name,
             prefetch=[
@@ -146,7 +147,7 @@ class ListingPortalRetriever:
                     limit=2 * limit,
                 ),
                 qdrant_models.Prefetch(
-                    query=query,
+                    query=dense_query,
                     using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
                     limit=2 * limit,
                 ),

@@ -191,6 +191,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       player_ids: Sequence[str] | None = None,
       buyer_profiles: Mapping[str, Mapping[str, Any]] | str = (),
       seller_profiles: Mapping[str, Mapping[str, Any]] | str = (),
+      client: Any | None = None,
+      dense_embedding_model: Any | None = None,
       random_seed: int = 0,
       max_rounds: int | None = None,
       enabled: bool = True,
@@ -230,8 +232,17 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         )
         for seller_id, payload in dict(seller_profiles).items()
     }
-    
-    self._portal = listing_portal_lib.ListingPortal(random_seed=random_seed)
+
+    retriever = None
+    if client is not None or dense_embedding_model is not None:
+      retriever = listing_portal_lib.ListingPortalRetriever(
+          client=client,
+          dense_embedding_model=dense_embedding_model,
+      )
+    self._portal = listing_portal_lib.ListingPortal(
+        retriever=retriever,
+        random_seed=random_seed,
+    )
 
   def set_enabled(self, enabled: bool) -> None:
     self._enabled = bool(enabled)
