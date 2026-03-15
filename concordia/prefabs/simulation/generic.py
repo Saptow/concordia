@@ -310,6 +310,30 @@ class Simulation(simulation_lib.Simulation):
           entity_memory_component.get_all_memories_as_text()
       )
 
+    for game_master in self.game_masters:
+      if not hasattr(game_master, 'get_component'):
+        continue
+      for component_name in ('negotiation_module', 'listing_module'):
+        try:
+          module = game_master.get_component(component_name)
+        except Exception:  # pylint: disable=broad-exception-caught
+          continue
+        if not hasattr(module, 'get_entity_memories'):
+          continue
+        try:
+          module_memories = module.get_entity_memories()
+        except Exception:  # pylint: disable=broad-exception-caught
+          continue
+        if not isinstance(module_memories, Mapping):
+          continue
+        for entity_name, memories in module_memories.items():
+          if not isinstance(memories, list):
+            continue
+          existing_memories = entity_memories.get(entity_name, [])
+          entity_memories[entity_name] = list(
+              dict.fromkeys([*existing_memories, *memories])
+          )
+
     # Temporarily disabled per request: do not log game master memories.
     # game_master_memories = (
     #     self.game_master_memory_bank.get_all_memories_as_text()

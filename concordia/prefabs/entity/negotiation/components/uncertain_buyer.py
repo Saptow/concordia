@@ -808,7 +808,7 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         }
         scenario_summary = ' | '.join(
             (
-                f'{name}: {scenario_lookup[name].outcome} ({scenario_lookup[name].likelihood:.0%} Chance)'
+                f'{name}: {scenario_lookup[name].outcome.lower()} ({scenario_lookup[name].likelihood:.0%})'
                 if name in scenario_lookup
                 else f'{name}: Unknown'
             )

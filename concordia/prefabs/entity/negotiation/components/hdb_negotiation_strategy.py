@@ -89,7 +89,6 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         self._memory_component_key = memory_component_key
         self._max_observations = max(1, int(max_observations))
         self._last_numeric_fields: Dict[str, str] = {}
-        self._urgency_level = 0.5
         self.strategy_summary = ""
         self.fields: Dict[str, str] = {'hasActiveOffer': 'False'}
         self._verbose = verbose
@@ -410,12 +409,25 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         return 'If gathering information, prioritize: ' + '; '.join(info_items[:2])
 
     @staticmethod
+    def _deal_outlook_summary(fields: Dict[str, str]) -> str:
+        scenario_summary = fields.get('DealScenarios')
+        if scenario_summary:
+            return scenario_summary
+
+        zopa_feasible = fields.get('ZOPAFeasible', 'Unknown')
+        if zopa_feasible == 'True':
+            return 'Likely feasible'
+        if zopa_feasible == 'False':
+            return 'Likely not feasible'
+        return 'Unknown'
+
+    @staticmethod
     def _numeric_fact_summary(fields: Dict[str, str]) -> str:
         summary = (
             f"OwnVsOpponentReservation: {fields.get('OwnVsOpponentReservation', 'Unknown')}\n"
             f"HasActiveOffer: {fields.get('HasActiveOffer', 'False')}\n"
             f"ActiveOfferPrice: {fields.get('ActiveOfferPrice', 'NA')}\n"
-            f"IsDealPossible: {fields.get('DealScenarios', fields.get('ZOPAFeasible', 'Unknown'))}\n"
+            f"DealOutlook: {HDBNegotiationStrategy._deal_outlook_summary(fields)}\n"
         )
         if 'OfferWithinOwnReservation' in fields:
             summary += (
@@ -481,7 +493,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
                 "- If OfferWithinOwnReservation is True, consider ACCEPT_OFFER.\n"
                 "- If OfferWithinOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
-                "- Use OwnVsOpponentReservation and IsDealPossible to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
+                "- Use OwnVsOpponentReservation and DealOutlook to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
             ) if has_active_offer else (
                 "Base Strategy:\n"
@@ -507,7 +519,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
                 "- If OfferMeetsOwnReservation is True, consider ACCEPT_OFFER.\n"
                 "- If OfferMeetsOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
-                "- Use OwnVsOpponentReservation and IsDealPossible to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
+                "- Use OwnVsOpponentReservation and DealOutlook to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
             ) if has_active_offer else (
                 "Base Strategy:\n"
@@ -650,6 +662,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
                 restored_numeric_fields['HasActiveOffer'] = value
             elif key == 'ActiveOfferPrice':
                 restored_numeric_fields['ActiveOfferPrice'] = value
+            elif key == 'DealOutlook':
+                restored_numeric_fields['DealScenarios'] = value
             elif key == 'IsDealPossible':
                 restored_numeric_fields['DealScenarios'] = value
             elif key == 'Strategy Summary':

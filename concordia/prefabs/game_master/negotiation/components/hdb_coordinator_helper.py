@@ -230,9 +230,63 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         )
     return lines
 
+  @staticmethod
+  def _format_action_event_for_log(event: str) -> dict[str, Any] | str:
+    """Converts `[ACTED]` event strings into readable structured payloads."""
+    actor, sep, payload = event.partition(':')
+    if not sep:
+      return event
+
+    payload = payload.strip()
+    acted_prefix = '[ACTED]'
+    if payload.startswith(acted_prefix):
+      payload_json = payload[len(acted_prefix):].strip()
+      display_prefix = acted_prefix
+    else:
+      payload_json = payload
+      display_prefix = ''
+
+    try:
+      parsed = json.loads(payload_json)
+    except json.JSONDecodeError:
+      return event
+
+    if isinstance(parsed, dict):
+      ordered: dict[str, Any] = {}
+      if 'type' in parsed:
+        ordered['type'] = parsed['type']
+      for key, value in parsed.items():
+        if key != 'type':
+          ordered[key] = value
+      parsed = ordered
+
+    formatted: dict[str, Any] = {
+        'actor': actor,
+        'payload': parsed,
+    }
+    if display_prefix:
+      formatted['prefix'] = display_prefix
+    return formatted
+
+  def _format_week_summary_for_log(self, summary: Mapping[str, Any]) -> str:
+    """Builds a readable JSON block for the completed-week log line."""
+    display_summary = dict(summary)
+    negotiation = display_summary.get('negotiation')
+    if isinstance(negotiation, Mapping):
+      display_negotiation = dict(negotiation)
+      events = display_negotiation.get('events')
+      if isinstance(events, Sequence) and not isinstance(events, str):
+        display_negotiation['events'] = [
+            self._format_action_event_for_log(str(event))
+            for event in events
+        ]
+      display_summary['negotiation'] = display_negotiation
+    return json.dumps(display_summary, ensure_ascii=False, indent=2)
+
   def _log_week_summary(
       self,
       *,
+      summary: Mapping[str, Any],
       week_number: int,
       listing_outcome: Any | None,
       negotiation_outcome: Mapping[str, Any] | None,
@@ -254,6 +308,9 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         ),
         *self._format_listing_summary(listing_outcome),
         *self._format_negotiation_summary(negotiation_outcome),
+        '',
+        f'Completed week {week_number}:',
+        self._format_week_summary_for_log(summary),
         '+' + '-' * 54 + '+',
     ]
     logging.info('\n%s', '\n'.join(lines))
@@ -287,6 +344,7 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         'pending_matches_for_next_week': list(self._pending_matches),
     }
     self._log_week_summary(
+        summary=self._last_week_summary,
         week_number=current_week,
         listing_outcome=listing_outcome,
         negotiation_outcome=negotiation_outcome,

@@ -81,6 +81,71 @@ class HDBSimulationEngine(engine_lib.Engine):
       return game_master
     return game_masters[0]
 
+  # Logging helpers
+  @staticmethod
+  def _has_meaningful_log_value(value: Any) -> bool:
+    """Returns whether a log payload contains any non-empty values."""
+    if value is None:
+      return False
+    if isinstance(value, str):
+      return bool(value.strip())
+    if isinstance(value, Mapping):
+      return any(
+          HDBSimulationEngine._has_meaningful_log_value(item)
+          for item in value.values()
+      )
+    if isinstance(value, Sequence) and not isinstance(value, str):
+      return any(
+          HDBSimulationEngine._has_meaningful_log_value(item) for item in value
+      )
+    return True
+
+  def _collect_entity_logs(
+      self,
+      *,
+      coordinator: hdb_coordinator_helper.WeeklyCoordinator,
+      entities: Sequence[entity_lib.Entity],
+      active_negotiation_player_ids: Sequence[str],
+      listing_player_ids: Sequence[str],
+  ) -> dict[str, Mapping[str, Any]]:
+    """Collects logs from module-owned agents before falling back to outer ones."""
+    collected_logs: dict[str, Mapping[str, Any]] = {}
+
+    module_requests = (
+        (
+            coordinator.get_negotiation_module(),
+            tuple(str(player_id) for player_id in active_negotiation_player_ids),
+        ),
+        (
+            coordinator.get_listing_module(),
+            tuple(str(player_id) for player_id in listing_player_ids),
+        ),
+    )
+    for module, player_ids in module_requests:
+      if not player_ids or not hasattr(module, 'get_entity_log_snapshots'):
+        continue
+      try:
+        snapshots = module.get_entity_log_snapshots(player_ids)
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.warning('Failed to collect module entity logs: %s', error)
+        continue
+      if not isinstance(snapshots, Mapping):
+        continue
+      for entity_name, snapshot in snapshots.items():
+        if not self._has_meaningful_log_value(snapshot):
+          continue
+        collected_logs[str(entity_name)] = snapshot
+
+    for entity in entities:
+      if entity.name in collected_logs or not hasattr(entity, 'get_last_log'):
+        continue
+      snapshot = entity.get_last_log()
+      if not self._has_meaningful_log_value(snapshot):
+        continue
+      collected_logs[entity.name] = snapshot
+
+    return collected_logs
+
   def run_loop(
       self,
       game_masters: Sequence[entity_lib.Entity],
@@ -101,7 +166,7 @@ class HDBSimulationEngine(engine_lib.Engine):
     #   game_master.observe(f'{EVENT_TAG} {premise}')
 
     while not self.terminate(game_master) and steps < max_steps:
-      summary, active_negotiation_player_ids = self._run_week(
+      summary, active_negotiation_player_ids, listing_player_ids = self._run_week(
           game_master,
           verbose=verbose,
       )
@@ -114,14 +179,20 @@ class HDBSimulationEngine(engine_lib.Engine):
 
       steps += 1
       if log is not None:
+        coordinator = self._get_coordinator(game_master)
+        entity_logs = self._collect_entity_logs(
+            coordinator=coordinator,
+            entities=entities,
+            active_negotiation_player_ids=active_negotiation_player_ids,
+            listing_player_ids=listing_player_ids,
+        )
         log_entry: dict[str, Any] = {
             'Step': steps,
             game_master.name: {'week_summary': summary},
             'Summary': f'Week {summary["week_number"]} {game_master.name}',
         }
-        for entity in entities:
-          if hasattr(entity, 'get_last_log'):
-            log_entry[f'Entity [{entity.name}]'] = entity.get_last_log()
+        for entity_name, entity_log in entity_logs.items():
+          log_entry[f'Entity [{entity_name}]'] = entity_log
         log.append(log_entry)
 
       if checkpoint_callback is not None:
@@ -193,7 +264,7 @@ class HDBSimulationEngine(engine_lib.Engine):
       game_master: entity_lib.Entity,
       *,
       verbose: bool,
-  ) -> tuple[dict[str, Any], list[str]]:
+  ) -> tuple[dict[str, Any], list[str], list[str]]:
     coordinator = self._get_coordinator(game_master)
     week_context = coordinator.prepare_week()
     listing_module = coordinator.get_listing_module()
@@ -243,4 +314,8 @@ class HDBSimulationEngine(engine_lib.Engine):
               _PRINT_COLOR,
           )
       )
-    return summary, active_negotiation_player_ids
+    return (
+        summary,
+        active_negotiation_player_ids,
+        list(week_context['listing_player_ids']),
+    )

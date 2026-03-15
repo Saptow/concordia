@@ -8,6 +8,7 @@ from typing import Any
 from absl import logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components.agent import action_spec_ignored
+from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.language_model import language_model
@@ -256,6 +257,82 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       open_pairs.append((buyer_id, seller_id))
     return open_pairs
 
+  # Logging Methods
+  @staticmethod
+  def _has_meaningful_log_value(value: Any) -> bool:
+    """Returns whether a log payload contains any non-empty values."""
+    if value is None:
+      return False
+    if isinstance(value, str):
+      return bool(value.strip())
+    if isinstance(value, Mapping):
+      return any(
+          NegotiationModule._has_meaningful_log_value(item)
+          for item in value.values()
+      )
+    if isinstance(value, Sequence) and not isinstance(value, str):
+      return any(
+          NegotiationModule._has_meaningful_log_value(item)
+          for item in value
+      )
+    return True
+
+  def get_entity_log_snapshots(
+      self,
+      player_ids: Sequence[str] | None = None,
+  ) -> dict[str, dict[str, Any]]:
+    """Returns the latest internal negotiator logs keyed by display name."""
+    requested_ids = (
+        tuple(str(player_id) for player_id in player_ids)
+        if player_ids is not None
+        else tuple(self._entities_by_id.keys())
+    )
+    snapshots: dict[str, dict[str, Any]] = {}
+    for player_id in requested_ids:
+      entity = self._entities_by_id.get(player_id)
+      if entity is None or not hasattr(entity, 'get_last_log'):
+        continue
+      snapshot = entity.get_last_log()
+      if not isinstance(snapshot, Mapping):
+        continue
+      normalized_snapshot = dict(snapshot)
+      if not self._has_meaningful_log_value(normalized_snapshot):
+        continue
+      snapshots[self._get_player_name(player_id)] = normalized_snapshot
+    return snapshots
+
+  def get_entity_memories(
+      self,
+      player_ids: Sequence[str] | None = None,
+  ) -> dict[str, list[str]]:
+    """Returns internal negotiator memories keyed by display name."""
+    requested_ids = (
+        tuple(str(player_id) for player_id in player_ids)
+        if player_ids is not None
+        else tuple(self._entities_by_id.keys())
+    )
+    memories: dict[str, list[str]] = {}
+    for player_id in requested_ids:
+      entity = self._entities_by_id.get(player_id)
+      if entity is None:
+        continue
+      try:
+        entity_memory = entity.get_component(
+            memory_component.DEFAULT_MEMORY_COMPONENT_KEY
+        )
+      except Exception:  # pylint: disable=broad-exception-caught
+        continue
+      if (
+          entity_memory is None
+          or not hasattr(entity_memory, 'get_all_memories_as_text')
+      ):
+        continue
+      memory_text = list(entity_memory.get_all_memories_as_text())
+      if memory_text:
+        memories[self._get_player_name(player_id)] = memory_text
+    return memories
+
+  # Observation helpers
   @staticmethod
   def _format_entity_action(entity_name: str, raw_action: str) -> str:
     """Normalizes raw entity output into the shared event transcript format."""
