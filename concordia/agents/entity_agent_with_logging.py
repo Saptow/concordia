@@ -39,6 +39,7 @@ class EntityAgentWithLogging(entity_agent.EntityAgent,
           types.MappingProxyType({})
       ),
       act_component_log_aliases: Sequence[str] = (),
+      measurements: measurements_lib.Measurements | None = None,
   ):
     """Initializes the agent.
 
@@ -57,40 +58,45 @@ class EntityAgentWithLogging(entity_agent.EntityAgent,
       context_components: The ContextComponents that will be used by the agent.
       act_component_log_aliases: Additional channels to mirror act-component
         logs into, besides the default `__act__` channel.
+      measurements: Optional measurements instance to use for logging. Defaults
+        to a standard Measurements().
     """
     super().__init__(agent_name=agent_name,
                      act_component=act_component,
                      context_processor=context_processor,
                      context_components=context_components)
-    self._component_logging = measurements_lib.Measurements()
+    self._component_logging = (
+        measurements
+        if measurements is not None
+        else measurements_lib.Measurements()
+    )
 
     for component_name, component in self._context_components.items():
       if isinstance(component, entity_component.ComponentWithLogging):
         channel_name = component_name
         component.set_logging_channel(
-            self._component_logging.get_channel(channel_name).append
+            lambda datum, ch=channel_name: self._component_logging.publish_datum(
+                ch, datum, capture_key=self.name
+            )
         )
     if isinstance(act_component, entity_component.ComponentWithLogging):
       act_channels = tuple(dict.fromkeys(('__act__', *act_component_log_aliases)))
       if len(act_channels) == 1:
         act_component.set_logging_channel(
-            self._component_logging.get_channel(act_channels[0]).append
+            lambda datum: self._component_logging.publish_datum(
+                '__act__', datum, capture_key=self.name
+            )
         )
-      else:
-        appenders = tuple(
-            self._component_logging.get_channel(channel_name).append
-            for channel_name in act_channels
+      if isinstance(context_processor, entity_component.ComponentWithLogging):
+        context_processor.set_logging_channel(
+            lambda datum: self._component_logging.publish_datum(
+                '__context_processor__', datum, capture_key=self.name
+            )
         )
 
-        def _publish_act_log(datum: Any) -> None:
-          for append in appenders:
-            append(datum)
-
-        act_component.set_logging_channel(_publish_act_log)
-    if isinstance(context_processor, entity_component.ComponentWithLogging):
-      context_processor.set_logging_channel(
-          self._component_logging.get_channel('__context_processor__').append
-      )
+    @property
+    def measurements(self) -> measurements_lib.Measurements:
+      return self._component_logging
 
   def get_all_logs(self):
     return self._component_logging.get_all_channels()

@@ -16,6 +16,8 @@
 
 from collections.abc import Mapping, Sequence
 import functools
+import re
+import threading
 from typing import Any, Callable, override
 
 from absl import logging
@@ -24,6 +26,7 @@ from concordia.components.game_master import make_observation as make_observatio
 from concordia.components.game_master import next_acting as next_acting_components
 from concordia.components.game_master import switch_act as switch_act_component
 from concordia.environment import engine as engine_lib
+from concordia.environment import step_controller as step_controller_lib
 from concordia.typing import entity as entity_lib
 from concordia.utils import concurrency
 import termcolor
@@ -43,6 +46,7 @@ DEFAULT_CALL_TO_NEXT_GAME_MASTER = (
 )
 
 DEFAULT_ACT_COMPONENT_KEY = switch_act_component.DEFAULT_ACT_COMPONENT_KEY
+_BASE64_TRUNCATE_PATTERN = re.compile(r'(base64,)[A-Za-z0-9+/=]{100,}')
 
 PUTATIVE_EVENT_TAG = event_resolution_components.PUTATIVE_EVENT_TAG
 EVENT_TAG = event_resolution_components.EVENT_TAG
@@ -81,6 +85,7 @@ class Simultaneous(engine_lib.Engine):
     self._call_to_resolve = call_to_resolve
     self._call_to_check_termination = call_to_check_termination
     self._call_to_next_game_master = call_to_next_game_master
+    self._gm_log_lock = threading.Lock()
 
   def make_observation(
       self, game_master: entity_lib.Entity, entity: entity_lib.Entity
@@ -115,7 +120,8 @@ class Simultaneous(engine_lib.Engine):
             options=tuple(entities_by_name.keys()),
         )
     )
-    next_entity_names = next_object_names_string.split(',')
+    next_entity_names = [
+        name.strip() for name in next_object_names_string.split(',')]
     if log is not None and hasattr(game_master, 'get_last_log'):
       assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
       log_entry['next_acting'] = game_master.get_last_log()
@@ -138,6 +144,15 @@ class Simultaneous(engine_lib.Engine):
         assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
         log_entry['next_action_spec'] = game_master.get_last_log()
 
+    # Validate all entity names from LLM to prevent KeyError
+    invalid_names = [
+        name for name in next_entity_names if name not in entities_by_name]
+    if invalid_names:
+      raise ValueError(
+          f'Game master returned invalid entity names: {invalid_names}. '
+          f'Valid options: {list(entities_by_name.keys())}'
+      )
+
     return (
         [entities_by_name[entity_name] for entity_name in next_entity_names],
         [action_spec_by_name[entity_name] for entity_name in next_entity_names],
@@ -151,9 +166,12 @@ class Simultaneous(engine_lib.Engine):
   ) -> None:
     """Resolve an event."""
     if verbose:
+      display_event = _BASE64_TRUNCATE_PATTERN.sub(
+          r'\1[IMAGE DATA]', putative_event
+      )
       print(
           termcolor.colored(
-              f'The suggested action or event to resolve was: {putative_event}',
+              f'The suggested action or event to resolve was: {display_event}',
               _PRINT_COLOR,
           )
       )
@@ -230,6 +248,8 @@ class Simultaneous(engine_lib.Engine):
       verbose: bool = False,
       log: list[Mapping[str, Any]] | None = None,
       checkpoint_callback: Callable[[int], None] | None = None,
+      step_controller=None,
+      step_callback=None,
   ):
     """Run a game loop."""
     if not game_masters:
@@ -242,6 +262,10 @@ class Simultaneous(engine_lib.Engine):
       premise = f'{EVENT_TAG} {premise}'
       game_master.observe(premise)
     while not self.terminate(game_master, verbose) and steps < max_steps:
+      if step_controller is not None:
+        if not step_controller.wait_for_step_permission():
+          break
+
       if log is not None and hasattr(game_master, 'get_last_log'):
         assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
         log_entry['terminate'] = game_master.get_last_log()
@@ -282,12 +306,13 @@ class Simultaneous(engine_lib.Engine):
           skip_actions: bool = False,
       ) -> str:
         """Make observation, get action and resolution for one entity."""
-        observation = self.make_observation(game_master, entity)
-        if log is not None and hasattr(game_master, 'get_last_log'):
-          assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
-          log_entry['make_observation'][
-              entity.name
-          ] = game_master.get_last_log()
+        with self._gm_log_lock:
+          observation = self.make_observation(game_master, entity)
+          if log is not None and hasattr(game_master, 'get_last_log'):
+            assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
+            log_entry['make_observation'][
+                entity.name
+            ] = game_master.get_last_log()
         # Only observe if the observation is not an empty or whitespace string
         if observation and observation.strip():
           if verbose:
@@ -316,9 +341,13 @@ class Simultaneous(engine_lib.Engine):
         else:
           action = f'{entity.name}: {raw_action}'
         if verbose:
+          display_action = _BASE64_TRUNCATE_PATTERN.sub(
+              r'\1[IMAGE DATA]', action
+          )
           print(
               termcolor.colored(
-                  f'Entity {entity.name} chose action: {action}', _PRINT_COLOR
+                  f'Entity {entity.name} chose action: {display_action}',
+                  _PRINT_COLOR,
               )
           )
 
@@ -338,11 +367,25 @@ class Simultaneous(engine_lib.Engine):
             _entity_act, entity, action_spec, skip_actions
         )
 
-      # Run entity actions concurrently
-      actions = concurrency.run_tasks(tasks)
+      # Run entity actions concurrently (fault-tolerant)
+      actions, errors = concurrency.run_tasks_in_background(tasks)
+      if errors:
+        for name, error in errors.items():
+          logging.warning('Entity %s failed to act: %s', name, error)
 
       if skip_actions:
         steps += 1
+        # Notify UI of step even when skipping action phase
+        if step_callback is not None:
+          step_data = step_controller_lib.StepData(
+              step=steps,
+              acting_entity='(setup)',
+              action='Skipping action phase',
+              entity_actions={},
+              entity_logs={},
+              game_master=game_master.name,
+          )
+          step_callback(step_data)
         continue
 
       resolve_input = '\n'.join(actions.values())
@@ -371,6 +414,17 @@ class Simultaneous(engine_lib.Engine):
         log_entry = _get_empty_log_entry()
       if checkpoint_callback is not None:
         checkpoint_callback(steps)
+
+      if step_callback is not None:
+        step_data = step_controller_lib.StepData(
+            step=steps,
+            acting_entity=','.join(actions.keys()),
+            action=resolve_input,
+            entity_actions=dict(actions),
+            entity_logs=entity_logs,
+            game_master=game_master.name,
+        )
+        step_callback(step_data)
 
   def _log(
       self,

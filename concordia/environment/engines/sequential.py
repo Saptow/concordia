@@ -18,6 +18,7 @@
 from collections.abc import Mapping, Sequence
 import functools
 import json
+import re
 from typing import Any, Callable
 
 from absl import logging
@@ -27,6 +28,7 @@ from concordia.components.game_master import next_acting as next_acting_componen
 from concordia.components.game_master import next_game_master as next_game_master_components
 from concordia.components.game_master import switch_act as switch_act_component
 from concordia.environment import engine as engine_lib
+from concordia.environment import step_controller as step_controller_lib
 from concordia.typing import entity as entity_lib
 from concordia.utils import concurrency
 import termcolor
@@ -43,6 +45,7 @@ DEFAULT_CALL_TO_NEXT_GAME_MASTER = (
     next_game_master_components.DEFAULT_CALL_TO_NEXT_GAME_MASTER)
 
 DEFAULT_ACT_COMPONENT_KEY = switch_act_component.DEFAULT_ACT_COMPONENT_KEY
+_BASE64_TRUNCATE_PATTERN = re.compile(r'(base64,)[A-Za-z0-9+/=]{100,}')
 
 PUTATIVE_EVENT_TAG = event_resolution_components.PUTATIVE_EVENT_TAG
 EVENT_TAG = event_resolution_components.EVENT_TAG
@@ -184,6 +187,14 @@ class Sequential(engine_lib.Engine):
       assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
       log_entry['next_action_spec'] = game_master.get_last_log()
     next_action_spec = engine_lib.action_spec_parser(next_action_spec_string)
+
+    # Validate entity name from LLM to prevent KeyError
+    if next_object_name not in entities_by_name:
+      raise ValueError(
+          f'Game master returned invalid entity name "{next_object_name}". '
+          f'Valid options: {list(entities_by_name.keys())}'
+      )
+
     return (entities_by_name[next_object_name], next_action_spec)
 
   def resolve(self,
@@ -191,6 +202,16 @@ class Sequential(engine_lib.Engine):
               putative_event: str,
               verbose: bool = False) -> None:
     """Resolve an event."""
+    if verbose:
+      display_event = _BASE64_TRUNCATE_PATTERN.sub(
+          r'\1[IMAGE DATA]', putative_event
+      )
+      print(
+          termcolor.colored(
+              f'The suggested action or event to resolve was: {display_event}',
+              _PRINT_COLOR,
+          )
+      )
     game_master.observe(observation=f'{PUTATIVE_EVENT_TAG} {putative_event}')
     result = game_master.act(
         action_spec=entity_lib.ActionSpec(
@@ -357,6 +378,10 @@ class Sequential(engine_lib.Engine):
       verbose: bool = False,
       log: list[Mapping[str, Any]] | None = None,
       checkpoint_callback: Callable[[int], None] | None = None,
+      step_controller: step_controller_lib.StepController | None = None,
+      step_callback: (
+          Callable[[step_controller_lib.StepData], None] | None
+      ) = None,
   ):
     """Run a game loop."""
     if not game_masters:
@@ -380,6 +405,10 @@ class Sequential(engine_lib.Engine):
       premise = f'{EVENT_TAG} {premise}'
       game_master.observe(premise)
     while not self.terminate(game_master, verbose) and steps < max_steps:
+      if step_controller is not None:
+        if not step_controller.wait_for_step_permission():
+          break
+
       if log is not None and hasattr(game_master, 'get_last_log'):
         assert hasattr(game_master, 'get_last_log')  # Assertion for pytype
         log_entry['terminate'] = game_master.get_last_log()
@@ -440,6 +469,17 @@ class Sequential(engine_lib.Engine):
           logging.debug('Calling checkpoint callback at step %s', steps)
           checkpoint_callback(steps)
         steps += 1
+        # Notify UI of step even when skipping action phase
+        if step_callback is not None:
+          step_data = step_controller_lib.StepData(
+              step=steps,
+              acting_entity='(setup)',
+              action='Skipping action phase',
+              entity_actions={},
+              entity_logs={},
+              game_master=game_master.name,
+          )
+          step_callback(step_data)
         continue
 
       if verbose:
@@ -460,9 +500,13 @@ class Sequential(engine_lib.Engine):
       else:
         action = f'{next_entity.name}: [ACTED] {action_payload}'
       if verbose:
-        display_action = self._format_action_for_display(action)
-        print(termcolor.colored(
-            display_action, _PRINT_COLOR))
+        display_action = _BASE64_TRUNCATE_PATTERN.sub(r'\1[IMAGE DATA]', action)
+        print(
+            termcolor.colored(
+                f'Entity {next_entity.name} chose action: {display_action}',
+                _PRINT_COLOR,
+            )
+        )
 
       self.resolve(game_master=game_master,
                    putative_event=action,
@@ -496,6 +540,27 @@ class Sequential(engine_lib.Engine):
 
       if checkpoint_callback is not None:
         checkpoint_callback(steps)
+
+      if step_callback is not None:
+        entity_actions = {}
+        entity_logs = {}
+        for entity in entities:
+          if hasattr(entity, 'get_last_log'):
+            last_log = entity.get_last_log()
+            entity_logs[entity.name] = dict(last_log)
+            if 'Value' in last_log:
+              entity_actions[entity.name] = str(last_log.get('Value', ''))
+        # Always include the acting entity's action (the raw_action from act())
+        entity_actions[next_entity.name] = action
+        step_data = step_controller_lib.StepData(
+            step=steps,
+            acting_entity=next_entity.name,
+            action=action,
+            entity_actions=entity_actions,
+            entity_logs=entity_logs,
+            game_master=game_master.name,
+        )
+        step_callback(step_data)
 
   def _log(
       self,

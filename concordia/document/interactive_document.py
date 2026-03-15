@@ -18,7 +18,6 @@
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from pydantic import BaseModel, RootModel
 import contextlib
-import random
 import re
 
 from concordia.document import document
@@ -292,7 +291,7 @@ class InteractiveDocument(document.Document):
               f'LLM generated only {len(candidates)} initial answers.'
           )
       candidates = [re.sub(r'^\d+\.\s*', '', line) for line in candidates]
-      response = random.choice(candidates)
+      response = self._rng.choice(candidates)
       response = truncate_string(response, terminators)
 
     else:

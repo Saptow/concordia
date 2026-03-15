@@ -33,7 +33,7 @@ with open('README.md') as f:
 
 setuptools.setup(
     name='gdm-concordia',
-    version='2.3.1',
+    version='2.4.0',
     license='Apache 2.0',
     license_files=['LICENSE'],
     url='https://github.com/google-deepmind/concordia',
@@ -77,6 +77,11 @@ setuptools.setup(
         'tenacity',
         'termcolor',
     ),
+    entry_points={
+        'console_scripts': [
+            'concordia-log=concordia.command_line_interface.concordia_log:main',
+        ],
+    },
     extras_require={
         'amazon': [
             # Used in contrib.language_models.amazon
@@ -96,8 +101,8 @@ setuptools.setup(
         ],
         'google': [
             # Used in concordia.contrib.language_models.google
-            'google-cloud-aiplatform',
-            'google-generativeai',
+            'google-genai',
+            'google-cloud-aiplatform',  # For custom endpoint models
         ],
         'huggingface': [
             # Used in concordia.contrib.language_models.huggingface

@@ -238,6 +238,8 @@ class Simulation(simulation_lib.Simulation):
       raw_log: list[Mapping[str, Any]] | None = None,
       get_state_callback: Callable[[dict[str, Any]], None] | None = None,
       checkpoint_path: str | None = None,
+      step_controller=None,
+      step_callback=None,
   ) -> structured_logging.SimulationLog:
     """Run the simulation.
 
@@ -252,6 +254,8 @@ class Simulation(simulation_lib.Simulation):
         entities and game masters.
       checkpoint_path: The path to save the checkpoints. If None, no checkpoints
         are saved.
+      step_controller: Optional step controller for step-by-step control.
+      step_callback: Optional callback called after each step completes.
 
     Returns:
       SimulationLog object with structured data. Use .to_html() for HTML output
@@ -294,6 +298,8 @@ class Simulation(simulation_lib.Simulation):
         verbose=True,
         log=raw_log,
         checkpoint_callback=checkpoint_callback,
+        step_controller=step_controller,
+        step_callback=step_callback,
     )
 
     # Build and return structured log
@@ -367,8 +373,8 @@ class Simulation(simulation_lib.Simulation):
       entity_state = entity.get_state()
       save_data = {
           "prefab_type": prefab_config.prefab,
-          "entity_params": prefab_config.params,
-          "components": entity_state,
+          "entity_params": self._make_json_serializable(prefab_config.params),
+          "components": self._make_json_serializable(entity_state),
           "component_info": self._extract_component_info(entity),
       }
       checkpoint_data["entities"][entity.name] = save_data
@@ -384,9 +390,9 @@ class Simulation(simulation_lib.Simulation):
       gm_state = gm.get_state()
       save_data = {
           "prefab_type": prefab_config.prefab,
-          "entity_params": prefab_config.params,
+          "entity_params": self._make_json_serializable(prefab_config.params),
           "role": self._entity_to_prefab_config[gm.name].role.name,
-          "components": gm_state,
+          "components": self._make_json_serializable(gm_state),
           "component_info": self._extract_component_info(gm),
       }
       checkpoint_data["game_masters"][gm.name] = save_data
@@ -463,11 +469,80 @@ class Simulation(simulation_lib.Simulation):
           try:
             raw_state = comp.get_state()
             comp_info["state"] = self._make_json_serializable(raw_state)
-          except Exception:  # pylint: disable=broad-exception-caught
+          except (TypeError, ValueError, AttributeError):
             comp_info["state"] = {}
+        if hasattr(comp, "get_dynamic_state"):
+          try:
+            dynamic = comp.get_dynamic_state()
+            comp_info["dynamic_state"] = self._make_json_serializable(dynamic)
+          except (TypeError, ValueError, AttributeError):
+            comp_info["dynamic_state"] = {}
         info["context_components"][comp_name] = comp_info
 
     return info
+
+  def set_component_dynamic_state(
+      self,
+      entity_name: str,
+      component_name: str,
+      key: str,
+      value: Any,
+  ) -> None:
+    """Set a dynamic state variable on a component.
+
+    This validates that the key is declared as dynamic by the component's
+    get_dynamic_state method, then applies the change by patching the
+    full state via get_state/set_state.
+
+    Args:
+      entity_name: The name of the entity owning the component.
+      component_name: The name of the context component to modify.
+      key: The state key to modify (must be in get_dynamic_state()).
+      value: The new value for the key.
+
+    Raises:
+      KeyError: If the entity, component, or key is not found.
+      ValueError: If the key is not declared as dynamic.
+    """
+    target_entity = None
+    for e in self.entities:
+      if e.name == entity_name:
+        target_entity = e
+        break
+    if target_entity is None:
+      for gm in self.game_masters:
+        if gm.name == entity_name:
+          target_entity = gm
+          break
+    if target_entity is None:
+      raise KeyError(f"Entity '{entity_name}' not found.")
+
+    if not isinstance(target_entity, entity_component.EntityWithComponents):
+      raise TypeError(f"Entity '{entity_name}' does not support components.")
+
+    try:
+      component = target_entity.get_component(component_name)
+    except KeyError as exc:
+      raise KeyError(
+          f"Component '{component_name}' not found on entity '{entity_name}'."
+      ) from exc
+
+    dynamic_state = component.get_dynamic_state()
+    if key not in dynamic_state:
+      raise ValueError(
+          f"Key '{key}' is not a dynamic state variable of component "
+          f"'{component_name}'. Dynamic keys: {list(dynamic_state.keys())}"
+      )
+
+    current_state = dict(component.get_state())
+    current_state[key] = value
+    component.set_state(current_state)
+    logging.info(
+        "Updated dynamic state: entity=%s, component=%s, key=%s",
+        entity_name,
+        component_name,
+        key,
+    )
 
   def save_checkpoint(self, step: int, checkpoint_path: str):
     """Saves the state of all entities at the current step."""
