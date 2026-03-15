@@ -266,7 +266,9 @@ class UpdateOpposingBeliefInfo(BaseModel):
     budget_info: Optional[UpdateOpposingBeliefInfoMetadata] = None
     trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
 
-class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
+class UncertainBuyer(
+    action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
+):
     """Component for probabilistic reasoning and uncertainty management in negotiations. (buyer side)"""
     _PLACEHOLDER_INFO_QUESTION_TOKENS = (
         'question text',
@@ -313,6 +315,7 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         self._memory_component_key = memory_component_key
         self._recent_memory_window = max(1, int(recent_memory_window))
         self._last_observation_hash: int | None = None
+        self._debug_trace: List[str] = []
 
         # Belief state tracking
         self._beliefs: Dict[str, BeliefDistribution | NormalInverseGamma] = {}
@@ -329,6 +332,60 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
     @classmethod
     def _format_interval(cls, interval: Tuple[float, float]) -> str:
         return f'{cls._format_money(interval[0])}-{cls._format_money(interval[1])}'
+
+    @staticmethod
+    def _format_observation_summary(
+        observation: str,
+        max_chars: int = 180,
+    ) -> str:
+        normalized = ' '.join(str(observation).split())
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[: max_chars - 3].rstrip() + '...'
+
+    def _append_debug_trace(self, message: str) -> None:
+        normalized = ' '.join(str(message).split()).strip()
+        if not normalized:
+            return
+        self._debug_trace.append(normalized)
+        self._debug_trace = self._debug_trace[-12:]
+
+    def _build_debug_chain_of_thought(self) -> List[str]:
+        own_reservation = self._beliefs['own_reservation']
+        counterpart_reservation = self._beliefs['counterpart_reservation']
+        lines = [
+            'Belief snapshot:',
+            (
+                f'- own_reservation.mean='
+                f'{self._format_money(own_reservation.get_expected_mean)}'
+            ),
+            (
+                f'- own_reservation.ci95='
+                f'{self._format_interval(own_reservation.get_confidence_interval())}'
+            ),
+            f'- own_reservation.confidence={own_reservation.confidence:.2f}',
+            (
+                f'- counterpart_reservation.mean='
+                f'{self._format_money(counterpart_reservation.get_expected_mean)}'
+            ),
+            (
+                f'- counterpart_reservation.ci95='
+                f'{self._format_interval(counterpart_reservation.get_confidence_interval())}'
+            ),
+            (
+                f'- counterpart_reservation.confidence='
+                f'{counterpart_reservation.confidence:.2f}'
+            ),
+            f'- info_budget={self._info_budget:.2f}',
+            f'- risk_tolerance={self._risk_tolerance:.2f}',
+            f'- scenario_outlook={self._format_scenario_summary()}',
+            'Recent uncertainty updates:',
+        ]
+        if self._debug_trace:
+            lines.extend(f'- {entry}' for entry in self._debug_trace)
+        else:
+            lines.append('- No uncertainty updates recorded yet.')
+        return lines
 
     def _format_scenario_summary(self) -> str:
         scenarios = self._generate_scenarios()
@@ -464,7 +521,14 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
             f'AverageBeliefConfidence={avg_confidence:.2f}',
             f'ScenarioOutlook={self._format_scenario_summary()}',
         ]
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._logging_channel({
+            'Key': self.get_pre_act_label(),
+            'Summary': 'Buyer uncertainty state',
+            'State': result,
+            'Chain of thought': self._build_debug_chain_of_thought(),
+        })
+        return result
 
     def pre_act(self, action_spec: entity_lib.ActionSpec) -> str:
         if self._emit_pre_act_context:
@@ -663,7 +727,7 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
             )
 
         return analysis
-    def _update_own_reservation_from_context(self, context: str):
+    def _update_own_reservation_from_context(self, context: str) -> str:
         # TODO: refine prompt to include more specific examples of the flat (what the LLM should look out for)
         """Update own reservation belief based on new context information."""
         prompt = f"""
@@ -686,15 +750,24 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         try:
             info_update = UpdateOwnBeliefInfo.model_validate_json(response)
         except ValidationError:
-            return
+            return 'Own reservation unchanged: model output was invalid.'
         if info_update.reservation_info:
+            old_mean = self._beliefs['own_reservation'].get_expected_mean
             self._beliefs['own_reservation'].update_with_evidence(
                 info_update.reservation_info.estimate,
                 info_update.reservation_info.confidence
             )
+            new_mean = self._beliefs['own_reservation'].get_expected_mean
+            return (
+                'Own reservation updated from '
+                f'{self._format_money(old_mean)} to {self._format_money(new_mean)} '
+                f'using estimate={self._format_money(info_update.reservation_info.estimate)} '
+                f'confidence={info_update.reservation_info.confidence:.2f}.'
+            )
+        return 'Own reservation unchanged: no reservation signal extracted.'
 
         
-    def _update_counterpart_reservation_from_context(self, context: str):
+    def _update_counterpart_reservation_from_context(self, context: str) -> str:
         """Update beliefs based on new context information."""
         # TODO: we are going to use the LLM as a black box to extract relevant info and give confidence estimates on whether the given price is driven
         # by market sentiments OR private valuations (e.g. urgency, relationship, etc). 
@@ -716,16 +789,29 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         try:
             info_update = UpdateOpposingBeliefInfo.model_validate_json(response)
         except ValidationError:
-            return
+            return 'Counterpart reservation unchanged: model output was invalid.'
         if info_update.budget_info:
+            old_mean = self._beliefs['counterpart_reservation'].get_expected_mean
             self._beliefs['counterpart_reservation'].update_with_evidence(
                 info_update.budget_info.estimate,
                 info_update.budget_info.confidence
+            )
+            new_mean = self._beliefs['counterpart_reservation'].get_expected_mean
+            return (
+                'Counterpart reservation updated from '
+                f'{self._format_money(old_mean)} to {self._format_money(new_mean)} '
+                f'using estimate={self._format_money(info_update.budget_info.estimate)} '
+                f'confidence={info_update.budget_info.confidence:.2f}.'
             )
         elif info_update.trust_info: # if there is no explicit budget info, we update our beliefs based on the trust level of the counterpart instead.
             self._beliefs['counterpart_reservation'].update_trust(
                 info_update.trust_info.trust_level
             )
+            return (
+                'Counterpart reservation confidence updated via trust signal '
+                f'trust_level={info_update.trust_info.trust_level:.2f}.'
+            )
+        return 'Counterpart reservation unchanged: no budget or trust signal extracted.'
 
     def _generate_scenarios(self) -> List[ScenarioAnalysis]:
         """
@@ -960,19 +1046,29 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         """Process incoming observation text to update beliefs."""
         observation_text = observation.strip()
         if not observation_text:
+            self._append_debug_trace('Skipped empty observation.')
             return ""
 
         observation_hash = hash(observation_text)
         if self._last_observation_hash == observation_hash:
+            self._append_debug_trace('Skipped duplicate observation.')
             return ""
         self._last_observation_hash = observation_hash
 
         actor = self._extract_observation_actor(observation_text)
         if actor and actor == self.get_entity().name:
+            self._append_debug_trace(
+                f'Ignored self-authored observation: {self._format_observation_summary(observation_text)}'
+            )
             return ""
 
-        self._update_own_reservation_from_context(observation)
-        self._update_counterpart_reservation_from_context(observation)
+        self._append_debug_trace(
+            f'Observation considered: {self._format_observation_summary(observation_text)}'
+        )
+        self._append_debug_trace(self._update_own_reservation_from_context(observation))
+        self._append_debug_trace(
+            self._update_counterpart_reservation_from_context(observation)
+        )
         return ""
 
     def get_state(self) -> Dict[str, Any]:

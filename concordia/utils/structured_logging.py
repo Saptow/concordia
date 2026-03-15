@@ -1166,14 +1166,15 @@ function renderEntityTimeline(entityName, containerId) {
     const parsedRound = roundInfo && roundInfo.round ? parseInt(roundInfo.round, 10) : NaN;
     const roundNumber = Number.isFinite(parsedRound) ? parsedRound : null;
     const roundKey = roundNumber !== null ? ('round_' + roundNumber) : ('step_' + entry.step);
-    if (!groupsByRound[roundKey]) {
-      groupsByRound[roundKey] = {
-        roundNumber: roundNumber,
-        pair: roundInfo && roundInfo.pair ? roundInfo.pair : '',
-        entries: [],
-      };
-    }
-    groupsByRound[roundKey].entries.push(entry);
+     if (!groupsByRound[roundKey]) {
+       groupsByRound[roundKey] = {
+         roundNumber: roundNumber,
+         weekNumber: entry.step,
+         pair: roundInfo && roundInfo.pair ? roundInfo.pair : '',
+         entries: [],
+       };
+     }
+     groupsByRound[roundKey].entries.push(entry);
     if (!groupsByRound[roundKey].pair && roundInfo && roundInfo.pair) {
       groupsByRound[roundKey].pair = roundInfo.pair;
     }
@@ -1192,13 +1193,13 @@ function renderEntityTimeline(entityName, containerId) {
 
   let html = '';
 
-  orderedGroups.forEach(group => {
-    let roundLabel = group.roundNumber !== null
-      ? ('Round ' + group.roundNumber)
-      : 'Unmapped Round';
-    if (group.pair) {
-      roundLabel += ' | Active Pair: ' + group.pair;
-    }
+   orderedGroups.forEach(group => {
+     let roundLabel = group.roundNumber !== null
+       ? ('Round ' + group.roundNumber)
+       : ('Week ' + group.weekNumber);
+     if (group.pair) {
+       roundLabel += ' | Active Pair: ' + group.pair;
+     }
     html += '<details class="entity-round-details" open>';
     html += '<summary><b>' + escapeHtml(roundLabel) + '</b></summary>';
 

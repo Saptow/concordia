@@ -73,6 +73,7 @@ class Entity(prefab_lib.Prefab):
         'ethical_constraints': DEFAULT_ETHICS,
         'modules': '', # e.g. uncertainty_buyer, uncertainty_seller
         'modules_config': '', # e.g. config parameters for the modules in JSON format
+        'negotiation_config': '', # e.g. config parameters for negotiation strategy and instructions in JSON format
         'extra_components': {},
     })
 
@@ -91,10 +92,19 @@ class Entity(prefab_lib.Prefab):
             Configured negotiation agent
         """
         # Extract parameters from params dict
+        negotiation_config = self.params.get('negotiation_config', {})
+        if not isinstance(negotiation_config, Mapping):
+            negotiation_config = {}
+
         agent_name = self.params.get('name', 'Negotiator')
         description = self.params.get('description', '')
-        reservation = float(self.params.get('reservation_value', '0.0'))
-        flat_listing_raw = self.params.get('flat_listing', '')
+        reservation = float(
+            negotiation_config.get(
+                'reservation_value',
+                negotiation_config.get('own_reservation_', '0.0'),
+            )
+        )
+        flat_listing_raw = negotiation_config.get('flat_listing', '')
         ethics = self.params.get('ethical_constraints', DEFAULT_ETHICS)
         # TODO: revise the ethical constraints based on HDB negotiation context
         try:
@@ -104,32 +114,19 @@ class Entity(prefab_lib.Prefab):
         except json.JSONDecodeError:
             flat_listing = {}
 
-        # Parse module configurations
-        modules_str = self.params.get('modules', '')
-        modules = [m.strip() for m in modules_str.strip('[]').split(',')] if modules_str else []
-
-        # Parse module configs from JSON
-        module_configs_str = self.params.get('modules_config', '')
-        try: 
-            module_configs = json.loads(module_configs_str) if module_configs_str else {}
-        except json.JSONDecodeError:
-            module_configs = {}
-        
         role_raw = str(self.params.get('role', '')).strip().lower()
-        if role_raw == common_schemas.RoleType.BUYER.value or 'uncertain_buyer' in modules:
+        if role_raw == common_schemas.RoleType.BUYER.value:
             role = common_schemas.RoleType.BUYER
-        elif role_raw == common_schemas.RoleType.SELLER.value or 'uncertain_seller' in modules:
+        elif role_raw == common_schemas.RoleType.SELLER.value:
             role = common_schemas.RoleType.SELLER
         else:
             logging.error('Unable to determine negotiator role for %s.', agent_name)
             role = common_schemas.RoleType.BUYER
         buyer_preferences = {}
         if role == common_schemas.RoleType.BUYER:
-            buyer_module_config = module_configs.get('uncertain_buyer', {})
-            if isinstance(buyer_module_config, dict):
-                raw_preferences = buyer_module_config.get('preferences', {})
-                if isinstance(raw_preferences, dict):
-                    buyer_preferences = raw_preferences
+            raw_preferences = self.params.get('preferences', {})
+            if isinstance(raw_preferences, dict):
+                buyer_preferences = raw_preferences
 
         # Create memory component
         memory = agent_components.memory.AssociativeMemory(
@@ -165,20 +162,19 @@ class Entity(prefab_lib.Prefab):
         strategy_key = 'NegotiationStrategy'
         if role == common_schemas.RoleType.BUYER:
             uncertain_key = 'uncertain_buyer'
-            uncertain_configs = module_configs.get('uncertain_buyer', {})
             uncertain_context = uncertain_buyer.UncertainBuyer(
                 model=model,
-                confidence =uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
-                risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5), # TODO: determine based on personality metadata
-                information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.5), # TODO: determine based on personality metadata
-                preferences=uncertain_configs.get('preferences', {}),
+                confidence=negotiation_config.get('confidence', 0.5), # TODO: determine based on personality metadata
+                risk_tolerance=negotiation_config.get('risk_tolerance', 0.5), # TODO: determine based on personality metadata
+                information_gathering_budget=negotiation_config.get('information_gathering_budget', 0.5), # TODO: determine based on personality metadata
+                preferences=negotiation_config.get('preferences', buyer_preferences),
                 flat_listing=flat_listing,
-                own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
-                own_reservation_std=uncertain_configs.get('own_reservation_std', 1000.0),
-                mu=uncertain_configs.get('cp_reservation_', 0.0),
-                lambda_=uncertain_configs.get('lambda_', 1.0),
-                a=uncertain_configs.get('a', 3.0),
-                b=uncertain_configs.get('b', 5000.0),
+                own_reservation_=negotiation_config.get('own_reservation_', 0.0),
+                own_reservation_std=negotiation_config.get('own_reservation_std', 1000.0),
+                mu=negotiation_config.get('cp_reservation_', 0.0),
+                lambda_=negotiation_config.get('lambda_', 1.0),
+                a=negotiation_config.get('a', 3.0),
+                b=negotiation_config.get('b', 5000.0),
                 emit_pre_act_context=False,
                 recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
             )
@@ -193,18 +189,17 @@ class Entity(prefab_lib.Prefab):
 
         elif role == common_schemas.RoleType.SELLER:
             uncertain_key = 'uncertain_seller'
-            uncertain_configs = module_configs.get('uncertain_seller', {})
             uncertain_context = uncertain_seller.UncertainSeller(
                 model=model,
-                confidence=uncertain_configs.get('confidence', 0.5), # TODO: determine based on personality metadata
-                risk_tolerance=uncertain_configs.get('risk_tolerance', 0.5),
+                confidence=negotiation_config.get('confidence', 0.5), # TODO: determine based on personality metadata
+                risk_tolerance=negotiation_config.get('risk_tolerance', 0.5),
                 flat_listing=flat_listing,
-                information_gathering_budget=uncertain_configs.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
-                own_reservation_=uncertain_configs.get('own_reservation_', 0.0),
-                mu=uncertain_configs.get('cp_reservation_', 0.0),
-                lambda_=uncertain_configs.get('lambda_', 1.0),
-                a=uncertain_configs.get('a', 3.0),
-                b=uncertain_configs.get('b', 5000.0),
+                information_gathering_budget=negotiation_config.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
+                own_reservation_=negotiation_config.get('own_reservation_', 0.0),
+                mu=negotiation_config.get('cp_reservation_', 0.0),
+                lambda_=negotiation_config.get('lambda_', 1.0),
+                a=negotiation_config.get('a', 3.0),
+                b=negotiation_config.get('b', 5000.0),
                 emit_pre_act_context=False,
                 recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
             )

@@ -408,6 +408,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             )
         return 'If gathering information, prioritize: ' + '; '.join(info_items[:2])
 
+    # TODO: simple deal outlook summary based on numeric fields, can be enhanced with more complex scenario analysis in the future.
     @staticmethod
     def _deal_outlook_summary(fields: Dict[str, str]) -> str:
         scenario_summary = fields.get('DealScenarios')
