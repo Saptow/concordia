@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 import dataclasses
-from pathlib import Path
 import random
 import re
 import numpy as np
 from typing import Any
+from absl import logging
 from concordia.hdb_simulation.models.schemas.listing.schema import PortalSearchResult
 from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
@@ -19,32 +19,20 @@ from concordia.hdb_simulation.models.schemas.common import Flat
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
 
 
-@dataclasses.dataclass
-class ListFlatResult:
-    listing_id: str
-    notifications: list[tuple[str, str]]
-
 
 @dataclasses.dataclass
 class SearchAndRequestResult:
     results: list[listing_schemas.PortalSearchResult]
     market_feedback: str
-    notifications: list[tuple[str, str]]
-
-
-@dataclasses.dataclass
-class ReviewRequestsResult:
-    match: listing_schemas.NegotiationMatch | None
-    notifications: list[tuple[str, str]]
-
 
 class ListingPortalRetriever:
     # TODO: implement embed_text for upserting 
     """
-    Listing Portal Helper Class
+    ListingPortalRetriever manages interactions with Qdrant vector database for ListingPortal. 
     This class helps with: 
     - Upserting listings
     - Deactivating listings
+    - Updating listing payloads without re-embedding (e.g. for price changes or active status updates)
     - Searching listings with BM25 and dense retrieval.
 
     """
@@ -58,17 +46,26 @@ class ListingPortalRetriever:
         self._dense_embedder=dense_embedding_model
         self._collection_name = collection_name
         self._client = client
-        self._records: dict[str, listing_schemas.ListingRecord] = {}
         self._rrf_weights = [1.0, 1.5]  # Relative Weights for BM25 and dense retrieval in RRF scoring
         # Ensure collection exists
         if not self._client.collection_exists(collection_name):
                 raise NotImplementedError("Qdrant collection setup is not implemented yet.")
         
-    @staticmethod
-    def _embed_text(self, text: str, prefix: str) -> np.ndarray:
+    def _embed_text(self, text: str, prefix: str = 'listing') -> np.ndarray:
             if self._dense_embedder is None:
                   raise ValueError("Dense embedder is not initialized.")
             return self._dense_embedder.encode(f"{prefix}: {text}")
+
+    @staticmethod
+    def _seller_filter(seller_id: str) -> qdrant_models.Filter:
+        return qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key='seller_id',
+                    match=qdrant_models.MatchValue(value=seller_id),
+                ),
+            ],
+        )
 
     def upsert_listing(self, record: listing_schemas.ListingRecord) -> None:
         """Insert or replace a seller listing in the portal index."""
@@ -79,21 +76,54 @@ class ListingPortalRetriever:
             points=[record.to_qdrant_point(embedding)],
         )
 
-    def deactivate_listing(self, listing_id: str) -> None:
-        record = self._records.get(listing_id)
-        if record is not None:
-                record.active = False
-        self._client.delete(
+    def update_listing_payload(self, record: listing_schemas.ListingRecord) -> None:
+        """Updates stored payload fields without recomputing embeddings."""
+        self._client.set_payload(
             collection_name=self._collection_name,
-            points_selector=qdrant_models.PointIdsList(points=[listing_id]),
-            )
+            payload=record.qdrant_payload(),
+            points=self._seller_filter(record.seller_id),
+        )
+
+    def get_listing_record(
+        self,
+        seller_id: str,
+    ) -> listing_schemas.ListingRecord | None:
+        """Fetches a seller listing record directly from Qdrant payload."""
+        points, _ = self._client.scroll(
+            collection_name=self._collection_name,
+            scroll_filter=self._seller_filter(seller_id),
+            with_payload=True,
+            with_vectors=False,
+            limit=1,
+        )
+        if not points:
+            return None
+        payload = points[0].payload or {}
+        return listing_schemas.ListingRecord(
+            listing_id=str(payload['listing_id']),
+            seller_id=str(payload['seller_id']),
+            seller_name=str(payload['seller_name']),
+            listing_price=float(payload['listing_price']),
+            listing_summary=str(payload['listing_summary']),
+            flat=Flat.model_validate(payload),
+            listed_week=int(payload['listed_week']),
+            active=bool(payload.get('active', False)),
+        )
+
+    def deactivate_listing(self, seller_id: str) -> None:
+        """Marks a seller listing inactive in Qdrant without re-embedding."""
+        self._client.set_payload(
+            collection_name=self._collection_name,
+            payload={'active': False},
+            points=self._seller_filter(seller_id),
+        )
 
     def search(
         self,
-        # TODO: construct a default query based on preferences, price range, etc
         query: str,
         *,
-        k: int = 5,
+        max_budget: float | None = None,
+        limit: int = 5,
     ) -> list[listing_schemas.PortalSearchResult]:
         """
         Search active listings using Qdrant vector retrieval plus local BM25.
@@ -109,50 +139,65 @@ class ListingPortalRetriever:
                         model="Qdrant/bm25",
                     ),
                     using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
-                    limit=2 * k,
+                    limit=2 * limit,
                 ),
                 qdrant_models.Prefetch(
                     query=query,
                     using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
-                    limit=2 * k,
+                    limit=2 * limit,
                 ),
             ],
             query=qdrant_models.RrfQuery(
                 rrf=qdrant_models.Rrf(weights=self._rrf_weights)  # BM25 weighted 2x over dense
             ),
-            limit=k,
+            limit=max(10, 3 * limit),
             with_payload=True,
         )
 
-        # Parse results and map back to PortalSearchResult
-        query_score_payloads = [[r.score, r.payload] for r in results.points]
 
-        # TODO: Make sure the payload is coherent
-        res = [PortalSearchResult(
-            listing_id=payload['listing_id'],
-            seller_id=payload['seller_id'],
-            seller_name=payload['seller_name'],
-            score=score,
-            listing_price=payload['listing_price'],
-            flat_type=payload['flat_type'],
-            town=payload['town'],
-            summary=payload['listing_summary'],
-        ) for score, payload in query_score_payloads]
+        filtered_results: list[PortalSearchResult] = []
+        for point in results.points:
+            payload = point.payload or {}
+            if not bool(payload.get('active', False)):
+                continue
+            listing_price = float(payload.get('listing_price', 0.0))
+            if max_budget is not None and listing_price > float(max_budget):
+                continue
+            filtered_results.append(
+                PortalSearchResult(
+                    listing_id=str(payload['listing_id']),
+                    seller_id=str(payload['seller_id']),
+                    seller_name=str(payload['seller_name']),
+                    score=float(point.score),
+                    listing_price=listing_price,
+                    flat_type=str(payload['flat_type']),
+                    town=str(payload['town']),
+                    summary=str(payload['listing_summary']),
+                )
+            )
+            if len(filtered_results) >= limit:
+                break
 
-        return res
+        return filtered_results
 
-
+  
 class ListingPortal:
     """
     Listing Portal for HDB.
     
-    This class has the following features:
-    - Allows sellers to list flats with details and prices.
-    - Allows buyers to search for listings based on preferences and budget.
-    - Facilitates negotiation requests from buyers to sellers based on listings.
-    - Tracks active listings, pending requests, and matched pairs.
-    - Provides market feedback to buyers based on search results.
-    - Supports exporting and restoring state for persistence.
+    This class implements the action space for both buyers and sellers within the listing portal workflow. 
+    The state of the players are also maintained within this class.
+    For buyers, 
+    1. They can search for listings based on their preferences and send negotiation requests to sellers. 
+    2. They can update their effective reservation price for their desired preferences to guide their search and request strategy in subsequent weeks.
+        - Based on market feedback from search results
+        - TODO: based on policy shocks injected throughout the simulation. 
+
+    For sellers, 
+    1. They can list their flats as active in the market. (to induct them into the market)
+    2. They review incoming negotiation requests and select one to start a bilateral negotiation, which temporarily deactivates the listing and other pending requests.
+    3. TODO: They can receive market feedback based on search results and policies to adjust their listing price throughout the simulation.
+    4. [NOT IMPLEMENTED FOR FYP] They can delist their listing to withdraw from the market. 
     """
 
     def __init__(
@@ -164,8 +209,7 @@ class ListingPortal:
         self.retriever = retriever or ListingPortalRetriever()
         self._rng = random.Random(random_seed)
 
-        self.listings: dict[str, listing_schemas.ListingRecord] = {}
-        self.requests_by_listing: dict[str, list[listing_schemas.NegotiationRequest]] = {}
+        self.requests_by_seller: dict[str, list[listing_schemas.NegotiationRequest]] = {}
         self.search_results_by_buyer: dict[str, list[listing_schemas.PortalSearchResult]] = {}
         self.private_buyer_market_states: dict[str, listing_schemas.BuyerMarketBeliefState] = {}
         self.market_feedback_by_buyer: dict[str, str] = {}
@@ -187,21 +231,60 @@ class ListingPortal:
     def _match_id(buyer_id: str, seller_id: str, week: int) -> str:
         return f'match::{buyer_id}::{seller_id}::{week}'
 
+    # Shared portal state helpers.
     def is_seller_listed(self, seller_id: str) -> bool:
-        listing = self.listings.get(self.listing_id_for_seller(seller_id))
+        listing = self.retriever.get_listing_record(seller_id)
         return bool(listing and listing.active)
 
     def is_player_closed(self, player_id: str) -> bool:
         return player_id in self.closed_buyers or player_id in self.closed_sellers
 
     def pending_request_count(self, seller_id: str) -> int:
-        listing_id = self.listing_id_for_seller(seller_id)
-        requests = self.requests_by_listing.get(listing_id, [])
+        requests = self.requests_by_seller.get(seller_id, [])
         return sum(
             1
             for request in requests
             if request.buyer_id not in self.closed_buyers
         )
+
+    def get_listing_record(
+        self,
+        seller_id: str,
+    ) -> listing_schemas.ListingRecord | None:
+        return self.retriever.get_listing_record(seller_id)
+
+    # Buyer-side helpers and actions.
+    def has_buyer_negotiated_with_seller(
+        self,
+        buyer_id: str,
+        seller_id: str,
+    ) -> bool:
+        """Returns whether the buyer and seller have previously entered negotiation."""
+        normalized_buyer_id = str(buyer_id).strip()
+        normalized_seller_id = str(seller_id).strip()
+        if not normalized_buyer_id or not normalized_seller_id:
+            return False
+        return any(
+            match.buyer_id == normalized_buyer_id
+            and match.seller_id == normalized_seller_id
+            for match in self.matched_pairs
+        )
+
+    def _top_valid_listing_ids_for_buyer(
+        self,
+        buyer: listing_schemas.PortalBuyer,
+        results: Sequence[listing_schemas.PortalSearchResult],
+    ) -> list[str]:
+        """Returns the top-scoring valid listing for the buyer, if any."""
+        buyer_id = str(buyer.id).strip()
+        max_budget = float(buyer.budget.max_price)
+        for result in results:
+            if result.listing_price > max_budget or result.score <= 0.0:
+                continue
+            if self.has_buyer_negotiated_with_seller(buyer_id, result.seller_id):
+                continue
+            return [result.listing_id]
+        return []
 
     def _buyer_market_state(
         self,
@@ -238,45 +321,33 @@ class ListingPortal:
         ).strip()
 
     @staticmethod
-    def _format_results_for_notification(
-        results: Sequence[listing_schemas.PortalSearchResult],
-    ) -> str:
-        if not results:
-            return 'No matching listings were found this week.'
-        lines = []
-        for result in results[:3]:
-            lines.append(
-                f"- {result.listing_id}: {result.flat_type} in {result.town}, "
-                f"SGD {result.listing_price:.0f}, score={result.score:.2f}"
-            )
-        return '\n'.join(lines)
-
-    @staticmethod
     def _market_feedback(
         effective_reservation_price: float,
         results: Sequence[listing_schemas.PortalSearchResult],
     ) -> str:
-        if not results:
-            return (
-                'Current portal search suggests supply is thin for your preferences. '
-                'Broaden town or flat-type filters if urgency rises.'
-            )
+        # TODO: implement market feedback generation logic for belief updating. 
+        # if not results:
+        #     return (
+        #         'Current portal search suggests supply is thin for your preferences. '
+        #         'Broaden town or flat-type filters if urgency rises.'
+        #     )
 
-        prices = [float(result.listing_price) for result in results]
-        avg_price = sum(prices) / len(prices)
-        min_price = min(prices)
-        max_price = max(prices)
-        if avg_price <= effective_reservation_price:
-            affordability = 'Most matching listings remain within your upper budget bound.'
-        else:
-            affordability = (
-                'Most matching listings are above your upper budget bound, so valuation '
-                'pressure is increasing.'
-            )
-        return (
-            f"Observed portal valuation band this week: SGD {min_price:.0f} to "
-            f"SGD {max_price:.0f}, average SGD {avg_price:.0f}. {affordability}"
-        )
+        # prices = [float(result.listing_price) for result in results]
+        # avg_price = sum(prices) / len(prices)
+        # min_price = min(prices)
+        # max_price = max(prices)
+        # if avg_price <= effective_reservation_price:
+        #     affordability = 'Most matching listings remain within your upper budget bound.'
+        # else:
+        #     affordability = (
+        #         'Most matching listings are above your upper budget bound, so valuation '
+        #         'pressure is increasing.'
+        #     )
+        # return (
+        #     f"Observed portal valuation band this week: SGD {min_price:.0f} to "
+        #     f"SGD {max_price:.0f}, average SGD {avg_price:.0f}. {affordability}"
+        # )
+        return "Market feedback is not implemented yet."
 
     def _update_buyer_market_state(
         self,
@@ -285,172 +356,79 @@ class ListingPortal:
         feedback: str,
     ) -> listing_schemas.BuyerMarketBeliefState:
         state = self._buyer_market_state(buyer)
-        state.latest_market_feedback = feedback
-        state.feedback_history.append(feedback)
+        # TODO: implement robust market belief updating logic based on search results and feedback.
+        # state.latest_market_feedback = feedback
+        # state.feedback_history.append(feedback)
 
-        if not results:
-            return state
+        # if not results:
+        #     return state
 
-        prices = [float(result.listing_price) for result in results]
-        observed_min_price = min(prices)
-        observed_avg_price = sum(prices) / len(prices)
-        observed_max_price = max(prices)
+        # prices = [float(result.listing_price) for result in results]
+        # observed_min_price = min(prices)
+        # observed_avg_price = sum(prices) / len(prices)
+        # observed_max_price = max(prices)
 
-        state.latest_observed_min_price = observed_min_price
-        state.latest_observed_avg_price = observed_avg_price
-        state.latest_observed_max_price = observed_max_price
+        # state.latest_observed_min_price = observed_min_price
+        # state.latest_observed_avg_price = observed_avg_price
+        # state.latest_observed_max_price = observed_max_price
 
-        current_effective = float(state.effective_reservation_price)
-        target_price = observed_avg_price
-        learning_rate = 0.35
-        upward_cap = max(float(buyer.budget.max_price), current_effective) * 1.25
-        updated_effective = current_effective + (
-            learning_rate * (target_price - current_effective)
-        )
-        state.effective_reservation_price = max(
-            float(buyer.budget.min_price),
-            min(updated_effective, upward_cap),
-        )
+        # current_effective = float(state.effective_reservation_price)
+        # target_price = observed_avg_price
+        # learning_rate = 0.35
+        # upward_cap = max(float(buyer.budget.max_price), current_effective) * 1.25
+        # updated_effective = current_effective + (
+        #     learning_rate * (target_price - current_effective)
+        # )
+        # state.effective_reservation_price = max(
+        #     float(buyer.budget.min_price),
+        #     min(updated_effective, upward_cap),
+        # )
         return state
-
-    def reopen_buyer(self, buyer_id: str) -> None:
-        self.closed_buyers.discard(buyer_id)
-
-    def reopen_seller(self, seller_id: str) -> None:
-        self.closed_sellers.discard(seller_id)
-
-    def reopen_after_failed_negotiation(
-        self,
-        *,
-        buyer_id: str,
-        seller: listing_schemas.PortalSeller,
-        week: int,
-        relist_price: float | None = None,
-        listing_summary: str | None = None,
-        clear_stale_requests: bool = True,
-    ) -> ListFlatResult:
-        self.reopen_buyer(buyer_id)
-        self.reopen_seller(seller.id)
-        listing_id = self.listing_id_for_seller(seller.id)
-        record = self.listings.get(listing_id)
-        if record is None:
-            return self.list_flat(
-                seller,
-                listing_price=relist_price or seller.expectations.max_price,
-                listing_summary=listing_summary or seller.flat.description,
-                week=week,
-            )
-
-        if clear_stale_requests:
-            self.requests_by_listing[listing_id] = []
-        record.active = True
-        record.listed_week = week
-        if relist_price is not None:
-            record.listing_price = float(relist_price)
-        if listing_summary is not None:
-            record.listing_summary = listing_summary.strip() or record.listing_summary
-        self.retriever.upsert_listing(record)
-        return ListFlatResult(
-            listing_id=listing_id,
-            notifications=[
-                (
-                    seller.name,
-                    (
-                        f"[portal] Week {week}: Your listing {listing_id} has been "
-                        'reactivated after a failed negotiation.'
-                    ),
-                ),
-            ],
-        )
-
-    def list_flat(
-        self,
-        seller: listing_schemas.PortalSeller,
-        *,
-        listing_price: float,
-        listing_summary: str,
-        week: int,
-    ) -> ListFlatResult:
-        seller_id = seller.id
-        listing_id = self.listing_id_for_seller(seller_id)
-        record = listing_schemas.ListingRecord(
-            listing_id=listing_id,
-            seller_id=seller_id,
-            seller_name=seller.name,
-            listing_price=float(listing_price),
-            listing_summary=listing_summary.strip() or seller.flat.description,
-            flat=seller.flat,
-            listed_week=week,
-        )
-        self.listings[listing_id] = record
-        self.requests_by_listing.setdefault(listing_id, [])
-        self.retriever.upsert_listing(record)
-        return ListFlatResult(
-            listing_id=listing_id,
-            notifications=[
-                (
-                    seller.name,
-                    (
-                        f"[portal] Week {week}: Your flat is now listed as "
-                        f"{listing_id} at SGD {record.listing_price:.0f}."
-                    ),
-                ),
-            ],
-        )
 
     def search_and_request(
         self,
         buyer: listing_schemas.PortalBuyer,
         *,
-        search_query: str,
-        requested_listing_ids: Sequence[str],
-        market_valuation_notes: str,
         week: int,
-    ) -> SearchAndRequestResult:
-        buyer_id = buyer.id
-        effective_reservation_price = self.effective_reservation_price_for_buyer(buyer)
-        effective_query = self._derive_query_from_preferences(buyer, search_query)
+        ) -> SearchAndRequestResult:
+        """
+        Buyer method to search for listings and send negotiation requests to sellers.
+         - Search results are based on the buyer's preferences and effective reservation price.
+        """
+        max_budget = float(buyer.budget.max_price)
+        effective_query = self._derive_query_from_preferences(buyer, '')
         results = self.retriever.search(
             effective_query,
-            preferred_flat_types=buyer.preferences.flat_type,
-            preferred_towns=buyer.preferences.towns,
-            max_budget=effective_reservation_price,
-            limit=5,
+            max_budget=max_budget,
+            limit=10,  # TODO: revise this as needed
         )
-        self.search_results_by_buyer[buyer_id] = results
-        feedback = self._market_feedback(effective_reservation_price, results)
+        feedback = self._market_feedback(max_budget, results)
+        requested_listing_ids = self._top_valid_listing_ids_for_buyer(
+            buyer,
+            results,
+        )
+        buyer_id = buyer.id
+        self.search_results_by_buyer[buyer_id] = list(results)
         self._update_buyer_market_state(buyer, results, feedback)
         self.market_feedback_by_buyer[buyer_id] = feedback
-        notifications = [
-            (
-                buyer.name,
-                (
-                    f"[portal] Week {week}: Search results for "
-                    f"\"{effective_query}\".\n"
-                    f"{self._format_results_for_notification(results)}\n"
-                    f"{feedback}"
-                ),
-            ),
-        ]
 
-        valid_listing_ids = {
-            result.listing_id for result in results
-        } | {
-            listing_id
-            for listing_id, record in self.listings.items()
-            if record.active
+        results_by_listing_id = {
+            result.listing_id: result for result in results
         }
 
         for listing_id in requested_listing_ids:
-            if listing_id not in valid_listing_ids:
+            result = results_by_listing_id.get(listing_id)
+            if result is None:
                 continue
-            listing = self.listings.get(listing_id)
+            seller_id = result.seller_id
+            listing = self.retriever.get_listing_record(seller_id)
             if listing is None or not listing.active:
                 continue
-            seller_id = listing.seller_id
             if seller_id in self.closed_sellers:
                 continue
-            existing_requests = self.requests_by_listing.setdefault(listing_id, [])
+            if self.has_buyer_negotiated_with_seller(buyer_id, seller_id):
+                continue
+            existing_requests = self.requests_by_seller.setdefault(seller_id, [])
             already_requested = any(
                 request.buyer_id == buyer_id
                 and request.buyer_id not in self.closed_buyers
@@ -465,77 +443,62 @@ class ListingPortal:
                 listing_id=listing_id,
                 seller_id=seller_id,
                 week_submitted=week,
-                message=market_valuation_notes.strip(),
-                market_valuation_notes=market_valuation_notes.strip(),
+                message='',
+                market_valuation_notes='',
             )
             existing_requests.append(request)
-            notifications.append((
-                listing.seller_name,
-                (
-                    f"[portal] Week {week}: New negotiation request on {listing_id} "
-                    f"from {buyer.name}. Total open requests: "
-                    f"{self.pending_request_count(seller_id)}."
-                ),
-            ))
-            notifications.append((
-                buyer.name,
-                (
-                    f"[portal] Week {week}: Your request for {listing_id} has been "
-                    f"sent to {listing.seller_name}."
-                ),
-            ))
         return SearchAndRequestResult(
-            results=results,
+            results=list(results),
             market_feedback=feedback,
-            notifications=notifications,
         )
+
+    # Seller-side actions.
+    def list_flat(
+        self,
+        seller: listing_schemas.PortalSeller,
+        *,
+        week: int,
+        listing_price = None,
+    ) -> str:
+        seller_id = seller.id
+        listing_id = self.listing_id_for_seller(seller_id)
+        record = self.retriever.get_listing_record(seller_id)
+        if record is None:
+            logging.warning(
+                'Skipping listing activation for seller %s because listing %s was not preloaded.',
+                seller_id,
+                listing_id,
+            )
+            return listing_id
+        if listing_price is not None:
+            record.listing_price = float(listing_price)
+        record.active = True
+        self.requests_by_seller.setdefault(seller_id, [])
+        self.retriever.update_listing_payload(record)
+        return listing_id
 
     def review_requests_and_start_negotiation(
         self,
         seller: listing_schemas.PortalSeller,
-        buyer_registry: Mapping[str, listing_schemas.PortalBuyer],
         *,
         week: int,
-    ) -> ReviewRequestsResult:
+    ) -> listing_schemas.NegotiationMatch | None:
         seller_id = seller.id
         listing_id = self.listing_id_for_seller(seller_id)
-        listing = self.listings.get(listing_id)
-        if listing is None or not listing.active:
-            return ReviewRequestsResult(
-                match=None,
-                notifications=[
-                    (
-                        seller.name,
-                        f'[portal] Week {week}: Your flat is not currently listed.',
-                    ),
-                ],
-            )
 
         open_requests = [
             request
-            for request in self.requests_by_listing.get(listing_id, [])
+            for request in self.requests_by_seller.get(seller_id, [])
             if request.buyer_id not in self.closed_buyers
         ]
         if not open_requests:
-            return ReviewRequestsResult(
-                match=None,
-                notifications=[
-                    (
-                        seller.name,
-                        (
-                            f"[portal] Week {week}: No open requests yet for "
-                            f"{listing_id}. Your flat remains listed."
-                        ),
-                    ),
-                ],
-            )
+            return None
 
-        chosen_request = self._rng.choice(open_requests)
-        buyer = buyer_registry[chosen_request.buyer_id]
+        chosen_request = self._rng.choice(open_requests) # For now, randomly select a request to review.
         match = listing_schemas.NegotiationMatch(
             match_id=self._match_id(chosen_request.buyer_id, seller_id, week),
             buyer_id=chosen_request.buyer_id,
-            buyer_name=buyer.name,
+            buyer_name=chosen_request.buyer_name,
             seller_id=seller_id,
             seller_name=seller.name,
             listing_id=listing_id,
@@ -544,46 +507,16 @@ class ListingPortal:
         self.matched_pairs.append(match)
         self.closed_buyers.add(chosen_request.buyer_id)
         self.closed_sellers.add(seller_id)
-        listing.active = False
-        self.retriever.deactivate_listing(listing_id)
-        return ReviewRequestsResult(
-            match=match,
-            notifications=[
-                (
-                    seller.name,
-                    (
-                        f"[portal] Week {week}: A negotiation handoff has started "
-                        f"with {buyer.name} for {listing_id}."
-                    ),
-                ),
-                (
-                    buyer.name,
-                    (
-                        f"[portal] Week {week}: {seller.name} accepted your "
-                        f"portal request. Bilateral negotiation is now open for "
-                        f"{listing_id}."
-                    ),
-                ),
-            ],
-        )
+        self.requests_by_seller[seller_id] = []
+        self.retriever.deactivate_listing(seller_id)
+        return match
 
+    # Persistence helpers.
     def export_state(self) -> dict[str, Any]:
         return {
-            'listings': {
-                listing_id: {
-                    'seller_id': record.seller_id,
-                    'seller_name': record.seller_name,
-                    'listing_price': record.listing_price,
-                    'listing_summary': record.listing_summary,
-                    'flat': record.flat.model_dump(),
-                    'listed_week': record.listed_week,
-                    'active': int(record.active),
-                }
-                for listing_id, record in self.listings.items()
-            },
-            'requests_by_listing': {
-                listing_id: [request.model_dump() for request in requests]
-                for listing_id, requests in self.requests_by_listing.items()
+            'requests_by_seller': {
+                seller_id: [request.model_dump() for request in requests]
+                for seller_id, requests in self.requests_by_seller.items()
             },
             'search_results_by_buyer': {
                 buyer_id: [result.model_dump() for result in results]
@@ -611,30 +544,13 @@ class ListingPortal:
             retriever=retriever,
             random_seed=random_seed,
         )
-        for listing_id, payload in dict(state.get('listings', {})).items():
-            record = listing_schemas.ListingRecord(
-                listing_id=str(listing_id),
-                seller_id=str(payload['seller_id']),
-                seller_name=str(payload['seller_name']),
-                listing_price=float(payload['listing_price']),
-                listing_summary=str(payload['listing_summary']),
-                flat=Flat.model_validate(payload['flat']),
-                listed_week=int(payload['listed_week']),
-                active=bool(payload.get('active', 1)),
-            )
-            restored.listings[listing_id] = record
-            restored.requests_by_listing.setdefault(listing_id, [])
-            restored.retriever.upsert_listing(record)
-            if not record.active:
-                restored.retriever.deactivate_listing(listing_id)
-
-        restored.requests_by_listing = {
-            listing_id: [
+        restored.requests_by_seller = {
+            seller_id: [
                 listing_schemas.NegotiationRequest.model_validate(request)
                 for request in requests
             ]
-            for listing_id, requests in dict(
-                state.get('requests_by_listing', {})
+            for seller_id, requests in dict(
+                state.get('requests_by_seller', {})
             ).items()
         }
         restored.search_results_by_buyer = {

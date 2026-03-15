@@ -1,36 +1,24 @@
-# Copyright 2025 DeepMind Technologies Limited.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""Negotiation prefabs and HDB market modules."""
 
-"""Negotiation game master prefab and components."""
-
+from . import components
+from . import hdb_coordinator_gm
 from . import negotiation
-from . import hdb_negotiation
-from . import hdb_listing_portal
+from .components import hdb_listing
+from .components import hdb_negotiation
 
-# Export the main negotiation game master
 NegotiationGameMaster = negotiation.NegotiationGameMaster
-HDBNegotiationGameMaster = hdb_negotiation.GameMaster
-HDBListingPortalGameMaster = hdb_listing_portal.GameMaster
+CoordinatorGameMaster = hdb_coordinator_gm.GameMaster
+ListingModule = hdb_listing.ListingModule
+NegotiationModule = hdb_negotiation.NegotiationModule
 
 __all__ = [
-    # Modules
+    'components',
     'negotiation',
+    'hdb_coordinator_gm',
+    'hdb_listing',
     'hdb_negotiation',
-    'hdb_listing_portal',
-
-    # Prefabs
     'NegotiationGameMaster',
-    'HDBNegotiationGameMaster',
-    'HDBListingPortalGameMaster',
+    'CoordinatorGameMaster',
+    'ListingModule',
+    'NegotiationModule',
 ]

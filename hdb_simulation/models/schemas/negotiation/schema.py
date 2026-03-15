@@ -1,17 +1,55 @@
 """Negotiation-specific schemas for the HDB simulation."""
 
 from collections.abc import Sequence
-from typing import Annotated, Literal, Union
+from enum import StrEnum
+from typing import Annotated, Literal, Union, Any, Optional
 
-from pydantic import Field, RootModel
+from pydantic import Field, RootModel, BaseModel 
 
 from concordia.hdb_simulation.models.schemas.common import (
     ActionReasoningFields,
+    BaseBuyer,
+    BaseSeller,
     RoleType,
     VerbalExplanationFields,
 )
 
 
+# Negotiation Entity Schemas
+class NegotiationBuyer(BaseBuyer):
+    negotiation_config: Optional[dict[str, Any]]= None
+'''
+Example schema for negotiation_config is:
+- information_budget (0-1): int = Field(..., description='Proportion of time budget buyer is willing to spend on information gathering.')
+- own_reservation_: int = Field(..., gt=0, description='The buyer\'s own reservation price for the property.')
+- own_reservation_std: int = Field(..., ge=0, description='The standard deviation representing uncertainty in the buyer\'s reservation price.')
+- cp_reservation_: int = Field(..., gt=0, description='The buyer\'s estimate of the seller\'s reservation price for the property.')
+- lambda_: int = Field(..., ge=0, description='Controls how tightly mean of cp_resservation around the prior (which is the listing price). Higher lambda means tighter around the prior.')
+- a: int = Field(..., ge=0, description='Can be interpreted as number of pseudo-observations that the buyer has of seller\'s reservation price.')
+- b: int = Field(..., ge=0, description='Represents prior scale for uncertainty in the buyer\'s estimate of the seller\'s reservation price. Higher b means higher uncertainty.')
+'''
+
+class NegotiationSeller(BaseSeller):
+    negotiation_config: Optional[dict[str, Any]]= None
+
+'''
+Example schema for negotiation_config is:
+- information_budget (0-1): int = Field(..., description='Proportion of time budget seller is willing to spend on information gathering.')
+- own_reservation_: int = Field(..., gt=0, description='The seller\'s own reservation price for the property.')
+- own_reservation_std: int = Field(..., ge=0, description='The standard deviation representing uncertainty in the seller\'s reservation price.')
+- cp_reservation_: int = Field(..., gt=0, description='The seller\'s estimate of the buyer\'s reservation price for the property.')
+- lambda_: int = Field(..., ge=0, description='Controls how tightly mean of cp_resservation around the prior (which is the listing price). Higher lambda means tighter around the prior.')
+- a: int = Field(..., ge=0, description='Can be interpreted as number of pseudo-observations that the seller has of buyer\'s reservation price.')
+- b: int = Field(..., ge=0, description='Represents prior scale for uncertainty in the seller\'s estimate of the buyer\'s reservation price. Higher b means higher uncertainty.')
+'''
+
+# Negotiation outcome schema
+class NegotiationOutcome(StrEnum):
+    SUCCESS = 'SUCCESS'
+    CLOSED = 'CLOSED'
+    CLOSED_WITHOUT_SUCCESS = 'CLOSED_WITHOUT_SUCCESS'
+
+# Action Schemas
 class MakeOffer(VerbalExplanationFields):
     type: Annotated[
         Literal['MAKE_OFFER'],

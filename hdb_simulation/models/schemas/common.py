@@ -58,18 +58,6 @@ class FlatType(StrEnum):
     FIVE_ROOM = '5-Room'
     EXECUTIVE = 'Executive'
 
-class BaseBuyer(BaseModel):
-    id: str
-    name: str
-    role: RoleType = Field(default=RoleType.BUYER, description='Role of the entity.')
-
-
-class BaseSeller(BaseModel):
-    id: str
-    name: str
-    role: RoleType = Field(default=RoleType.SELLER, description='Role of the entity.')
-
-
 class Flat(BaseModel):
     flat_type: FlatType
     address: str
@@ -87,7 +75,6 @@ class Flat(BaseModel):
     floor_area_sqm: float
     nearby_amenities: Optional[List[str]] = None
 
-
 class BuyerBudgetRange(BaseModel):
     min_price: float = Field(ge=0.0)
     max_price: float = Field(ge=0.0)
@@ -102,3 +89,27 @@ class BuyerPreferenceProfile(BaseModel):
     flat_type: List[str] = Field(default_factory=list)
     towns: List[str] = Field(default_factory=list)
     features: str = ''
+
+class BaseBuyer(BaseModel):
+    id: str
+    name: str
+    role: RoleType = Field(default=RoleType.BUYER, description='Role of the entity.')
+    description: Optional[str] = Field(default=None, description='Optional free-text description of the buyer.')
+    # Buyer-specific
+    preferences: BuyerPreferenceProfile
+    budget: BuyerBudgetRange
+
+
+
+class BaseSeller(BaseModel):
+    id: str
+    name: str
+    role: RoleType = Field(default=RoleType.SELLER, description='Role of the entity.')
+    description: Optional[str] = Field(default=None, description='Optional free-text description of the seller.')
+
+    # Seller-specific
+    flat: Flat
+    expectations: SellerExpectationRange
+
+
+

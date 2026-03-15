@@ -1,157 +1,22 @@
 """Listing-specific schemas for the HDB simulation."""
 
-from collections.abc import Sequence
-from typing import Annotated, Literal, Optional
+from typing import Optional
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field
 
 from concordia.hdb_simulation.models.schemas.common import (
     BaseBuyer,
     BaseSeller,
-    BuyerBudgetRange,
-    BuyerPreferenceProfile,
-    Flat,
     RoleType,
-    SellerExpectationRange,
 )
 
-
-class SearchAndRequestNegotiation(BaseModel):
-    type: Annotated[
-        Literal['SEARCH_AND_REQUEST_NEGOTIATION'],
-        Field(
-            description=(
-                'Search the centralized listing portal, update your market view, '
-                'and request negotiations with suitable listings.'
-            )
-        ),
-    ]
-    search_query: str = Field(..., description='Natural-language query sent to the listing portal.')
-    requested_listing_ids: list[str] = Field(
-        default_factory=list,
-        description='Listing IDs that the buyer wants to request negotiations with this week.',
-    )
-    market_valuation_notes: str = Field(..., description='Summary of the market insight learned this week.')
-
-
-class ListFlatOnPortal(BaseModel):
-    type: Annotated[
-        Literal['LIST_FLAT_ON_PORTAL'],
-        Field(description="Publish the seller's flat on the centralized portal."),
-    ]
-    listing_price: int = Field(..., gt=0, description='Initial asking price for the flat in SGD.')
-    listing_summary: str = Field(..., description='Short listing summary to accompany the flat metadata.')
-
-
-class ReviewRequestsAndStartNegotiation(BaseModel):
-    type: Annotated[
-        Literal['REVIEW_REQUESTS_AND_START_NEGOTIATION'],
-        Field(
-            description=(
-                'Review all requests submitted to the flat so far. If any exist, '
-                'the portal will uniformly sample one request to begin negotiation.'
-            )
-        ),
-    ]
-    seller_response: str = Field(..., description='Short note explaining the seller decision for this week.')
-
-
-ListingBuyerAction = Annotated[
-    SearchAndRequestNegotiation,
-    Field(discriminator='type'),
-]
-ListingSellerUnlistedAction = Annotated[
-    ListFlatOnPortal,
-    Field(discriminator='type'),
-]
-ListingSellerListedAction = Annotated[
-    ReviewRequestsAndStartNegotiation,
-    Field(discriminator='type'),
-]
-
-
-class ListingBuyerActions(RootModel[ListingBuyerAction]):
-    pass
-
-
-class ListingSellerUnlistedActions(RootModel[ListingSellerUnlistedAction]):
-    pass
-
-
-class ListingSellerListedActions(RootModel[ListingSellerListedAction]):
-    pass
-
-
-LISTING_BUYER_ACTIONS = ('SEARCH_AND_REQUEST_NEGOTIATION',)
-LISTING_SELLER_UNLISTED_ACTIONS = ('LIST_FLAT_ON_PORTAL',)
-LISTING_SELLER_LISTED_ACTIONS = ('REVIEW_REQUESTS_AND_START_NEGOTIATION',)
-
-LISTING_ACTION_TYPE_DESCRIPTIONS: dict[str, str] = {
-    'SEARCH_AND_REQUEST_NEGOTIATION': (
-        'Search the portal, learn the market valuation of matching flats, and '
-        'request negotiations with suitable listings.'
-    ),
-    'LIST_FLAT_ON_PORTAL': 'Publish the seller flat on the centralized portal.',
-    'REVIEW_REQUESTS_AND_START_NEGOTIATION': (
-        'Review all accumulated requests on the seller listing and move one '
-        'uniformly sampled request into negotiation when available.'
-    ),
-}
-
-
-def format_action_type_descriptions(action_types: Sequence[str]) -> str:
-    lines = []
-    for action_type in action_types:
-        key = str(action_type).strip().upper()
-        if not key:
-            continue
-        description = LISTING_ACTION_TYPE_DESCRIPTIONS.get(
-            key, 'No description available.'
-        )
-        lines.append(f'- {key}: {description}')
-    return '\n'.join(lines)
-
-
-def get_action_model(
-    role: RoleType,
-    seller_is_listed: bool | None = None,
-) -> type[RootModel]:
-    if role == RoleType.BUYER:
-        return ListingBuyerActions
-    if role == RoleType.SELLER:
-        return (
-            ListingSellerListedActions
-            if seller_is_listed
-            else ListingSellerUnlistedActions
-        )
-    raise ValueError(f'No portal action model for role: {role}')
-
-
-def get_allowed_action_types(
-    role: RoleType,
-    seller_is_listed: bool | None = None,
-) -> tuple[str, ...]:
-    if role == RoleType.BUYER:
-        return LISTING_BUYER_ACTIONS
-    if role == RoleType.SELLER:
-        return (
-            LISTING_SELLER_LISTED_ACTIONS
-            if seller_is_listed
-            else LISTING_SELLER_UNLISTED_ACTIONS
-        )
-    raise ValueError(f'No portal action set for role: {role}')
-
-
+# TODO: This is the entry schema that initialises portal state for buyers/sellers that joins from negotiation/get initialised. 
 class PortalBuyer(BaseBuyer):
-    budget: BuyerBudgetRange
-    preferences: BuyerPreferenceProfile
-    description: Optional[str] = None
+    pass
 
 
 class PortalSeller(BaseSeller):
-    flat: Flat
-    expectations: SellerExpectationRange
-    description: Optional[str] = None
+    pass
 
 
 class PortalSearchResult(BaseModel):
@@ -238,11 +103,6 @@ class NegotiationMatch(BaseModel):
     week_matched: int = Field(ge=1)
 
 
-class PortalNotification(BaseModel):
-    player_name: str
-    message: str
-
-
 class ListingWeeklyBatchOutcome(BaseModel):
     week_number: int = Field(ge=1)
     active_player_names: list[str] = Field(default_factory=list)
@@ -251,7 +111,6 @@ class ListingWeeklyBatchOutcome(BaseModel):
     sellers_reviewed: list[str] = Field(default_factory=list)
     matched_pairs: list[NegotiationMatch] = Field(default_factory=list)
     closed_player_names: list[str] = Field(default_factory=list)
-    notifications: list[PortalNotification] = Field(default_factory=list)
 
 
 ListingPortalSnapshot.model_rebuild()

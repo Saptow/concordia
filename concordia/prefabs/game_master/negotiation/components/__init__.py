@@ -1,35 +1,18 @@
-# Copyright 2025 DeepMind Technologies Limited.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""Negotiation components and HDB market modules."""
 
-"""Negotiation-specific game master components."""
-
-# Core negotiation components
-from concordia.prefabs.game_master.negotiation.components import negotiation_state
-from concordia.prefabs.game_master.negotiation.components import negotiation_validation
-from concordia.prefabs.game_master.negotiation.components import negotiation_modules
-
-# GM negotiation awareness modules
-from concordia.prefabs.game_master.negotiation.components import gm_cultural_awareness
-from concordia.prefabs.game_master.negotiation.components import gm_social_intelligence
-from concordia.prefabs.game_master.negotiation.components import gm_temporal_dynamics
-from concordia.prefabs.game_master.negotiation.components import gm_uncertainty_management
-from concordia.prefabs.game_master.negotiation.components import gm_collective_intelligence
-from concordia.prefabs.game_master.negotiation.components import gm_strategy_evolution
-
-# Custom HDB negotiation game master components
-from concordia.prefabs.game_master.negotiation.components import hdb_negotiation_state
-from concordia.concordia.prefabs.game_master.negotiation.components import hdb_listing_gm
+from . import gm_collective_intelligence
+from . import gm_cultural_awareness
+from . import gm_social_intelligence
+from . import gm_strategy_evolution
+from . import gm_temporal_dynamics
+from . import gm_uncertainty_management
+from . import hdb_coordinator_helper
+from . import hdb_listing
+from . import hdb_negotiation
+from . import hdb_negotiation_helpers
+from . import negotiation_modules
+from . import negotiation_state
+from . import negotiation_validation
 
 __all__ = [
     'negotiation_state',
@@ -41,6 +24,8 @@ __all__ = [
     'gm_uncertainty_management',
     'gm_collective_intelligence',
     'gm_strategy_evolution',
-    'hdb_negotiation_state',
-    'hdb_listing_gm',
+    'hdb_coordinator_helper',
+    'hdb_negotiation_helpers',
+    'hdb_listing',
+    'hdb_negotiation',
 ]

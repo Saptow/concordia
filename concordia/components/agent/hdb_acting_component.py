@@ -3,6 +3,7 @@ import re
 from collections.abc import Sequence
 from typing import Any, override
 
+from absl import logging
 from pydantic import BaseModel, RootModel
 
 from concordia.document import interactive_document
@@ -28,6 +29,10 @@ HDB_FIELD_GENERATION_MONETARY_GUARDRAILS = (
 HDB_FIELD_GENERATION_INFO_GUARDRAILS = (
     "- Keep inquiry/question/answer content focused on flat condition, lease, location, transaction terms, HDB policies, or timeline.\n"
 )
+
+
+def _log_error(message: str) -> None:
+    logging.error(message)
 
 class HDBStructuredActComponent(
     entity_component.ActingComponent, entity_component.ComponentWithLogging
@@ -125,7 +130,8 @@ class HDBStructuredActComponent(
         if isinstance(value, str):
             txt = value.strip()
             if not txt:
-                raise ValueError("Empty structured action.")
+                _log_error("Empty structured action.")
+                return "{}"
             return txt
         return str(value)
 
@@ -144,7 +150,8 @@ class HDBStructuredActComponent(
         candidate = text.strip()
         start = candidate.find("{")
         if start < 0:
-            raise ValueError("Structured action does not contain a JSON object.")
+            _log_error("Structured action does not contain a JSON object.")
+            return "{}"
         candidate = candidate[start:]
         depth = 0
         for idx, ch in enumerate(candidate):
@@ -154,7 +161,8 @@ class HDBStructuredActComponent(
                 depth -= 1
                 if depth == 0:
                     return candidate[: idx + 1]
-        raise ValueError("Unterminated JSON object in structured action.")
+        _log_error("Unterminated JSON object in structured action.")
+        return "{}"
 
     def _infer_offer_state_from_options(self, options: Sequence[str]) -> bool | None:
         """Infer whether there is an active offer from action-type options."""
@@ -387,18 +395,21 @@ class HDBStructuredActComponent(
         if not preferred_type and len(allowed_set) == 1:
             preferred_type = next(iter(allowed_set))
         if not preferred_type:
-            raise ValueError(
-                "Missing chosen action type for structured field generation."
-            )
+            _log_error("Missing chosen action type for structured field generation.")
+            return "{}"
         if allowed_set and preferred_type not in allowed_set:
-            raise ValueError(
+            _log_error(
                 f"Chosen action type {preferred_type!r} is not allowed this turn."
             )
+            preferred_type = next(iter(allowed_set)) if allowed_set else ""
+            if not preferred_type:
+                return "{}"
         specific_schema = self._schema_for_action_type(preferred_type)
         if specific_schema is None:
-            raise ValueError(
+            _log_error(
                 f"Unsupported action type for structured generation: {preferred_type!r}."
             )
+            return "{}"
         chosen_action_description = (
             self._format_action_type_descriptions((preferred_type,))
             if preferred_type
@@ -484,10 +495,14 @@ class HDBStructuredActComponent(
 
             if self._structured_component_outputs_action_choice:
                 if not raw:
-                    raise ValueError(
+                    _log_error(
                         f'Missing action-type choice in "{self._structured_component_key}". '
                         "Ensure question_about_action writes the chosen action type to this key."
                     )
+                    if allowed_types:
+                        raw = {"type": allowed_types[0]}
+                    else:
+                        return "{}"
                 preferred_action_type = self._extract_action_type_hint(
                     raw, allowed_types=allowed_types
                 )
@@ -502,14 +517,18 @@ class HDBStructuredActComponent(
                             "Value": str(raw),
                         })
                     else:
-                        raise ValueError(
+                        _log_error(
                             f'Could not parse chosen action type from "{self._structured_component_key}". '
                             "question_about_action should return exactly one action type token."
                         )
+                        return "{}"
                 if allowed_types and preferred_action_type not in set(allowed_types):
-                    raise ValueError(
+                    _log_error(
                         f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
                     )
+                    preferred_action_type = allowed_types[0] if allowed_types else None
+                    if preferred_action_type is None:
+                        return "{}"
                 decision_brief = self._extract_decision_brief(
                     raw,
                     preferred_action_type=preferred_action_type,
@@ -560,9 +579,10 @@ class HDBStructuredActComponent(
                 return out
 
             if not self._fallback_to_llm_for_free:
-                raise ValueError(
+                _log_error(
                     f'Missing structured action in "{self._structured_component_key}".'
                 )
+                return "{}"
             out = self._regenerate_structured_action(
                 contexts=contexts,
                 action_spec=action_spec,
@@ -599,7 +619,8 @@ class HDBStructuredActComponent(
         if action_spec.output_type in entity_lib.FREE_ACTION_TYPES:
             return prompt.open_question(call_to_action, max_tokens=2200, terminators=())
 
-        raise NotImplementedError(f"Unsupported output type: {action_spec.output_type}")
+        logging.error("Unsupported output type: %s", action_spec.output_type)
+        return ""
     
     def get_state(self) -> entity_component.ComponentState:
         """Converts component into a dictionary for logging."""

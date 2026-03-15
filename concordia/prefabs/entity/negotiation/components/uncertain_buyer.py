@@ -613,33 +613,48 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
         We will generate 3 types of scenarios: Optimistic, Pessimistic and Realistic. 
         The expected value for each scenario will be calculated based on sampled beliefs and risk tolerance parameter.
         """
-        def _get_risk_adjusted_weights(risk_tolerance: float) -> Dict[str, float]:
+        def _estimate_scenario_likelihoods_from_values(
+            scenario_values: Dict[str, float],
+            dispersion: float,
+            risk_tolerance: float,
+        ) -> Dict[str, float]:
             """
-            Calculates scenario weights based on risk tolerance.
-            
-            Logic:
-            - We start with a neutral stance: [25% Pessimistic, 50% Realistic, 25% Optimistic]
-            - Risk Tolerance acts as a slider moving mass from Pessimistic to Optimistic.
+            Estimate relative scenario likelihoods from the actual scenario values.
+
+            This is intentionally value-aware rather than a fixed pessimistic/
+            realistic/optimistic slider. When the surplus numbers strongly favour
+            one scenario, the reported likelihoods should reflect that.
             """
-            # TODO: Refine this logic as needed
-            # Define neutral likelihood for now
-            base_pessimistic = 0.25
-            base_optimistic = 0.25
-            
-            # Scale based on risk tolerance (max movement of 25% from each tail)
-            shift = (risk_tolerance - 0.5) * 0.5  
-            
-            # Calculate likelihoods
-            l_pess = base_pessimistic - shift
-            l_opt  = base_optimistic + shift
-            l_real = 1.0 - l_pess - l_opt # to ensure sum to 1.0
-            
-            return {
-                'Pessimistic': max(0.0, min(1.0, l_pess)),
-                'Realistic': max(0.0, min(1.0, l_real)),
-                'Optimistic': max(0.0, min(1.0, l_opt))
+            if not scenario_values:
+                return {
+                    'Pessimistic': 1 / 3,
+                    'Realistic': 1 / 3,
+                    'Optimistic': 1 / 3,
+                }
+
+            scale = max(float(dispersion), 1.0)
+            temperature = max(0.35, 1.15 - (0.8 * risk_tolerance))
+            scaled_values = {
+                name: value / scale
+                for name, value in scenario_values.items()
             }
-        likelihoods = _get_risk_adjusted_weights(self._risk_tolerance)
+            max_scaled_value = max(scaled_values.values())
+            exp_scores = {
+                name: math.exp((value - max_scaled_value) / temperature)
+                for name, value in scaled_values.items()
+            }
+            total_score = sum(exp_scores.values())
+            if total_score <= 0.0:
+                return {
+                    'Pessimistic': 1 / 3,
+                    'Realistic': 1 / 3,
+                    'Optimistic': 1 / 3,
+                }
+            return {
+                name: score / total_score
+                for name, score in exp_scores.items()
+            }
+
         scenarios = []
         cp_belief=self._beliefs['counterpart_reservation']
         # calculate student t parameters for predictive distribution
@@ -678,6 +693,11 @@ class UncertainBuyer(action_spec_ignored.ActionSpecIgnored):
             'Realistic': val_realistic,
             'Optimistic': val_optimistic,
         }
+        likelihoods = _estimate_scenario_likelihoods_from_values(
+            scenario_values=scenario_values,
+            dispersion=zopa_dist.stdev,
+            risk_tolerance=self._risk_tolerance,
+        )
         # generate scenarios based on mean and std deviations
         for name, likelihood in likelihoods.items():
             scenario_value = scenario_values[name]

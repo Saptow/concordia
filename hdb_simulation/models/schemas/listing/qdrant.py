@@ -10,6 +10,7 @@ from qdrant_client import models
 from concordia.hdb_simulation.models.schemas.common import Flat
 from concordia.hdb_simulation.models.schemas.listing import schema as listing_schemas
 
+# Constants for Qdrant vector database
 DENSE_EMBEDDINGS_KEY = 'dense_vector'
 SPARSE_EMBEDDINGS_KEY = 'sparse_vector'
 DEFAULT_COLLECTION_NAME = 'hdb_listing_portal'
@@ -53,11 +54,8 @@ class ListingRecord(BaseModel):
     def to_document(self) -> str:
         '''
         Render the listing record into a string for embedding and indexing.
-        '''
-        lines = [
-            f'Listing ID: {self.listing_id}',
-            f'Listing Price: SGD {self.listing_price:.0f}',
-        ]
+        '''   
+        lines=[] # no need to include prices
         for key, value in self.flat_metadata().items():
             if isinstance(value, list):
                 rendered = ', '.join(str(item) for item in value) if value else 'None listed'
