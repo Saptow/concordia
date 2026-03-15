@@ -1,6 +1,7 @@
 """Uncertainty-aware component for probabilistic reasoning in negotiations."""
 
 import dataclasses
+import json
 import math
 import random
 from statistics import NormalDist
@@ -337,6 +338,7 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
         model: Any,
         confidence: float = 0.7,
         risk_tolerance: float = 0.3,
+        flat_listing: Optional[dict] = None,
         information_gathering_budget: float = 0.5, # fraction of value to spend on information gathering
         own_reservation_: float = 0.0, # note that this is the minimum reservation price for the seller
         mu: float = 0.0,
@@ -359,6 +361,7 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
         self._model = model
         self._confidence = confidence
         self._risk_tolerance = risk_tolerance
+        self._flat_listing = dict(flat_listing) if flat_listing else {}
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._info_budget = information_gathering_budget
@@ -387,10 +390,116 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
         scenarios = self._generate_scenarios()
         if not scenarios:
             return 'Unknown'
-        return ' | '.join(
-            f'{scenario.scenario_type}: {scenario.outcome} ({scenario.likelihood:.0%})'
-            for scenario in scenarios
+        return self._build_strategy_scenario_summary(scenarios)
+
+    @staticmethod
+    def _normalize_scenario_outcome(outcome: str) -> str:
+        return str(outcome).strip().lower()
+
+    @classmethod
+    def _build_main_deal_summary(
+        cls,
+        scenarios: List[ScenarioAnalysis],
+    ) -> str:
+        if not scenarios:
+            return 'Overall assessment unknown.'
+
+        scenario_lookup = {
+            scenario.scenario_type: scenario for scenario in scenarios
+        }
+        realistic = scenario_lookup.get('Realistic')
+        pessimistic = scenario_lookup.get('Pessimistic')
+        optimistic = scenario_lookup.get('Optimistic')
+
+        realistic_outcome = (
+            cls._normalize_scenario_outcome(realistic.outcome)
+            if realistic is not None
+            else 'unknown'
         )
+        pessimistic_outcome = (
+            cls._normalize_scenario_outcome(pessimistic.outcome)
+            if pessimistic is not None
+            else 'unknown'
+        )
+        optimistic_outcome = (
+            cls._normalize_scenario_outcome(optimistic.outcome)
+            if optimistic is not None
+            else 'unknown'
+        )
+
+        deal_possible_probability = sum(
+            float(scenario.likelihood)
+            for scenario in scenarios
+            if cls._normalize_scenario_outcome(scenario.outcome) == 'deal possible'
+        )
+
+        if realistic_outcome == 'deal possible':
+            if pessimistic_outcome == 'no deal':
+                return (
+                    'Overall, a deal is possible but uncertain '
+                    f'({deal_possible_probability:.0%} weighted chance).'
+                )
+            return (
+                'Overall, a deal is likely possible '
+                f'({deal_possible_probability:.0%} weighted chance).'
+            )
+
+        if realistic_outcome == 'no deal':
+            if optimistic_outcome == 'deal possible':
+                return (
+                    'Overall, a deal looks difficult but not impossible '
+                    f'({deal_possible_probability:.0%} weighted chance).'
+                )
+            return (
+                'Overall, a deal is unlikely '
+                f'({deal_possible_probability:.0%} weighted chance).'
+            )
+
+        if deal_possible_probability >= 0.67:
+            return (
+                'Overall, a deal is likely possible '
+                f'({deal_possible_probability:.0%} weighted chance).'
+            )
+        if deal_possible_probability <= 0.33:
+            return (
+                'Overall, a deal is unlikely '
+                f'({deal_possible_probability:.0%} weighted chance).'
+            )
+        return (
+            'Overall, the deal outlook is mixed '
+            f'({deal_possible_probability:.0%} weighted chance).'
+        )
+
+    @classmethod
+    def _build_strategy_scenario_summary(
+        cls,
+        scenarios: List[ScenarioAnalysis],
+    ) -> str:
+        if not scenarios:
+            return 'Unknown'
+
+        scenario_lookup = {
+            scenario.scenario_type: scenario for scenario in scenarios
+        }
+
+        def _format_case(
+            case_label: str,
+            scenario_name: str,
+        ) -> str:
+            scenario = scenario_lookup.get(scenario_name)
+            if scenario is None:
+                return f'{case_label}: unknown.'
+            return (
+                f'{case_label}: {scenario.outcome.lower()} '
+                f'({scenario.likelihood:.0%}).'
+            )
+
+        return ' '.join([
+            cls._build_main_deal_summary(scenarios),
+            _format_case('Base case', 'Realistic'),
+            _format_case('Downside case', 'Pessimistic'),
+            _format_case('Upside case', 'Optimistic'),
+        ])
 
     def _make_pre_act_value(self) -> str:
         counterpart_reservation = self._beliefs['counterpart_reservation']
@@ -472,9 +581,15 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
             f'- {memory_text}'
             for memory_text in recent_memories
         ] or ['- None']
+        listing_context = (
+            f'Flat under negotiation:\n{json.dumps(self._flat_listing, ensure_ascii=False)}\n'
+            if self._flat_listing
+            else ''
+        )
         return (
             'Current belief summary:\n'
             f'{self._build_belief_summary_for_strategy()}\n'
+            f'{listing_context}'
             'Recent negotiation memories:\n'
             + '\n'.join(memory_lines)
         )
@@ -544,23 +659,26 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
             [f"{name}: mean={belief.get_expected_mean:.2f}, std={math.sqrt(belief.get_expected_variance):.2f}" for name, belief in self._beliefs.items()] # TODO: might need to add confidence for NIG, but decide later on
         )
         prompt = f"""
-        You are looking from the perspective of a seller in a negotiation with perfect information of your HDB flat that you plan to sell. The counterpart has imperfect information about your own reservation price and flexibility.
-        However, there is uncertainty about the buyer's reservation value and flexibility.
-        Based off your current beliefs given below, analyze this negotiation context for uncertainty and missing information:
-        Beliefs: {formatted_beliefs}
-        Context: {context}
+        You are a seller in an HDB resale negotiation.
+        You know your own flat and reservation price, but the buyer's reservation value, urgency, and flexibility are uncertain.
+        Use the full context below, including any listing details, recent memories, and current action context.
 
-        Identify and assess:
-        1. What key information is missing?
-        2. What are the main sources of uncertainty and how uncertain are they? Determine the degree of uncertainty based on your current beliefs (0 - 1 scale).
-        3. What information would be most valuable to gather given our preferences?
-        4. What are the potential scenarios we should consider?
+        Current beliefs:
+        {formatted_beliefs}
 
-        Format your response using the JSON schema provided. It should be as follows:
-        missing_info: [List key missing information]
-        uncertainty_sources: List of {{"claim": [uncertain claim], "confidence_level": [0-1]}}
-        valuable_info: [List of most valuable information to gather given preferences]
-        scenarios: [Key scenarios to consider]"""
+        Negotiation context:
+        {context}
+
+        Produce a structured uncertainty analysis:
+        1. missing_info: the most decision-relevant facts that are still unknown about the buyer or the deal.
+        2. uncertainty_sources: concrete uncertain claims together with confidence_level in [0,1], where lower confidence means more uncertainty.
+        3. valuable_info: short descriptions of information that would materially improve pricing or deal-feasibility judgment.
+        4. scenarios: concise scenario labels or summaries worth considering.
+
+        Prioritize information tied to buyer budget, financing readiness, urgency, timeline, seriousness, willingness to accept current flat attributes, and any transaction constraints.
+        Do not repeat obvious facts already established in the context unless they are still genuinely uncertain.
+        Return only JSON that matches the provided schema.
+        """
 
         response = self._model.sample_text(prompt, json_schema=UncertaintyContext.model_json_schema())
 
@@ -713,17 +831,27 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
 
         # Determine the info_opportunities using a LLM. 
         prompt = f"""
-        You are looking from the perspective of a seller in a negotiation with perfect information of your HDB flat that you plan to sell. The counterpart has imperfect information about your own reservation price and flexibility.
-        However, there is uncertainty about the counterpart's reservation value and flexibility. Given the negotiation context and uncertainty analysis below, identify up to 10 specific questions that can be asked to gather valuable information that affects the counterpart's reservation value and flexibility.
+        You are a seller in an HDB resale negotiation.
+        Given the negotiation context and the uncertainty analysis below, propose up to 10 specific questions that the seller could realistically ask the buyer next.
 
-        Context: {context}
-        Uncertainty Analysis: {uncertainty_analysis.model_dump_json()}
+        Context:
+        {context}
+
+        Uncertainty Analysis:
+        {uncertainty_analysis.model_dump_json()}
         
-        For each question, estimate 
-        1. priority_score (0-1): how much confidence improvement this information could provide.
-        2. cost_factor (0-1): the relative cost of obtaining this information based off how tedious/difficult it is to obtain.
+        Each proposed question should:
+        - be answerable by the buyer in conversation,
+        - reduce uncertainty about buyer budget, flexibility, urgency, timeline, financing, seriousness, or fit with the listed flat,
+        - avoid duplicating questions already answered in the context,
+        - be phrased as a natural negotiation question, not as analysis notes.
 
-        Return a list of information gathering opportunities in the JSON schema provided.
+        For each question, estimate:
+        1. priority_score (0-1): how much it could improve decision quality or confidence.
+        2. cost_factor (0-1): how costly it is in negotiation terms, such as being awkward, tedious, or unlikely to elicit a useful answer.
+
+        Prefer high-value, low-cost questions.
+        Return only JSON matching the provided schema.
         Do not output placeholders such as "question text..." or dummy zero-score rows.
         If there are no useful questions, return an empty list.
         """
@@ -803,14 +931,7 @@ class UncertainSeller(action_spec_ignored.ActionSpecIgnored):
             scenario.scenario_type: scenario
             for scenario in scenarios
         }
-        scenario_summary = ' | '.join(
-            (
-                f'{name}: {scenario_lookup[name].outcome.lower()} ({scenario_lookup[name].likelihood:.0%})'
-                if name in scenario_lookup
-                else f'{name}: Unknown'
-            )
-            for name in ('Pessimistic', 'Realistic', 'Optimistic')
-        )
+        scenario_summary = self._build_strategy_scenario_summary(scenarios)
         info_items = [
             self._format_information_item(info)
             for info in budgeted_info_values[:max(1, max_info_items)]

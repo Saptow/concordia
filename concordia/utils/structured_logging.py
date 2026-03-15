@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import dataclasses
 import hashlib
+import html
 import json
 import re
 import threading
