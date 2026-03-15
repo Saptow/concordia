@@ -2,13 +2,15 @@
 
 from collections.abc import Mapping, Sequence
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from absl import logging
 from concordia.components.agent import action_spec_ignored
-from concordia.prefabs.game_master.negotiation.components import hdb_listing
-from concordia.prefabs.game_master.negotiation.components import hdb_negotiation
 from concordia.typing import entity_component
+
+if TYPE_CHECKING:
+  from concordia.prefabs.game_master.negotiation.components import hdb_listing
+  from concordia.prefabs.game_master.negotiation.components import hdb_negotiation
 
 
 class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
@@ -34,13 +36,17 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     self._last_week_summary: dict[str, Any] = {}
 
   # Module accessors.
-  def get_listing_module(self) -> hdb_listing.ListingModule:
+  def get_listing_module(self) -> 'hdb_listing.ListingModule':
+    from concordia.prefabs.game_master.negotiation.components import hdb_listing
+
     return self.get_entity().get_component(
         self._listing_component_key,
         type_=hdb_listing.ListingModule,
     )
 
-  def get_negotiation_module(self) -> hdb_negotiation.NegotiationModule:
+  def get_negotiation_module(self) -> 'hdb_negotiation.NegotiationModule':
+    from concordia.prefabs.game_master.negotiation.components import hdb_negotiation
+
     return self.get_entity().get_component(
         self._negotiation_component_key,
         type_=hdb_negotiation.NegotiationModule,

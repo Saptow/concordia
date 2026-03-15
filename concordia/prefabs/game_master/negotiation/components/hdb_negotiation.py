@@ -12,7 +12,7 @@ from concordia.components.game_master import make_observation as make_observatio
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.language_model import language_model
 from concordia.prefabs.entity.negotiation import uncertain_negotiator
-from concordia.concordia.prefabs.game_master.negotiation.components import (
+from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
 )
 from concordia.utils import concurrency
