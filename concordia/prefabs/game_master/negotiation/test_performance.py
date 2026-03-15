@@ -20,7 +20,6 @@ import unittest
 from unittest import mock
 
 from concordia.associative_memory import basic_associative_memory
-from concordia.clocks import game_clock
 from concordia.language_model import language_model
 from concordia.prefabs.entity.negotiation import base_negotiator
 from concordia.prefabs.entity.negotiation import advanced_negotiator
@@ -39,7 +38,6 @@ class PerformanceTestBase(unittest.TestCase):
     # Fast mock responses for performance testing
     self.model.sample_text.return_value = 'test response'
     
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def time_operation(self, operation, description="Operation"):

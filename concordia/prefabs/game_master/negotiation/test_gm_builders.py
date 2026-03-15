@@ -19,7 +19,6 @@ from unittest import mock
 
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
-from concordia.clocks import game_clock
 from concordia.language_model import language_model
 from concordia.prefabs.game_master.negotiation import negotiation
 
@@ -32,7 +31,6 @@ class GameMasterBuilderTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
     
     # Create mock agents
@@ -222,7 +220,6 @@ class GameMasterComponentTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
     
     # Create simple mock agents
@@ -335,7 +332,6 @@ class GameMasterErrorHandlingTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
     
     # Create mock agents
@@ -410,7 +406,6 @@ class SpecializedGMBuilderTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def test_all_specialized_builders_create_valid_gms(self):

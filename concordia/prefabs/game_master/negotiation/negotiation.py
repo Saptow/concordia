@@ -27,7 +27,7 @@ from concordia.prefabs.game_master.negotiation.components import negotiation_sta
 from concordia.prefabs.game_master.negotiation.components import negotiation_validation
 from concordia.prefabs.game_master.negotiation.components import negotiation_modules
 from concordia.language_model import language_model
-from concordia.thought_chains import thought_chains as thought_chains_lib
+from concordia.components.game_master import event_resolution as thought_chains_lib
 from concordia.typing import prefab as prefab_lib
 
 

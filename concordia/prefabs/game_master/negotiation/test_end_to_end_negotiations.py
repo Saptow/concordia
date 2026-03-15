@@ -19,7 +19,6 @@ import unittest
 from unittest import mock
 
 from concordia.associative_memory import basic_associative_memory
-from concordia.clocks import game_clock
 from concordia.language_model import language_model
 from concordia.environment import simulation_environment
 from concordia.prefabs.entity.negotiation import base_negotiator
@@ -53,7 +52,6 @@ class EndToEndNegotiationTest(unittest.TestCase):
     
     self.model.sample_text.side_effect = mock_sample_text
     
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def create_simple_agents(self, names, agent_builder=base_negotiator.build_agent):
@@ -469,7 +467,6 @@ class SimulationRunnerTest(unittest.TestCase):
     ]
     self.model.sample_text.side_effect = responses * 10  # Repeat for multiple rounds
     
-    self.clock = game_clock.FixedIntervalClock()
     self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def test_simulation_initialization_and_basic_run(self):

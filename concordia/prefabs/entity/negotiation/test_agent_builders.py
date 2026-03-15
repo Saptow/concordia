@@ -20,7 +20,6 @@ from unittest import mock
 
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
-from concordia.clocks import game_clock
 from concordia.language_model import language_model
 from concordia.prefabs.entity.negotiation import base_negotiator
 from concordia.prefabs.entity.negotiation import advanced_negotiator
@@ -34,11 +33,7 @@ class BaseNegotiatorBuilderTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.GameClock()
-    self.memory_bank = basic_associative_memory.AssociativeMemoryBank(
-        model=self.model,
-        clock=self.clock,
-    )
+    self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def test_build_agent_basic(self):
     """Test basic agent building."""
@@ -119,11 +114,7 @@ class AdvancedNegotiatorBuilderTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.GameClock()
-    self.memory_bank = basic_associative_memory.AssociativeMemoryBank(
-        model=self.model,
-        clock=self.clock,
-    )
+    self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def test_build_agent_basic(self):
     """Test basic advanced agent building."""
@@ -277,11 +268,7 @@ class AgentBuilderErrorHandlingTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.GameClock()
-    self.memory_bank = basic_associative_memory.AssociativeMemoryBank(
-        model=self.model,
-        clock=self.clock,
-    )
+    self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def test_invalid_module_name(self):
     """Test handling of invalid module names."""
@@ -328,11 +315,7 @@ class ComponentInteractionTest(unittest.TestCase):
     self.model = mock.create_autospec(
         language_model.LanguageModel, instance=True
     )
-    self.clock = game_clock.GameClock()
-    self.memory_bank = basic_associative_memory.AssociativeMemoryBank(
-        model=self.model,
-        clock=self.clock,
-    )
+    self.memory_bank = basic_associative_memory.AssociativeMemoryBank()
 
   def test_component_ordering(self):
     """Test that components are in correct order."""
