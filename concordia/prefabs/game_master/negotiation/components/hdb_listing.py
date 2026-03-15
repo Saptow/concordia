@@ -199,9 +199,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Listing module',
   ):
     super().__init__(pre_act_label=pre_act_label)
-    self._enabled = bool(enabled) 
-    if not self._enabled:
-      return # skip setup if module is disabled; allows for dynamic enabling later with less overhead
+    self._enabled = bool(enabled)
+    self._client = client
+    self._dense_embedding_model = dense_embedding_model
+    self._random_seed = random_seed
     self._player_names = tuple(player_names)
     self._player_ids = tuple(player_ids) if player_ids else tuple(player_names)
     if len(self._player_names) != len(self._player_ids):
@@ -232,17 +233,32 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         )
         for seller_id, payload in dict(seller_profiles).items()
     }
+    self._portal_state: dict[str, Any] = {}
+    self._portal: listing_portal_lib.ListingPortal | None = None
+    if not self._enabled:
+      return
+    self._ensure_portal()
 
-    retriever = None
-    if client is not None or dense_embedding_model is not None:
-      retriever = listing_portal_lib.ListingPortalRetriever(
-          client=client,
-          dense_embedding_model=dense_embedding_model,
-      )
-    self._portal = listing_portal_lib.ListingPortal(
-        retriever=retriever,
-        random_seed=random_seed,
-    )
+  def _ensure_portal(self) -> listing_portal_lib.ListingPortal:
+    if self._portal is None:
+      retriever = None
+      if self._client is not None or self._dense_embedding_model is not None:
+        retriever = listing_portal_lib.ListingPortalRetriever(
+            client=self._client,
+            dense_embedding_model=self._dense_embedding_model,
+        )
+      if self._portal_state:
+        self._portal = listing_portal_lib.ListingPortal.from_state(
+            self._portal_state,
+            retriever=retriever,
+            random_seed=self._random_seed,
+        )
+      else:
+        self._portal = listing_portal_lib.ListingPortal(
+            retriever=retriever,
+            random_seed=self._random_seed,
+        )
+    return self._portal
 
   def set_enabled(self, enabled: bool) -> None:
     self._enabled = bool(enabled)
@@ -256,12 +272,13 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
   def get_open_player_ids(self) -> set[str]:
     if not self._enabled or self._stage_exhausted:
       return set()
+    portal = self._ensure_portal()
     open_ids: set[str] = set()
     for buyer_id in self._buyers:
-      if not self._portal.is_player_closed(buyer_id):
+      if not portal.is_player_closed(buyer_id):
         open_ids.add(buyer_id)
     for seller_id in self._sellers:
-      if not self._portal.is_player_closed(seller_id):
+      if not portal.is_player_closed(seller_id):
         open_ids.add(seller_id)
     return open_ids
 
@@ -298,6 +315,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     if self._max_rounds is not None and week_number > self._max_rounds:
       self._stage_exhausted = True
       return self._empty_outcome(week_number)
+    portal = self._ensure_portal()
 
     open_player_ids = self.get_open_player_ids()
     assigned_ids = (
@@ -316,7 +334,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     if not active_player_names:
       return self._empty_outcome(week_number)
     outcome = execute_listing_week(
-        portal=self._portal,
+        portal=portal,
         buyers=self._buyers,
         sellers=self._sellers,
         week_number=week_number,
@@ -332,20 +350,19 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def _buyer_state(self, player_id: str) -> listing_schemas.ListingBuyerState:
     buyer = self._buyers[player_id]
+    portal = self._ensure_portal()
     return listing_schemas.ListingBuyerState(
         player_id=player_id,
         player_name=buyer.name,
         budget_min_price=buyer.budget.min_price,
         budget_max_price=buyer.budget.max_price,
-        effective_reservation_price=self._portal.effective_reservation_price_for_buyer(
+        effective_reservation_price=portal.effective_reservation_price_for_buyer(
             buyer
         ),
         preferred_flat_types=list(buyer.preferences.flat_type),
         preferred_towns=list(buyer.preferences.towns),
-        latest_search_results=list(
-            self._portal.search_results_by_buyer.get(player_id, [])
-        ),
-        latest_market_feedback=self._portal.market_feedback_by_buyer.get(
+        latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
+        latest_market_feedback=portal.market_feedback_by_buyer.get(
             player_id,
             'No market feedback yet.',
         ),
@@ -353,20 +370,27 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def _seller_state(self, player_id: str) -> listing_schemas.ListingSellerState:
     seller = self._sellers[player_id]
-    listing_id = self._portal.listing_id_for_seller(player_id)
-    listing = self._portal.get_listing_record(player_id)
+    portal = self._ensure_portal()
+    listing_id = portal.listing_id_for_seller(player_id)
+    listing = portal.get_listing_record(player_id)
     return listing_schemas.ListingSellerState(
         player_id=player_id,
         player_name=seller.name,
-        listed=self._portal.is_seller_listed(player_id),
+        listed=portal.is_seller_listed(player_id),
         current_listing_id=listing_id if listing is not None else None,
         current_listing_price=float(listing.listing_price) if listing is not None else None,
-        open_requests=self._portal.pending_request_count(player_id),
+        open_requests=portal.pending_request_count(player_id),
         flat_type=str(seller.flat.flat_type),
         town=seller.flat.town,
     )
 
   def _make_pre_act_value(self) -> str:
+    if self._portal is None:
+      snapshot = listing_schemas.ListingPortalSnapshot(
+          week_number=max(1, self._last_run_week or 1),
+      )
+      return snapshot.model_dump_json()
+
     snapshot = listing_schemas.ListingPortalSnapshot(
         week_number=max(1, self._last_run_week or 1),
         buyers=[
@@ -393,7 +417,11 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             seller_id: seller.model_dump()
             for seller_id, seller in self._sellers.items()
         },
-        'portal_state': self._portal.export_state(),
+        'portal_state': (
+            self._portal.export_state()
+            if self._portal is not None
+            else dict(self._portal_state)
+        ),
         'max_rounds': self._max_rounds or 0,
         'enabled': int(self._enabled),
         'completed_weeks': self._completed_weeks,
@@ -404,7 +432,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def set_state(self, state: entity_component.ComponentState) -> None:
     if 'portal_state' in state:
-      self._portal = listing_portal_lib.ListingPortal.from_state(state['portal_state'])
+      self._portal_state = dict(state.get('portal_state', {}))
+      self._portal = None
     if 'buyers' in state:
       self._buyers = {
           str(buyer_id): listing_schemas.PortalBuyer.model_validate(payload)

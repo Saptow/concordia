@@ -60,6 +60,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._player_names: tuple[str, ...] = ()
     self._id_to_name: dict[str, str] = {}
     self._entities_by_id: dict[str, Any] = {}
+    self._pending_entity_states: dict[str, Any] = {}
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=(),
         negotiation_pairs=None,
@@ -67,8 +68,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         max_rounds=max_rounds if max_rounds > 0 else None,
     )
     self._offer_tracker = hdb_negotiation_helpers.ActiveOfferTracker(self._scheduler)
-    if not self._enabled:
-      return
 
     self._participant_specs = self._normalize_participant_specs(participant_specs)
     if not self._participant_specs:
@@ -89,11 +88,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         max_rounds=max_rounds if max_rounds > 0 else None,
     )
     self._offer_tracker = hdb_negotiation_helpers.ActiveOfferTracker(self._scheduler)
-    self._initialize_entities_for_pairs(
-        hdb_negotiation_helpers.pair_mappings_from_pair_ids(
-            self._scheduler.get_state().get('pair_queue', [])
-        )
-    )
+    if not self._enabled:
+      return
+    self._ensure_entities_initialized()
 
   # Participant normalization
   @staticmethod
@@ -216,6 +213,21 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self._register_pair(buyer_id, seller_id)
       normalized_pairs.append((buyer_id, seller_id))
     return normalized_pairs
+
+  def _ensure_entities_initialized(self) -> None:
+    pair_queue = self._scheduler.get_state().get('pair_queue', [])
+    self._initialize_entities_for_pairs(
+        hdb_negotiation_helpers.pair_mappings_from_pair_ids(pair_queue)
+    )
+    if not self._pending_entity_states:
+      return
+    for player_id, entity_state in self._pending_entity_states.items():
+      normalized_player_id = str(player_id)
+      if normalized_player_id not in self._entities_by_id:
+        self._initialize_entity(normalized_player_id)
+      if normalized_player_id in self._entities_by_id:
+        self._entities_by_id[normalized_player_id].set_state(entity_state)
+    self._pending_entity_states = {}
 
   # Module state
   def set_enabled(self, enabled: bool) -> None:
@@ -477,6 +489,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if not self._enabled:
       return _empty_outcome()
 
+    self._ensure_entities_initialized()
+
     if new_negotiation_pairs:
       self._initialize_entities_for_pairs(new_negotiation_pairs)
 
@@ -577,10 +591,11 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
   def get_state(self) -> entity_component.ComponentState:
     """Serializes module state, entity state, scheduler state, and offer state."""
-    entity_states = {
+    entity_states = dict(self._pending_entity_states)
+    entity_states.update({
         player_id: entity.get_state()
         for player_id, entity in self._entities_by_id.items()
-    }
+    })
     return {
         'participant_specs': self._participant_specs,
         'entity_states': entity_states,
@@ -611,16 +626,11 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if 'offer_state' in state:
       self._offer_tracker.set_state(state['offer_state'])
     if 'entity_states' in state:
-      pair_queue = self._scheduler.get_state().get('pair_queue', [])
-      self._initialize_entities_for_pairs(
-          hdb_negotiation_helpers.pair_mappings_from_pair_ids(pair_queue)
-      )
       entity_states = state['entity_states']  # type: ignore[assignment]
-      for player_id, entity_state in entity_states.items():  # type: ignore[union-attr]
-        normalized_player_id = str(player_id)
-        if normalized_player_id not in self._entities_by_id:
-          self._initialize_entity(normalized_player_id)
-        self._entities_by_id[normalized_player_id].set_state(entity_state)
+      self._pending_entity_states = {
+          str(player_id): entity_state
+          for player_id, entity_state in entity_states.items()  # type: ignore[union-attr]
+      }
     if 'action_prompt' in state:
       self._action_prompt = str(state['action_prompt'])
     if 'make_observation_component_key' in state:
