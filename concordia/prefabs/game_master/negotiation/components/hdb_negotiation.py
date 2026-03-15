@@ -50,7 +50,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Negotiation module',
   ):
     super().__init__(pre_act_label=pre_act_label)
-    if not enabled:
+    self._enabled = bool(enabled)
+    if not self._enabled:
       return # skip setup if module is disabled; allows for dynamic enabling later with less overhead
     self._model = model
     self._memory_bank = memory_bank
@@ -68,7 +69,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
     self._action_prompt = action_prompt
     self._make_observation_component_key = make_observation_component_key
-    self._enabled = bool(enabled)
 
     self._entities_by_id: dict[str, Any] = {}
 

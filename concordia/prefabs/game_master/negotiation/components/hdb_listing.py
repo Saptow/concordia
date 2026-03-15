@@ -197,7 +197,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Listing module',
   ):
     super().__init__(pre_act_label=pre_act_label)
-    if not enabled:
+    self._enabled = bool(enabled) 
+    if not self._enabled:
       return # skip setup if module is disabled; allows for dynamic enabling later with less overhead
     self._player_names = tuple(player_names)
     self._player_ids = tuple(player_ids) if player_ids else tuple(player_names)
@@ -207,7 +208,6 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
     self._id_to_name = dict(zip(self._player_ids, self._player_names))
     self._max_rounds = max_rounds if max_rounds and max_rounds > 0 else None
-    self._enabled = bool(enabled)
     self._completed_weeks = 0
     self._last_run_week = 0
     self._stage_exhausted = False
