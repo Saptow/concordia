@@ -115,10 +115,14 @@ class Entity(prefab_lib.Prefab):
         except json.JSONDecodeError:
             module_configs = {}
         
-        if 'uncertain_buyer' in modules:
+        role_raw = str(self.params.get('role', '')).strip().lower()
+        if role_raw == common_schemas.RoleType.BUYER.value or 'uncertain_buyer' in modules:
             role = common_schemas.RoleType.BUYER
-        elif 'uncertain_seller' in modules:
+        elif role_raw == common_schemas.RoleType.SELLER.value or 'uncertain_seller' in modules:
             role = common_schemas.RoleType.SELLER
+        else:
+            logging.error('Unable to determine negotiator role for %s.', agent_name)
+            role = common_schemas.RoleType.BUYER
         buyer_preferences = {}
         if role == common_schemas.RoleType.BUYER:
             buyer_module_config = module_configs.get('uncertain_buyer', {})
