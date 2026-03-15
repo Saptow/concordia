@@ -10,14 +10,13 @@ import re
 import numpy as np
 from typing import Any
 from absl import logging
-from concordia.hdb_simulation.models.schemas.listing.schema import PortalSearchResult
 from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas.common import Flat
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
-
+from concordia.hdb_simulation.models.schemas.listing.schema import PortalSearchResult
 
 
 @dataclasses.dataclass
@@ -43,14 +42,19 @@ class ListingPortalRetriever:
         dense_embedding_model: SentenceTransformer | None = None,
         collection_name: str = qdrant_schemas.DEFAULT_COLLECTION_NAME,
     ):
+        if client is None:
+            # Initialise Qdrant client
+            client = QdrantClient(
+                location=qdrant_schemas.DEFAULT_DB_PATH,
+            )
         self._dense_embedder=dense_embedding_model
         self._collection_name = collection_name
         self._client = client
         self._rrf_weights = [1.0, 1.5]  # Relative Weights for BM25 and dense retrieval in RRF scoring
         # Ensure collection exists
         if not self._client.collection_exists(collection_name):
-                raise NotImplementedError("Qdrant collection setup is not implemented yet.")
-        
+            logging.exception(f"Qdrant collection '{collection_name}' does not exist. Please create it before using the retriever.")
+            
     def _embed_text(self, text: str, prefix: str = 'listing') -> np.ndarray:
             if self._dense_embedder is None:
                   raise ValueError("Dense embedder is not initialized.")

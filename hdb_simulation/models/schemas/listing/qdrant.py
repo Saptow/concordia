@@ -14,7 +14,7 @@ from concordia.hdb_simulation.models.schemas.listing import schema as listing_sc
 DENSE_EMBEDDINGS_KEY = 'dense_vector'
 SPARSE_EMBEDDINGS_KEY = 'sparse_vector'
 DEFAULT_COLLECTION_NAME = 'hdb_listing_portal'
-DEFAULT_DB_PATH = Path('concordia/hdb_simulation/.qdrant/listing_portal')
+DEFAULT_DB_PATH = './concordia/hdb_simulation/.qdrant/listing_portal' # Assume root of working directory
 
 
 class ListingRecord(BaseModel):

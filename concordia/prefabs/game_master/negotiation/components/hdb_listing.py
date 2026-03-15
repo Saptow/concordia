@@ -197,6 +197,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Listing module',
   ):
     super().__init__(pre_act_label=pre_act_label)
+    if not enabled:
+      return # skip setup if module is disabled; allows for dynamic enabling later with less overhead
     self._player_names = tuple(player_names)
     self._player_ids = tuple(player_ids) if player_ids else tuple(player_names)
     if len(self._player_names) != len(self._player_ids):
@@ -228,6 +230,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         )
         for seller_id, payload in dict(seller_profiles).items()
     }
+    
     self._portal = listing_portal_lib.ListingPortal(random_seed=random_seed)
 
   def set_enabled(self, enabled: bool) -> None:

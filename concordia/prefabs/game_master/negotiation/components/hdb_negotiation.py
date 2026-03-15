@@ -50,6 +50,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Negotiation module',
   ):
     super().__init__(pre_act_label=pre_act_label)
+    if not enabled:
+      return # skip setup if module is disabled; allows for dynamic enabling later with less overhead
     self._model = model
     self._memory_bank = memory_bank
     self._participant_specs = self._normalize_participant_specs(participant_specs)
