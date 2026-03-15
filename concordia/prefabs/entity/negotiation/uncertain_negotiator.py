@@ -142,7 +142,7 @@ class Entity(prefab_lib.Prefab):
         # Create observation retrieval component (pulls most recent N observations)
         observation = agent_components.observation.LastNObservations(
             history_length=10, # TODO: make this adaptive based on personality metadata
-            pre_act_label='Recent events in the negotiation:'
+            pre_act_label='# RECENT OBSERVATIONS',
         )
 
         # Create negotiation-specific instructions
@@ -163,7 +163,7 @@ class Entity(prefab_lib.Prefab):
         # TODO: revise negotiation strategy to include strategy evolution based on past failed negotiations, if any
         uncertain_key, uncertain_context = None, None
         strategy_key = 'NegotiationStrategy'
-        if 'uncertain_buyer' in modules:
+        if role == common_schemas.RoleType.BUYER:
             uncertain_key = 'uncertain_buyer'
             uncertain_configs = module_configs.get('uncertain_buyer', {})
             uncertain_context = uncertain_buyer.UncertainBuyer(
@@ -190,7 +190,7 @@ class Entity(prefab_lib.Prefab):
                 verbose=True,
             )
 
-        elif 'uncertain_seller' in modules:
+        elif role == common_schemas.RoleType.SELLER:
             uncertain_key = 'uncertain_seller'
             uncertain_configs = module_configs.get('uncertain_seller', {})
             uncertain_context = uncertain_seller.UncertainSeller(
