@@ -19,11 +19,34 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
   def __init__(
       self,
       *,
+      player_ids: Sequence[str] = (),
+      player_names: Sequence[str] = (),
       listing_component_key: str = 'listing_module',
       negotiation_component_key: str = 'negotiation_module',
       pre_act_label: str = 'Weekly coordinator state',
   ):
     super().__init__(pre_act_label=pre_act_label)
+    normalized_player_ids = tuple(str(player_id) for player_id in player_ids)
+    normalized_player_names = tuple(str(player_name) for player_name in player_names)
+    if (
+        normalized_player_ids
+        and normalized_player_names
+        and len(normalized_player_ids) != len(normalized_player_names)
+    ):
+      logging.error(
+          'WeeklyCoordinator player_ids must align with player_names. '
+          'Falling back to names as ids.'
+      )
+      normalized_player_ids = normalized_player_names
+    elif not normalized_player_ids:
+      normalized_player_ids = normalized_player_names
+    self._player_ids = normalized_player_ids
+    self._id_to_name = {
+        player_id: normalized_player_names[index]
+        if index < len(normalized_player_names)
+        else player_id
+        for index, player_id in enumerate(self._player_ids)
+    }
     self._listing_component_key = listing_component_key
     self._negotiation_component_key = negotiation_component_key
     self._week_number = 1
@@ -63,10 +86,11 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     logging.error('Unknown coordinator module name: %s', module_name)
 
   def get_registered_player_ids(self) -> tuple[str, ...]:
-    return self.get_listing_module().get_player_ids()
+    return self._player_ids
 
   def get_player_name(self, player_id: str) -> str:
-    return self.get_listing_module().get_player_name(player_id)
+    normalized_player_id = str(player_id)
+    return self._id_to_name.get(normalized_player_id, normalized_player_id)
 
 
   # Week preparation helpers.
@@ -187,6 +211,8 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
 
   def get_state(self) -> entity_component.ComponentState:
     return {
+        'player_ids': list(self._player_ids),
+        'id_to_name': dict(self._id_to_name),
         'listing_component_key': self._listing_component_key,
         'negotiation_component_key': self._negotiation_component_key,
         'week_number': self._week_number,
@@ -198,6 +224,13 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
   def set_state(self, state: entity_component.ComponentState) -> None:
     # Restore only the coordinator-owned global state. Module internals are
     # restored by their own components.
+    if 'player_ids' in state:
+      self._player_ids = tuple(str(player_id) for player_id in state['player_ids'])
+    if 'id_to_name' in state:
+      self._id_to_name = {
+          str(player_id): str(player_name)
+          for player_id, player_name in state['id_to_name'].items()
+      }
     if 'listing_component_key' in state:
       self._listing_component_key = str(state['listing_component_key'])
     if 'negotiation_component_key' in state:

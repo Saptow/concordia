@@ -358,6 +358,7 @@ class Entity(prefab_lib.Prefab):
             context_components=components_of_agent,
             act_component_log_aliases=('action_reasoning',),
         )
+        agent._hdb_player_id = str(self.params.get('id', ''))
 
         return agent
 

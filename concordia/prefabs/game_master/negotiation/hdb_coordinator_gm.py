@@ -117,6 +117,8 @@ class GameMaster(prefab_lib.Prefab):
 
     coordinator_state_key = 'weekly_coordinator'
     coordinator_state = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=tuple(player_ids) if player_ids else (),
+        player_names=tuple(player_names),
         listing_component_key=listing_module_key,
         negotiation_component_key=negotiation_module_key,
     )

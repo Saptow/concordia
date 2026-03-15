@@ -40,7 +40,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       model: language_model.LanguageModel,
       memory_bank: basic_associative_memory.AssociativeMemoryBank,
       participant_specs: Mapping[str, Any] | str,
-      negotiation_pairs: Sequence[Mapping[str, str]] | None = None,
+      negotiation_pairs: Sequence[Sequence[str]] | None = None,
       action_prompt: str = 'What should {name} do next?',
       max_rounds: int = 0,
       enabled: bool = True,
@@ -231,12 +231,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
   def _get_player_name(self, player_id: str) -> str:
     return self._id_to_name.get(player_id, player_id)
 
-  def _get_make_observation(self) -> make_observation_component.MakeObservation:
-    return self.get_entity().get_component(
-        self._make_observation_component_key,
-        type_=make_observation_component.MakeObservation,
-    )
-
   def get_open_pairs(self) -> list[tuple[str, str]]:
     """Returns currently open pairs as `(buyer_id, seller_id)` tuples."""
     if not self._enabled:
@@ -289,15 +283,17 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     end = start + len(payload_json)
     return f'{actor}{sep}{payload[:start]}{sanitized_json}{payload[end:]}'
 
-  def _queue_event_to_pair(self, event: str, actor_id: str) -> None:
-    """Queues a sanitized event to both members of the actor's pair."""
-    pair_members = self._offer_tracker.get_pair_members_for_player(actor_id)
-    if not pair_members:
+  def _observe_event(self, observer_id: str, event: str) -> None:
+    """Delivers a sanitized event directly to one negotiating entity by id."""
+    entity = self._entities_by_id.get(observer_id)
+    if entity is None:
+      logging.warning(
+          'Unable to deliver negotiation observation to %s (%s).',
+          self._get_player_name(observer_id),
+          observer_id,
+      )
       return
-    observed_event = self._sanitize_event_for_counterparty(event)
-    make_observation = self._get_make_observation()
-    make_observation.add_to_queue(self._get_player_name(pair_members[0]), observed_event)
-    make_observation.add_to_queue(self._get_player_name(pair_members[1]), observed_event)
+    entity.observe(self._sanitize_event_for_counterparty(event))
 
   def _closed_pair_records(
       self,
@@ -450,6 +446,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           has_active_offer=local_has_active_offer,
           is_closed=local_is_closed,
       )
+      if not local_is_closed and not force_close:
+        self._observe_event(seller_id, buyer_event)
 
     if not local_is_closed and not force_close:
       seller_event, should_close_pair = self._execute_player_turn(
@@ -459,6 +457,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       force_close = force_close or should_close_pair
       if seller_event is not None:
         pair_events.append({'actor_id': seller_id, 'event': seller_event})
+        self._observe_event(buyer_id, seller_event)
 
     return {
         'buyer_id': buyer_id,
@@ -535,7 +534,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         actor_id = str(pair_event['actor_id'])
         event = str(pair_event['event'])
         self._offer_tracker.record_resolved_event(event, actor_id=actor_id)
-        self._queue_event_to_pair(event, actor_id=actor_id)
         events.append(event)
 
     self._scheduler.advance_week(negotiated_pairs)

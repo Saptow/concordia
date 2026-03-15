@@ -73,7 +73,7 @@ class NegotiationScheduler:
       self,
       *,
       player_names: Sequence[str],
-      negotiation_pairs: Sequence[PairMapping] | None = None,
+      negotiation_pairs: Sequence[Sequence[str]] | None = None,
       player_ids: Sequence[str] | None = None,
       max_rounds: int | None = None,
   ):
@@ -117,9 +117,12 @@ class NegotiationScheduler:
     self._global_round_number = 1
 
   # Pair registry
-  def _parse_pair(self, pair: PairMapping) -> PairIds:
-    """Validates a pair mapping and resolves it to canonical participant ids."""
-    buyer_id, seller_id = normalize_negotiation_pair(pair)
+  def _parse_pair(self, pair: Sequence[str]) -> PairIds:
+    """Validates an internal 2-item pair and resolves it to canonical ids."""
+    pair_mapping = pair_mapping_from_ids(pair)
+    if pair_mapping is None:
+      return '', ''
+    buyer_id, seller_id = normalize_negotiation_pair(pair_mapping)
     if not buyer_id or not seller_id:
       return '', ''
     if buyer_id not in self._id_to_name or seller_id not in self._id_to_name:
@@ -132,7 +135,7 @@ class NegotiationScheduler:
 
   def _build_pair_queue(
       self,
-      negotiation_pairs: Sequence[PairMapping] | None,
+      negotiation_pairs: Sequence[Sequence[str]] | None,
   ) -> list[PairIds]:
     """Builds the initial pair queue, defaulting to adjacent buyer/seller ids."""
     if negotiation_pairs:

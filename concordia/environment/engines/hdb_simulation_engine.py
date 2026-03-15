@@ -149,15 +149,11 @@ class HDBSimulationEngine(engine_lib.Engine):
       return
 
     coordinator = self._get_coordinator(game_master)
-    registered_player_ids = coordinator.get_registered_player_ids()
-    if len(registered_player_ids) != len(entities):
-      logging.warning(
-          'Registered player ids (%d) do not align with entities (%d); '
-          'using the shared prefix for id-to-entity mapping.',
-          len(registered_player_ids),
-          len(entities),
-      )
-    entity_by_id = dict(zip(registered_player_ids, entities))
+    entity_by_id = {
+        str(entity._hdb_player_id): entity
+        for entity in entities
+        if getattr(entity, '_hdb_player_id', '')
+    }
 
     def _observe_entity(entity: entity_lib.Entity) -> None:
       observation = self.make_observation(game_master, entity)
