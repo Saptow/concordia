@@ -152,6 +152,112 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         'negotiation_enabled': negotiation.is_enabled(),
     }
 
+  @staticmethod
+  def _count_listing_matches(listing_outcome: Any | None) -> int:
+    if listing_outcome is None:
+      return 0
+    matched_pairs = getattr(listing_outcome, 'matched_pairs', ())
+    return len(matched_pairs)
+
+  @staticmethod
+  def _count_negotiation_pairs(
+      negotiation_outcome: Mapping[str, Any] | None,
+      key: str,
+  ) -> int:
+    if negotiation_outcome is None:
+      return 0
+    value = negotiation_outcome.get(key, ())
+    return len(value) if isinstance(value, Sequence) and not isinstance(value, str) else 0
+
+  @staticmethod
+  def _sequence_or_empty(value: object) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, str):
+      return list(value)
+    return []
+
+  def _format_listing_summary(self, listing_outcome: Any | None) -> list[str]:
+    if listing_outcome is None:
+      return ['Listing', '  status: disabled']
+    matched_pairs = list(getattr(listing_outcome, 'matched_pairs', ()))
+    lines = [
+        'Listing',
+        (
+            '  Summary: '
+            f'Assigned={len(self._module_assignments.get("listing", ()))} '
+            f'Matches={len(matched_pairs)}'
+        ),
+    ]
+    for match in matched_pairs:
+      lines.append(
+          f'  Match: {match.buyer_name} ({match.buyer_id}) '
+          f'<-> {match.seller_name} ({match.seller_id})'
+      )
+    return lines
+
+  def _format_negotiation_summary(
+      self,
+      negotiation_outcome: Mapping[str, Any] | None,
+  ) -> list[str]:
+    if negotiation_outcome is None:
+      return ['Negotiation', '  Status: disabled']
+    event_lines = self._sequence_or_empty(negotiation_outcome.get('events', ()))
+    closed_pairs = self._sequence_or_empty(negotiation_outcome.get('closed_pairs', ()))
+    lines = [
+        'Negotiation',
+        (
+            '  Summary: '
+            f'{len(self._module_assignments.get("negotiation", ()))} '
+            f'Active_pairs={negotiation_outcome.get("number_of_pairs_negotiated", 0)} '
+            f'Closed={len(closed_pairs)}'
+        )
+    ]
+    if event_lines:
+      lines.append('  Events:')
+      for event in event_lines:
+        lines.append(f'    - {event}')
+    else:
+      lines.append('  Events: none')
+    if closed_pairs:
+      lines.append('  Outcomes:')
+      for record in closed_pairs:
+        if not isinstance(record, Mapping):
+          continue
+        lines.append(
+            '    - '
+            f'{record.get("buyer_name", record.get("buyer_id", "?"))} '
+            f'<-> {record.get("seller_name", record.get("seller_id", "?"))}: '
+            f'{record.get("outcome", "UNKNOWN")}'
+        )
+    return lines
+
+  def _log_week_summary(
+      self,
+      *,
+      week_number: int,
+      listing_outcome: Any | None,
+      negotiation_outcome: Mapping[str, Any] | None,
+  ) -> None:
+    successful = self._count_negotiation_pairs(negotiation_outcome, 'successful_pairs')
+    failed = self._count_negotiation_pairs(negotiation_outcome, 'failed_pairs')
+    lines = [
+        '+' + '-' * 54 + '+',
+        f'| Week {week_number:<2} Summary{" " * 38}|',
+        '+' + '-' * 54 + '+',
+        (
+            'Overview'
+        ),
+        (
+            '  Successful matches='
+            f'{len(self._pending_matches)} '
+            f'successful negotiations={successful} '
+            f'failed negotiations={failed}'
+        ),
+        *self._format_listing_summary(listing_outcome),
+        *self._format_negotiation_summary(negotiation_outcome),
+        '+' + '-' * 54 + '+',
+    ]
+    logging.info('\n%s', '\n'.join(lines))
+
   def complete_week(
       self,
       *,
@@ -180,6 +286,11 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         'negotiation': dict(negotiation_outcome) if negotiation_outcome else None,
         'pending_matches_for_next_week': list(self._pending_matches),
     }
+    self._log_week_summary(
+        week_number=current_week,
+        listing_outcome=listing_outcome,
+        negotiation_outcome=negotiation_outcome,
+    )
     self._week_number += 1
     return dict(self._last_week_summary)
 
