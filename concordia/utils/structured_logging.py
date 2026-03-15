@@ -26,12 +26,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import dataclasses
 import hashlib
-import html
 import json
+import re
 import threading
 from typing import Any
 
+from concordia.utils import structured_logging_html
+
 _DEFAULT_MIN_CHUNK_LENGTH = 50
+
+_IMAGE_MD_REGEX = re.compile(
+    r'!\[([^\]]*)\]\((data:image/[a-zA-Z0-9.\-+]+;base64,[^)]+)\)'
+)
+_CONTENT_REF_REGEX = re.compile(r'!\[([^\]]*)\]\(content_ref:([a-f0-9]+)\)')
 
 
 class ContentStore:
@@ -269,6 +276,8 @@ class SimulationLog:
 
     Scans through the value tree (dicts, lists, strings) and replaces
     strings longer than min_length with {'_ref': content_id} references.
+    Embedded images are extracted and stored separately so that identical
+    images shared across different text contexts are deduplicated.
 
     Args:
       value: The value to deduplicate (can be str, list, dict, or other).
@@ -280,6 +289,7 @@ class SimulationLog:
     """
     if isinstance(value, str):
       if len(value) >= min_length:
+        value = self._extract_and_store_images(value)
         return {'_ref': self._content_store.add(value)}
       return value
     elif isinstance(value, list):
@@ -295,11 +305,23 @@ class SimulationLog:
       except TypeError:
         return str(value)
 
+  def _extract_and_store_images(self, text: str) -> str:
+    """Extract embedded images from text, store them, and replace with refs."""
+
+    def _replace_image(match: re.Match[str]) -> str:
+      alt = match.group(1)
+      data_uri = match.group(2)
+      content_id = self._content_store.add(data_uri)
+      return f'![{alt}](content_ref:{content_id})'
+
+    return _IMAGE_MD_REGEX.sub(_replace_image, text)
+
   def reconstruct_value(self, value: Any) -> Any:
     """Recursively reconstruct strings from references.
 
     Scans through the value tree and replaces {'_ref': content_id}
     references with the original string content from ContentStore.
+    Also restores embedded image data from content_ref: placeholders.
 
     Args:
       value: The value with references to reconstruct.
@@ -309,11 +331,25 @@ class SimulationLog:
     """
     if isinstance(value, dict):
       if '_ref' in value and len(value) == 1:
-        return self._content_store.get(value['_ref'])
+        text = self._content_store.get(value['_ref'])
+        return self._restore_images(text)
       return {k: self.reconstruct_value(v) for k, v in value.items()}
     elif isinstance(value, list):
       return [self.reconstruct_value(v) for v in value]
     return value
+
+  def _restore_images(self, text: str) -> str:
+    """Restore embedded images from content_ref: placeholders."""
+
+    def _replace_ref(match: re.Match[str]) -> str:
+      alt = match.group(1)
+      content_id = match.group(2)
+      data_uri = self._content_store.get_or_none(content_id)
+      if data_uri is not None:
+        return f'![{alt}]({data_uri})'
+      return match.group(0)
+
+    return _CONTENT_REF_REGEX.sub(_replace_ref, text)
 
   def add_entry(
       self,
@@ -519,6 +555,8 @@ class SimulationLog:
 
     This method converts the raw simulation log format (list of dicts
     with Step, entity keys, Summary, etc.) into the new structured format.
+    Supports both sequential/simultaneous logs and asynchronous logs
+    (which include a 'thread' key identifying the entity thread).
 
     Args:
       raw_log: List of log entries in the raw format.
@@ -526,20 +564,26 @@ class SimulationLog:
     Returns:
       A new SimulationLog populated with the raw_log data.
     """
+
     log = cls()
 
     for entry in raw_log:
       step = entry.get('Step', 0)
       summary = entry.get('Summary', '')
+      thread = entry.get('thread', '')
 
       for key, value in entry.items():
-        if key in ('Step', 'Summary', 'date'):
+        if key in ('Step', 'Summary', 'date', 'thread'):
           continue
 
         if 'Entity' in key:
           entity_name = key.replace('Entity [', '').replace(']', '').strip()
           if entity_name == 'Entity':
-            entity_name = 'Unknown'
+            entity_name = thread or 'Unknown'
+
+          raw_data = {'key': key, 'value': value} if value else {}
+          if thread:
+            raw_data['thread'] = thread
 
           log.add_entry(
               step=step,
@@ -548,10 +592,14 @@ class SimulationLog:
               component_name='entity_action',
               entry_type='entity',
               summary=summary,
-              raw_data={'key': key, 'value': value} if value else {},
+              raw_data=raw_data,
           )
         else:
           gm_name = key.split(' --- ')[0] if ' --- ' in key else key
+
+          raw_data = {'key': key, 'value': value} if value else {}
+          if thread:
+            raw_data['thread'] = thread
 
           log.add_entry(
               step=step,
@@ -560,7 +608,7 @@ class SimulationLog:
               component_name='game_master',
               entry_type='step',
               summary=summary,
-              raw_data={'key': key, 'value': value} if value else {},
+              raw_data=raw_data,
           )
 
     return log
@@ -574,7 +622,7 @@ class SimulationLog:
     Returns:
       Complete HTML string with embedded data and dynamic rendering.
     """
-    return render_dynamic_html(
+    return structured_logging_html.render_dynamic_html(
         simulation_log=self,
         entity_memories=self._entity_memories or None,
         game_master_memories=self._game_master_memories or None,
@@ -1397,6 +1445,69 @@ class AIAgentLogInterface:
       results.append(self._entry_to_dict(entry, include_content))
     return results
 
+  def get_component_values(
+      self,
+      component_key: str = '__act__',
+      value_key: str = 'Value',
+      entity_name: str | None = None,
+      entry_type: str | None = None,
+      step_range: tuple[int, int] | None = None,
+  ) -> list[dict[str, Any]]:
+    """Extract a specific component value across matching log entries.
+
+    Resolves deduplicated references and navigates into each entry's data
+    to extract the value at
+    ``deduplicated_data['value'][component_key][value_key]``.
+
+    This is useful for extracting entity actions (component_key='__act__',
+    value_key='Value'), resource tracker outputs, or any other named
+    component value without manually resolving references.
+
+    Args:
+      component_key: The key of the component within the entry's value dict.
+        Defaults to '__act__' which holds entity actions.
+      value_key: The key within the component dict to extract. Defaults to
+        'Value' which holds the action text.
+      entity_name: If provided, only include entries for this entity.
+      entry_type: If provided, only include entries of this type.
+      step_range: If provided, only include entries in this step range
+        (inclusive).
+
+    Returns:
+      List of dicts, each with 'step', 'entity_name', and 'value' keys.
+      Only entries where the requested component and value key exist are
+      included.
+    """
+    results = []
+    for entry in self._log.entries:
+      if entity_name and entry.entity_name != entity_name:
+        continue
+      if entry_type and entry.entry_type != entry_type:
+        continue
+      if step_range:
+        if entry.step < step_range[0] or entry.step > step_range[1]:
+          continue
+
+      full_data = self._log.reconstruct_value(entry.deduplicated_data)
+      value_dict = full_data.get('value', {})
+      if not isinstance(value_dict, dict):
+        continue
+
+      component = value_dict.get(component_key, {})
+      if not isinstance(component, dict):
+        continue
+
+      if value_key not in component:
+        continue
+
+      results.append({
+          'step': entry.step,
+          'entity_name': entry.entity_name,
+          'value': component[value_key],
+      })
+
+    return results
+
   def get_entry_content(self, entry_index: int) -> dict[str, Any]:
     """Get the full content for a specific entry by index.
 
@@ -1418,16 +1529,19 @@ class AIAgentLogInterface:
         'data': self._log.reconstruct_value(entry.deduplicated_data),
     }
 
-  def search_entries(
+  def search_summaries(
       self,
       query: str,
       include_content: bool = False,
   ) -> list[dict[str, Any]]:
-    """Search entries by text in summary.
+    """Search entries by text in the summary field only.
+
+    This is a fast search that only checks the short summary string
+    attached to each entry (e.g., 'Step 3 forum_rules --- ...').
 
     Args:
       query: Text to search for (case-insensitive).
-      include_content: If True, include full reconstructed content.
+      include_content: If True, include full reconstructed content in results.
 
     Returns:
       List of matching entry dictionaries.
@@ -1436,6 +1550,34 @@ class AIAgentLogInterface:
     results = []
     for entry in self._log.entries:
       if query_lower in entry.summary.lower():
+        results.append(self._entry_to_dict(entry, include_content))
+    return results
+
+  def search_entries(
+      self,
+      query: str,
+      include_content: bool = True,
+  ) -> list[dict[str, Any]]:
+    """Search entries by text in all reconstructed content.
+
+    Searches through the full reconstructed content of each entry,
+    including prompts, values, observations, component data, etc.
+    This is slower than search_summaries() but finds matches in all
+    logged data.
+
+    Args:
+      query: Text to search for (case-insensitive).
+      include_content: If True, include full reconstructed content in results.
+
+    Returns:
+      List of matching entry dictionaries.
+    """
+    query_lower = query.lower()
+    results = []
+    for entry in self._log.entries:
+      full_data = self._log.reconstruct_value(entry.deduplicated_data)
+      full_str = json.dumps(full_data, default=str)
+      if query_lower in full_str.lower():
         results.append(self._entry_to_dict(entry, include_content))
     return results
 
@@ -1457,6 +1599,106 @@ class AIAgentLogInterface:
       List of memory strings, or empty list if not available.
     """
     return self._log.get_game_master_memories()
+
+  def get_entity_actions(
+      self,
+      entity_name: str,
+  ) -> list[dict[str, Any]]:
+    """Get a concise timeline of an entity's actions across all steps.
+
+    Extracts the __act__ Value from each entity entry, providing a
+    quick overview of what the entity did at each step.
+
+    Args:
+      entity_name: Name of the entity.
+
+    Returns:
+      List of dicts with 'step' and 'action' keys.
+    """
+    results = []
+    for entry in self._log.entries:
+      if entry.entity_name != entity_name:
+        continue
+      if entry.entry_type != 'entity':
+        continue
+      full_data = self._log.reconstruct_value(entry.deduplicated_data)
+      value_dict = full_data.get('value', {})
+      if not isinstance(value_dict, dict):
+        continue
+      act_component = value_dict.get('__act__', {})
+      if isinstance(act_component, dict) and 'Value' in act_component:
+        results.append({
+            'step': entry.step,
+            'action': act_component['Value'],
+        })
+    return results
+
+  def get_entity_action_context(
+      self,
+      entity_name: str,
+      step: int,
+  ) -> dict[str, Any] | None:
+    """Get an entity's full action context at a specific step.
+
+    Returns the entity's action, observations, and prompt at the time
+    it produced its action. This is the primary method for understanding
+    why an entity did what it did.
+
+    Args:
+      entity_name: Name of the entity.
+      step: The simulation step to look up.
+
+    Returns:
+      Dictionary with 'step', 'entity_name', 'action', 'action_prompt',
+      'observations', and 'all_components' keys, or None if no matching
+      entry was found.
+    """
+    for entry in self._log.entries:
+      if (
+          entry.entity_name != entity_name
+          or entry.entry_type != 'entity'
+          or entry.step != step
+      ):
+        continue
+
+      full_data = self._log.reconstruct_value(entry.deduplicated_data)
+      value_dict = full_data.get('value', {})
+      if not isinstance(value_dict, dict):
+        continue
+
+      act_component = value_dict.get('__act__', {})
+      obs_component = value_dict.get('__observation__', {})
+
+      action = ''
+      action_prompt = ''
+      if isinstance(act_component, dict):
+        action = act_component.get('Value', '')
+        action_prompt = act_component.get('Prompt', '')
+
+      observations = []
+      if isinstance(obs_component, dict):
+        obs_value = obs_component.get('Value', [])
+        if isinstance(obs_value, list):
+          observations = obs_value
+        elif obs_value:
+          observations = [obs_value]
+
+      # Collect all component names and their values
+      all_components = {}
+      for comp_name, comp_data in value_dict.items():
+        if isinstance(comp_data, dict) and 'Value' in comp_data:
+          all_components[comp_name] = comp_data['Value']
+
+      return {
+          'step': step,
+          'entity_name': entity_name,
+          'action': action,
+          'action_prompt': action_prompt,
+          'observations': observations,
+          'all_components': all_components,
+      }
+
+    return None
 
   def _entry_to_dict(
       self,
