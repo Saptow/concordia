@@ -76,9 +76,11 @@ class NegotiationScheduler:
       negotiation_pairs: Sequence[Sequence[str]] | None = None,
       player_ids: Sequence[str] | None = None,
       max_rounds: int | None = None,
+      allow_empty_players: bool = False,
   ):
     if not player_names:
-      logging.error('No player names provided to the HDB negotiation scheduler.')
+      if not allow_empty_players:
+        logging.error('No player names provided to the HDB negotiation scheduler.')
       player_names = ()
 
     self._max_rounds = max_rounds if max_rounds and max_rounds > 0 else None

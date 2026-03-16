@@ -62,6 +62,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         negotiation_pairs=None,
         player_ids=(),
         max_rounds=max_rounds if max_rounds > 0 else None,
+        allow_empty_players=True,
     )
     self._offer_tracker = hdb_negotiation_helpers.ActiveOfferTracker(self._scheduler)
 

@@ -395,17 +395,24 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
 
     # Prepare listing -> negotiation handoff.
     next_pending_matches = []
-    if listing_outcome is not None:
+    if listing._enabled and listing_outcome is not None:
       next_pending_matches = listing.build_negotiation_transfer_payloads(
           listing_outcome.matched_pairs
       )
 
-    relisting_pair_payloads = negotiation.build_relisting_transfer_payloads(
-        self._failed_pairs_to_relist(negotiation_outcome)
-    )
-    reopened_listing_pairs = listing.reopen_failed_negotiation_pairs(
-        relisting_pair_payloads
-    )
+    if negotiation._enabled and negotiation_outcome is not None:
+      relisting_pair_payloads = negotiation.build_relisting_transfer_payloads(
+          self._failed_pairs_to_relist(negotiation_outcome)
+      )
+    else:
+      relisting_pair_payloads = []
+
+    if listing._enabled:
+        reopened_listing_pairs = listing.reopen_failed_negotiation_pairs(
+            relisting_pair_payloads
+        )
+    else:
+        reopened_listing_pairs = []
 
     self._pending_matches = next_pending_matches
 
