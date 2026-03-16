@@ -52,19 +52,6 @@ def _escape_format_braces(text: str) -> str:
     return str(text).replace('{', '{{').replace('}', '}}')
 
 
-def _normalize_initial_observations(value: object) -> list[str]:
-    if isinstance(value, str):
-        text = value.strip()
-        return [text] if text else []
-    if isinstance(value, (list, tuple)):
-        return [
-            str(item).strip()
-            for item in value
-            if str(item).strip()
-        ]
-    return []
-
-
 @dataclasses.dataclass
 class Entity(prefab_lib.Prefab):
     """
@@ -380,9 +367,8 @@ class Entity(prefab_lib.Prefab):
         )
         agent._hdb_player_id = str(self.params.get('id', ''))
 
-        for observation_text in _normalize_initial_observations(
-            negotiation_config.get('initial_observations', ()),
-        ):
+        # For initialisation, especially for testing
+        for observation_text in negotiation_config.get('initial_observations', []):
             agent.observe(observation_text)
 
         return agent
