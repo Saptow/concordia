@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
+from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -47,6 +48,7 @@ class UncertainSeller(
         lambda_: float = 1.0,
         a: float = 1.0,
         b: float = 1.0,
+        listing_price_prior_discount: float = 0.9,
         memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
         recent_memory_window: int = 6,
         emit_pre_act_context: bool = True,
@@ -67,6 +69,9 @@ class UncertainSeller(
         self._flat_listing = dict(flat_listing) if flat_listing else {}
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
         self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
+        self._listing_price_prior_discount = max(
+            0.0, min(1.0, float(listing_price_prior_discount))
+        )
         self._emit_pre_act_context = emit_pre_act_context
         self._memory_component_key = memory_component_key
         self._recent_memory_window = max(1, int(recent_memory_window))
@@ -153,6 +158,20 @@ class UncertainSeller(
         del action_spec
         _ = self.get_pre_act_value()
         return ""
+
+    def apply_listing_handoff(
+        self,
+        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+    ) -> None:
+        listing_price = uncertain_helper.coerce_positive_float(
+            listing_payload.listing_record.listing_price
+        )
+        if listing_price <= 0.0:
+            return
+        self._beliefs['counterpart_reservation'].mu = (
+            listing_price * self._listing_price_prior_discount
+        )
+        self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
 
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0):
         """Initialize default beliefs about negotiation parameters."""
@@ -446,6 +465,12 @@ class UncertainSeller(
             self._debug_trace,
             f'Observation considered: {uncertain_helper.format_observation_summary(observation_text)}',
         )
+        if uncertain_helper.extract_listing_handoff_state(observation_text) is not None:
+            uncertain_helper.append_debug_trace(
+                self._debug_trace,
+                'Listing handoff observation recorded without duplicate belief update.',
+            )
+            return ""
         uncertain_helper.append_debug_trace(
             self._debug_trace,
             self._update_counterpart_reservation_from_context(observation),
@@ -478,6 +503,7 @@ class UncertainSeller(
             'own_reservation': self._own_reservation,
             'own_confidence': self._own_confidence,
             'counterpart_confidence': self._counterpart_confidence,
+            'listing_price_prior_discount': self._listing_price_prior_discount,
             'issue_bank': [
                 issue.model_dump()
                 for issue in self._issue_bank
@@ -492,6 +518,18 @@ class UncertainSeller(
         self._own_reservation = max(0.0, state.get('own_reservation', self._own_reservation))
         self._own_confidence = max(0.0, min(1.0, state.get('own_confidence', self._own_confidence)))
         self._counterpart_confidence = max(0.0, min(1.0, state.get('counterpart_confidence', self._counterpart_confidence)))
+        self._listing_price_prior_discount = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    state.get(
+                        'listing_price_prior_discount',
+                        self._listing_price_prior_discount,
+                    )
+                ),
+            ),
+        )
         for name, belief_data in state.get('beliefs', {}).items():
             if name in self._beliefs:
                 belief = self._beliefs[name]

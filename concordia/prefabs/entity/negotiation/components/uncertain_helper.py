@@ -101,7 +101,7 @@ class NormalInverseGamma:
 
 
 @dataclasses.dataclass
-class BeliefDistribution:
+class NormalDistribution:
     """Normal belief used for an agent's own reservation estimate."""
 
     name: str
@@ -238,6 +238,47 @@ def extract_observation_actor(observation: str) -> str | None:
 
 def normalize_text(value: str) -> str:
     return ' '.join(str(value).split()).strip().strip('"').strip("'")
+
+
+def coerce_positive_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if parsed > 0.0 else float(default)
+
+
+def extract_first_json_object(text: str) -> str | None:
+    candidate = str(text or '').strip()
+    start = candidate.find('{')
+    if start < 0:
+        return None
+    candidate = candidate[start:]
+    depth = 0
+    for idx, ch in enumerate(candidate):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return candidate[: idx + 1]
+    return None
+
+
+def extract_listing_handoff_state(observation: str) -> Dict[str, Any] | None:
+    marker = 'Listing handoff context for this negotiation:'
+    text = str(observation or '')
+    if marker not in text:
+        return None
+    _, _, payload = text.partition(marker)
+    payload_json = extract_first_json_object(payload)
+    if not payload_json:
+        return None
+    try:
+        parsed = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def sanitize_issue_bank(issues: List[NegotiationIssue]) -> List[NegotiationIssue]:
@@ -514,19 +555,22 @@ def restore_issue_bank(raw_issue_bank: List[Dict[str, Any]]) -> List[Negotiation
 
 
 __all__ = [
-    'BeliefDistribution',
     'LinkedBelief',
     'NegotiationIssue',
     'NegotiationIssueBucket',
     'NegotiationIssueResponse',
+    'NormalDistribution',
     'NormalInverseGamma',
     'ScenarioAnalysis',
     'append_debug_trace',
     'build_main_deal_summary',
     'build_strategy_context',
     'build_strategy_scenario_summary',
+    'coerce_positive_float',
     'compute_issue_score',
     'discover_issues',
+    'extract_first_json_object',
+    'extract_listing_handoff_state',
     'extract_observation_actor',
     'format_interval',
     'format_issue_bank',

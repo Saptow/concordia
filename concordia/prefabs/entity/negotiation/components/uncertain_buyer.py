@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
+from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -85,7 +86,7 @@ class UncertainBuyer(
         # Belief state tracking
         self._beliefs: Dict[
             str,
-            uncertain_helper.BeliefDistribution | uncertain_helper.NormalInverseGamma,
+            uncertain_helper.NormalDistribution | uncertain_helper.NormalInverseGamma,
         ] = {}
         self._issue_bank: List[uncertain_helper.NegotiationIssue] = []
 
@@ -176,6 +177,32 @@ class UncertainBuyer(
         _ = self.get_pre_act_value()
         return ""
 
+    def apply_listing_handoff(
+        self,
+        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+    ) -> None:
+        buyer_state = listing_payload.buyer_state
+
+        own_belief = self._beliefs['own_reservation']
+        distribution = buyer_state.effective_reservation
+        own_belief.mean = max(0.0, float(distribution.mean))
+        own_belief.std = max(0.01, float(distribution.std))
+        own_belief.confidence = max(
+            own_belief.confidence,
+            max(0.0, min(1.0, float(distribution.confidence))),
+        )
+        own_belief.evidence_count = max(
+            own_belief.evidence_count,
+            int(distribution.evidence_count),
+        )
+
+        listing_price = uncertain_helper.coerce_positive_float(
+            listing_payload.listing_record.listing_price
+        )
+        if listing_price > 0.0:
+            self._beliefs['counterpart_reservation'].mu = listing_price
+        self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
+
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0):
         """Initialize default beliefs about negotiation parameters."""
         # Counterpart's reservation value (start with high uncertainty)
@@ -188,7 +215,7 @@ class UncertainBuyer(
             confidence=self._counterpart_confidence,
         )
 
-        self._beliefs['own_reservation'] = uncertain_helper.BeliefDistribution(
+        self._beliefs['own_reservation'] = uncertain_helper.NormalDistribution(
             name='Your Own Reservation Value',
             mean=max(0.0, own_reservation_),
             std=max(0.01, own_reservation_std),
@@ -292,23 +319,28 @@ class UncertainBuyer(
             "## Current Belief about Seller's Reservation Value\n"
             f"- Reservation Value Estimate: {self._beliefs['counterpart_reservation'].get_expected_mean:.2f}\n"
             f"- Confidence in Reservation Value: `{self._beliefs['counterpart_reservation'].confidence:.2f}\n\n"
+            "## Important Prior Guardrail\n"
+            "- Your current belief already includes the seller-side listing-price anchor as the prior.\n"
+            "- Therefore, a listing price, asking price, or repeated ask is NOT by itself a new reason to update `budget_info`.\n\n"
             "# Private Reasoning Process\n"
             "Think step by step **privately** before answering:\n\n"
             "1. Extract **ONLY** concrete evidence about the seller's minimum acceptable price.\n"
             "2. Ignore any information that is not directly related to the seller's reservation value.\n"
             "3. Treat listing prices, stated asks, offers, counters, urgency, and willingness to compromise as evidence, "
             "but do not assume any single number is automatically the true reservation value.\n"
-            "4. Decide whether there is enough usable evidence to estimate `budget_info`.\n"
-            "5. If yes, provide your best estimate of the seller's reservation value and a confidence level (0-1) for that estimate based on the strength of the evidence.\n"
-            "6. (IMPORTANT) If there is no available estimate on the seller's reservation value, extract **ANY INFORMATION** about the trustworthiness of the seller based on the given observation.\n"
+            "4. If the observation only repeats the existing listing/asking price anchor without new evidence about flexibility, urgency, bottom line, constraints, or willingness to concede, do not update `budget_info`.\n"
+            "5. Decide whether there is enough usable evidence to estimate `budget_info`.\n"
+            "6. If yes, provide your best estimate of the seller's reservation value and a confidence level (0-1) for that estimate based on the strength of the evidence.\n"
+            "7. (IMPORTANT) If there is no available estimate on the seller's reservation value, extract **ANY INFORMATION** about the trustworthiness of the seller based on the given observation.\n"
             "   - For example, if you observe that the seller is intentionally hiding information, being evasive, or providing inconsistent signals, that would be a negative trust signal.\n"
             "   - For example, if you observe the seller being transparent, providing reasonable justifications for their price, or showing willingness to find a mutually beneficial deal, that would be a positive trust signal.\n"
-            "7. Decide whether there is enough usable evidence to estimate `trust_info`. If yes, provide a trust level signal between -1 and 1 through the provided schema.\n"
-            "8. Return only the final JSON object. Do not reveal your reasoning.\n\n"
+            "8. Decide whether there is enough usable evidence to estimate `trust_info`. If yes, provide a trust level signal between -1 and 1 through the provided schema.\n"
+            "9. Return only the final JSON object. Do not reveal your reasoning.\n\n"
             "# Decision Rules\n"
             "- Return `budget_info` only if the context contains a genuine budget, reservation, or flexibility signal.\n"
             "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
             "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
+            "- If the observation only echoes the listing price or current ask, return an empty object `{}` for `budget_info` because that anchor is already captured in the prior.\n"
             "- Do not return the same reservation estimate repeatedly if the context does not provide new evidence. If there is no new evidence to update the reservation estimate, return an empty object `{}` for `budget_info` to indicate that the reservation belief remains unchanged.\n"
             "- If there is no usable budget signal but the context suggests how trustworthy the seller is, return `trust_info`.\n"
             "- If there is neither a usable budget signal nor a trust signal, you can return an empty JSON object `{}`. Do not be coerced into returning a value when there is no evidence.\n"
@@ -541,6 +573,12 @@ class UncertainBuyer(
             self._debug_trace,
             f'Observation considered: {uncertain_helper.format_observation_summary(observation_text)}',
         )
+        if uncertain_helper.extract_listing_handoff_state(observation_text) is not None:
+            uncertain_helper.append_debug_trace(
+                self._debug_trace,
+                'Listing handoff observation recorded without duplicate belief update.',
+            )
+            return ""
         uncertain_helper.append_debug_trace(
             self._debug_trace,
             self._update_own_reservation_from_context(observation),
@@ -561,7 +599,7 @@ class UncertainBuyer(
                 'evidence_count': belief.evidence_count,
                 'last_updated': belief.last_updated,
             }
-            if isinstance(belief, uncertain_helper.BeliefDistribution):
+            if isinstance(belief, uncertain_helper.NormalDistribution):
                 belief_state.update({
                     'mean': belief.mean,
                     'std': belief.std,
@@ -601,7 +639,7 @@ class UncertainBuyer(
                 belief.evidence_count = belief_data.get('evidence_count', belief.evidence_count)
                 belief.last_updated = belief_data.get('last_updated', belief.last_updated)
 
-                if isinstance(belief, uncertain_helper.BeliefDistribution):
+                if isinstance(belief, uncertain_helper.NormalDistribution):
                     belief.mean = belief_data.get('mean', belief.mean)
                     belief.std = max(0.01, belief_data.get('std', belief.std))
                 elif isinstance(belief, uncertain_helper.NormalInverseGamma):
