@@ -58,10 +58,6 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     # Parameters
     _OFFER_OPEN_ACTIONS = frozenset({'MAKE_OFFER', 'MAKE_COUNTEROFFER'})
     _OFFER_CLOSE_ACTIONS = frozenset({'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'})
-    _INFO_HAZARD_STEEPNESS = 10.0
-    _INFO_HAZARD_MIDPOINT = 0.7
-    _ACTIVE_OFFER_INFO_MULTIPLIER = 0.6
-    _LATE_STAGE_INFO_BUDGET_CAP = 0.2
 
     def __init__(
         self,
@@ -331,82 +327,70 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     def _get_uncertainty_strategy_summary(
         self,
         action_context: str,
-        allowed_info_budget: float,
     ) -> Dict[str, Any]:
         try:
             return self._uncertainty_context.get_strategy_uncertainty_summary(
                 action_context,
-                allowed_info_budget=allowed_info_budget,
             )
         except Exception:
             return {
                 'scenario_summary': 'Unknown',
-                'info_items': [],
-                'recommend_information_gathering': False,
-                'avg_uncertainty': 1.0,
+                'issue_items': [],
+                'top_issue_question': '',
+                'top_issue_score': 0.0,
+                'action_confidence': 1.0,
+                'risk_tolerance': 0.5,
             }
 
-    def _get_base_info_budget(self) -> float:
-        try:
-            base_budget = float(self._uncertainty_context.get_information_gathering_budget())
-        except Exception:
-            base_budget = 0.0
-        return max(0.0, base_budget)
-
-    def _compute_allowed_info_budget(
+    def _should_ask_question(
         self,
-        base_budget: float,
+        uncertainty_summary: Dict[str, Any],
         rounds_left: int,
-        horizon: int,
-        has_active_offer: bool,
-    ) -> float:
-        """Transform base exploration capacity into a turn-level allowed budget."""
-        if base_budget <= 0.0 or rounds_left <= 0:
-            return 0.0
+    ) -> bool:
+        if rounds_left <= 1:
+            return False
+        top_issue_question = str(
+            uncertainty_summary.get('top_issue_question', '')
+        ).strip()
+        if not top_issue_question:
+            return False
 
-        progress_used = 1.0 - (rounds_left / max(1, horizon))
-        progress_used = max(0.0, min(1.0, progress_used))
+        action_confidence = float(uncertainty_summary.get('action_confidence', 1.0))
+        risk_tolerance = float(uncertainty_summary.get('risk_tolerance', 0.5))
+        action_confidence = max(0.0, min(1.0, action_confidence))
+        risk_tolerance = max(0.0, min(1.0, risk_tolerance))
+        return action_confidence <= risk_tolerance
 
-        closure_hazard = 1.0 / (
-            1.0
-            + math.exp(
-                -self._INFO_HAZARD_STEEPNESS
-                * (progress_used - self._INFO_HAZARD_MIDPOINT)
-            )
-        )
-        time_multiplier = 1.0 - closure_hazard
-        offer_multiplier = (
-            self._ACTIVE_OFFER_INFO_MULTIPLIER if has_active_offer else 1.0
-        )
-
-        allowed_budget = base_budget * time_multiplier * offer_multiplier
-        if rounds_left <= 2:
-            allowed_budget = min(
-                allowed_budget,
-                base_budget * self._LATE_STAGE_INFO_BUDGET_CAP,
-            )
-        return max(0.0, allowed_budget)
-
-    @staticmethod
     def _build_information_focus(
-        info_items: List[str],
-        recommend_information_gathering: bool,
+        self,
+        uncertainty_summary: Dict[str, Any],
         rounds_left: int,
-        allowed_info_budget: float,
+        has_active_offer: bool,
     ) -> str:
-        if rounds_left <= 1 or allowed_info_budget == 0.0 or not info_items:
+        issue_items = list(uncertainty_summary.get('issue_items', []))
+        top_issue_question = str(
+            uncertainty_summary.get('top_issue_question', '')
+        ).strip()
+        if rounds_left <= 1 or not issue_items:
             return 'No more information gathering; focus entirely on closing the deal with ACCEPT_OFFER, REJECT_OFFER, or WALK_AWAY.'
-        if rounds_left <= 2:
+        if self._should_ask_question(
+            uncertainty_summary=uncertainty_summary,
+            rounds_left=rounds_left,
+        ):
+            if has_active_offer:
+                return (
+                    '[IMPORTANT] If clarification is still needed before responding to the active offer, ask at most one targeted question: '
+                    f'"{top_issue_question}"'
+                )
             return (
-                'If you still need information, ask at most one question: '
-                f'{info_items[0]}'
+                '[IMPORTANT] Ask at most one targeted question before negotiating further: '
+                f'"{top_issue_question}"'
             )
-        if recommend_information_gathering:
-            return (
-                '[IMPORTANT] Information gathering is recommended. Prioritise: '
-                + '; '.join(info_items[:2])
-            )
-        return 'If gathering information, prioritize: ' + '; '.join(info_items[:2])
+        return (
+            'Negotiate rather than stall. '
+            'If you ask anything, keep it to one targeted question: '
+            + issue_items[0]
+        )
 
     # TODO: simple deal outlook summary based on numeric fields, can be enhanced with more complex scenario analysis in the future.
     @staticmethod
@@ -457,15 +441,8 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, expected_horizon - rounds_elapsed)
         has_active_offer = self._coerce_bool(numeric_fields.get('HasActiveOffer'))
-        allowed_info_budget = self._compute_allowed_info_budget(
-            base_budget=self._get_base_info_budget(),
-            rounds_left=rounds_left,
-            horizon=expected_horizon,
-            has_active_offer=has_active_offer,
-        )
         uncertainty_summary = self._get_uncertainty_strategy_summary(
             action_context,
-            allowed_info_budget=allowed_info_budget,
         )
         numeric_fields['DealScenarios'] = uncertainty_summary.get(
             'scenario_summary', 'Unknown'
@@ -482,10 +459,9 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
 
         # Get negotiation strategy guidance based on urgency and role
         information_focus = self._build_information_focus(
-            uncertainty_summary.get('info_items', []),
-            bool(uncertainty_summary.get('recommend_information_gathering', False)),
+            uncertainty_summary,
             rounds_left,
-            allowed_info_budget,
+            has_active_offer,
         )
         
         if self._role == RoleType.BUYER:

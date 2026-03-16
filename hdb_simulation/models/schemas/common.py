@@ -75,6 +75,16 @@ class Flat(BaseModel):
     floor_area_sqm: float
     nearby_amenities: Optional[List[str]] = None
 
+    def to_compact_description(self) -> str:
+        details = [str(self.flat_type), f'in {self.town}']
+        if self.address:
+            details.append(f'at {self.address}')
+        if self.storey_range:
+            details.append(f'storey range {self.storey_range}')
+        details.append(f'about {self.floor_area_sqm:.0f} sqm')
+        details.append(f'remaining lease {self.remaining_lease:g} years')
+        return ' '.join(details)
+
 class BuyerBudgetRange(BaseModel):
     min_price: float = Field(ge=0.0)
     max_price: float = Field(ge=0.0)

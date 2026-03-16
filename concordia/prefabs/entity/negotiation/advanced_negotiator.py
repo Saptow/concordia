@@ -148,10 +148,16 @@ class Entity(prefab_lib.Prefab):
             config = modules_config.get('uncertain_buyer', {})
             uncertain_buyer_comp = uncertain_buyer.UncertainBuyer(
                 model=model,
-                confidence_threshold=config.get('confidence_threshold', 0.7),
+                own_confidence=config.get(
+                    'own_confidence',
+                    config.get('confidence', 0.7),
+                ),
+                counterpart_confidence=config.get(
+                    'counterpart_confidence',
+                    config.get('confidence', 0.7),
+                ),
                 risk_tolerance=config.get('risk_tolerance', 0.3),
                 preferences=config.get('preferences', {}),
-                information_gathering_budget=config.get('information_gathering_budget', 0.1),
                 own_reservation_=config.get('own_reservation_', 500000),
                 own_reservation_std=config.get('own_reservation_std', 5000),
                 mu=config.get('cp_reservation', 0),
@@ -165,9 +171,15 @@ class Entity(prefab_lib.Prefab):
             config = modules_config.get('uncertain_seller', {})
             uncertain_seller_comp = uncertain_seller.UncertainSeller(
                 model=model,
-                confidence_threshold=config.get('confidence_threshold', 0.7),
+                own_confidence=config.get(
+                    'own_confidence',
+                    config.get('confidence', 1.0),
+                ),
+                counterpart_confidence=config.get(
+                    'counterpart_confidence',
+                    config.get('confidence', 0.7),
+                ),
                 risk_tolerance=config.get('risk_tolerance', 0.3),
-                information_gathering_budget=config.get('information_gathering_budget', 0.1),
                 own_reservation_=config.get('own_reservation_', 600000),
                 mu=config.get('cp_reservation', 0),
                 lambda_=config.get('lambda_', 1),

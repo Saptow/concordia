@@ -1,10 +1,10 @@
 
 """Negotiation-specific instructions component."""
 
-import json
 from collections.abc import Mapping
 from typing import Optional, Any
 
+from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.typing import entity_component
 
@@ -87,24 +87,17 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
                     return candidate[: idx + 1]
         return None
 
-    def _format_flat_listing_details(self) -> str:
-        """Render listing details into a compact prompt block."""
-        if not self._flat_listing:
-            return ''
-        lines = []
-        for key, value in self._flat_listing.items():
-            label = str(key).replace('_', ' ').strip().title()
-            if isinstance(value, list):
-                value_str = ', '.join(str(v) for v in value) if value else 'None'
-            else:
-                value_str = str(value)
-            lines.append(f'- {label}: {value_str}')
-        return 'Flat Details:\n'+'\n'.join(lines) + '\n\n'
-
     def _generate_base_instructions(self) -> str:
         """Generate base negotiation instructions."""
         additional_instructions = None
         buyer_preferences_block = ''
+        flat_listing_block = ''
+
+        if self._flat_listing:
+            flat_description = common_schemas.Flat.model_validate(
+                self._flat_listing
+            ).to_compact_description()
+            flat_listing_block = f'Flat Details:\n- {flat_description}\n\n'
         
         # Buyer-specifc
         if self._role == RoleType.BUYER:
@@ -154,7 +147,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             '2. Infer interests (timeline, certainty, inclusions) behind positions, not just price itself\n'
             '3. Communicate offers naturally and clearly.\n\n'
         )
-        instructions += self._format_flat_listing_details()
+        instructions += flat_listing_block
 
         if additional_instructions:
             instructions += additional_instructions + '\n'

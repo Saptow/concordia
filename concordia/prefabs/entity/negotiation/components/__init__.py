@@ -13,9 +13,9 @@ from concordia.prefabs.entity.negotiation.components import swarm_intelligence
 from concordia.prefabs.entity.negotiation.components import uncertainty_aware
 from concordia.prefabs.entity.negotiation.components import strategy_evolution
 from concordia.prefabs.entity.negotiation.components import theory_of_mind
+from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.prefabs.entity.negotiation.components import uncertain_buyer
 from concordia.prefabs.entity.negotiation.components import uncertain_seller
-from concordia.prefabs.entity.negotiation.components import deterministic_numeric_facts
 
 # All advanced modules implemented
 
@@ -30,7 +30,7 @@ __all__ = [
     'uncertainty_aware',
     'strategy_evolution',
     'theory_of_mind',
+    'uncertain_helper',
     'uncertain_buyer',
     'uncertain_seller',
-    'deterministic_numeric_facts',
 ]

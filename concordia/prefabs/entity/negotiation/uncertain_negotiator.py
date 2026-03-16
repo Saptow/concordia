@@ -52,6 +52,19 @@ def _escape_format_braces(text: str) -> str:
     return str(text).replace('{', '{{').replace('}', '}}')
 
 
+def _normalize_initial_observations(value: object) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple)):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+    return []
+
+
 @dataclasses.dataclass
 class Entity(prefab_lib.Prefab):
     """
@@ -164,9 +177,12 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_buyer'
             uncertain_context = uncertain_buyer.UncertainBuyer(
                 model=model,
-                confidence=negotiation_config.get('confidence', 0.5), # TODO: determine based on personality metadata
+                own_confidence=negotiation_config.get('own_confidence', 0.5),
+                counterpart_confidence=negotiation_config.get(
+                    'counterpart_confidence',
+                    0.5,
+                ),
                 risk_tolerance=negotiation_config.get('risk_tolerance', 0.5), # TODO: determine based on personality metadata
-                information_gathering_budget=negotiation_config.get('information_gathering_budget', 0.5), # TODO: determine based on personality metadata
                 preferences=negotiation_config.get('preferences', buyer_preferences),
                 flat_listing=flat_listing,
                 own_reservation_=negotiation_config.get('own_reservation_', 0.0),
@@ -191,10 +207,13 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_seller'
             uncertain_context = uncertain_seller.UncertainSeller(
                 model=model,
-                confidence=negotiation_config.get('confidence', 0.5), # TODO: determine based on personality metadata
+                own_confidence=negotiation_config.get('own_confidence', 1.0),
+                counterpart_confidence=negotiation_config.get(
+                    'counterpart_confidence',
+                    0.5,
+                ),
                 risk_tolerance=negotiation_config.get('risk_tolerance', 0.5),
                 flat_listing=flat_listing,
-                information_gathering_budget=negotiation_config.get('information_gathering_budget', 0.1), # TODO: determine based on personality metadata
                 own_reservation_=negotiation_config.get('own_reservation_', 0.0),
                 mu=negotiation_config.get('cp_reservation_', 0.0),
                 lambda_=negotiation_config.get('lambda_', 1.0),
@@ -360,6 +379,11 @@ class Entity(prefab_lib.Prefab):
             act_component_log_aliases=('action_reasoning',),
         )
         agent._hdb_player_id = str(self.params.get('id', ''))
+
+        for observation_text in _normalize_initial_observations(
+            negotiation_config.get('initial_observations', ()),
+        ):
+            agent.observe(observation_text)
 
         return agent
 
