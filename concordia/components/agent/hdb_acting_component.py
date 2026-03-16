@@ -455,13 +455,25 @@ class HDBStructuredActComponent(
             f"- Return only the fields required by {preferred_type}.\n"
             "- Include extra type-specific fields where required.\n"
             "- Any numeric price field must be a positive integer.\n"
+            "- For regular conversations, avoid repeating the same conversation to avoid looping.\n"
             f"{meaningful_counteroffer_rule}"
         )
-        generated = prompt.structured_question(
-            question=(
-                "Generate the fields required for exactly one JSON object for the chosen action type "
-                f"{preferred_type}, using the context and decision brief above."
+        structured_question = (
+            "Generate the fields required for exactly one JSON object for the chosen action type "
+            f"{preferred_type}, using the context and decision brief above."
+        )
+        self._logging_channel({
+            "Summary": (
+                f"StructuredAct field-generation prompt "
+                f"({preferred_type})"
             ),
+            "Chain of thought": (
+                prompt.view().text().splitlines()
+                + ["", "Question:", structured_question]
+            ),
+        })
+        generated = prompt.structured_question(
+            question=structured_question,
             output_schema=specific_schema,
             max_tokens=2200,
             terminators=(),
