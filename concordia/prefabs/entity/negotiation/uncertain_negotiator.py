@@ -136,9 +136,9 @@ class Entity(prefab_lib.Prefab):
         # Create observation component
         observation_to_memory = agent_components.observation.ObservationToMemory()
 
-        # Create observation retrieval component (pulls most recent N observations)
-        observation = agent_components.observation.LastNObservations(
-            history_length=10, # TODO: make this adaptive based on personality metadata
+        # Only expose observations received since the last action so each step
+        # reflects the current week's incoming negotiation signal.
+        observation = agent_components.observation.ObservationsSinceLastPreAct(
             pre_act_label='# RECENT OBSERVATIONS',
         )
 
@@ -354,9 +354,6 @@ class Entity(prefab_lib.Prefab):
             role=role,
             structured_component_key='action_decisions',
             component_order=component_order,
-            fallback_to_llm_for_free=False,
-            structured_component_outputs_action_choice=True,
-            disable_action_validation=True,
         )
         # Create the agent
         agent = entity_agent_with_logging.EntityAgentWithLogging(

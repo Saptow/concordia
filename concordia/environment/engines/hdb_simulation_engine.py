@@ -351,7 +351,10 @@ class HDBSimulationEngine(engine_lib.Engine):
     if verbose:
       print(
           termcolor.colored(
-              f'Completed week {summary["week_number"]}: {json.dumps(summary)}',
+              (
+                  f'Completed week {summary["week_number"]}:\n'
+                  f'{json.dumps(summary, indent=2, ensure_ascii=False)}'
+              ),
               _PRINT_COLOR,
           )
       )

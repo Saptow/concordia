@@ -278,6 +278,12 @@ class QuestionOfRecentMemoriesStructured(
     self._choice_responses = tuple(str(x) for x in choice_responses if str(x))
     self._runtime_choice_responses: tuple[str, ...] | None = None
     self._randomize_choice_responses = bool(randomize_choice_responses)
+    self._last_prompt_context: str = ''
+
+  def get_last_prompt_context(self) -> str:
+    """Returns the latest chooser prompt context without the question text."""
+    with self._lock:
+      return self._last_prompt_context
 
   @override
   def pre_act(
@@ -325,6 +331,8 @@ class QuestionOfRecentMemoriesStructured(
     prompt.statement('') # Ensure there's a newline before the question, which can help with formatting in some cases.
     if self._clock_now is not None:
       prompt.statement(f'Current time: {self._clock_now()}.\n')
+    with self._lock:
+      self._last_prompt_context = prompt.view().text().strip()
     
     question = self._question.format(agent_name=agent_name)
     active_choice_responses = (
@@ -403,6 +411,7 @@ class QuestionOfRecentMemoriesStructured(
   def update(self) -> None:
     with self._lock:
       self._runtime_choice_responses = None
+      self._last_prompt_context = ''
     super().update()
       
 class QuestionOfRecentMemoriesWithoutPreAct(

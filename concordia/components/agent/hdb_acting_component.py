@@ -14,19 +14,21 @@ from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 
 HDB_FIELD_GENERATION_BASE_GUARDRAILS = (
-    "FIELD-GENERATION GUARDRAILS (MUST-FOLLOW):\n"
+    "## Core Rules\n"
     "- This is an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore off-domain context and keep content tied to the flat negotiation only.\n"
     "- If mentioning reports/documents, summarize content instead of promising to share files.\n"
-    "- NEVER mention your own internal state (reservation value, preferences etc.) under verbal_explanation. Include ONLY under internal_reasoning."
+    "- NEVER mention your own internal state (reservation value, preferences etc.) under verbal_explanation. Include it only under internal_reasoning.\n"
 )
 
 HDB_FIELD_GENERATION_MONETARY_GUARDRAILS = (
+    "## Monetary Rules\n"
     "- ALL pricing and monetary references must be in SGD.\n"
     "- Use realistic, executable numbers for negotiation (no placeholders).\n"
 )
 
 HDB_FIELD_GENERATION_INFO_GUARDRAILS = (
+    "## Conversation Rules\n"
     "- Keep inquiry/question/answer content focused on flat condition, lease, location, transaction terms, HDB policies, or timeline.\n"
 )
 
@@ -39,19 +41,10 @@ class HDBStructuredActComponent(
 ):
     """Acting component that produces executable structured actions.
 
-    Purpose:
-      - Read action intent from a structured context component
-        (default key: ``action_decisions``).
-      - In action-choice mode, treat that upstream value as a preselected
-        ``action_type`` and generate only the remaining payload fields.
-      - Optionally validate the resulting payload against role-constrained
-        schemas before returning canonical JSON.
-
-    Behavior:
-      - For FREE-like action specs, this component prefers structured output.
-      - If structured output is missing and ``fallback_to_llm_for_free`` is
-        False, it raises an error.
-      - For CHOICE/FLOAT, it behaves like a normal LLM-driven acting component.
+    Current workflow:
+      - Read the chosen action type from ``action_decisions``.
+      - Build the final action payload for that fixed action type.
+      - Fall back to standard prompting only for non-structured action specs.
     """
 
     def __init__(
@@ -61,48 +54,26 @@ class HDBStructuredActComponent(
         structured_component_key: str = "action_decisions",
         component_order: Sequence[str] | None = None,
         randomize_choices: bool = False,
-        fallback_to_llm_for_free: bool = False,
-        structured_component_outputs_action_choice: bool = False,
-        disable_action_validation: bool = True,
-        force_offer_timeout_seconds: float = 20.0,
-        force_offer_default_price: float = 500000.0,
     ):
         """Initialize the HDB structured acting component.
 
         Args:
             model: Language model used for fallback prompting.
             role: Negotiator role (buyer or seller). Determines schema used.
-            structured_component_key: Context key containing structured action.
+            structured_component_key: Context key containing the chosen action.
             component_order: Optional ordering for context assembly.
             randomize_choices: Whether choice options are shuffled for CHOICE.
-            fallback_to_llm_for_free: If True, FREE action falls back to LLM
-                when structured action is missing instead of raising.
-            structured_component_outputs_action_choice: If True, treat the
-                structured component value as action-type choice only, then
-                generate full JSON fields in a second structured step.
-            disable_action_validation: If True, bypass schema and policy
-                validation and pass through generated JSON payloads. Default is
-                True for the current choice-first workflow.
-            force_offer_timeout_seconds: Max seconds before forcing a deterministic
-                executable offer/counteroffer fallback.
-            force_offer_default_price: Default positive fallback price used if
-                reservation bounds are unavailable.
         """
         super().__init__()
         self._model = model
         self._structured_component_key = structured_component_key
         self._component_order = tuple(component_order) if component_order else None
         self._randomize_choices = randomize_choices
-        self._fallback_to_llm_for_free = fallback_to_llm_for_free
-        self._structured_component_outputs_action_choice = bool(
-            structured_component_outputs_action_choice
-        )
-        self._disable_action_validation = bool(disable_action_validation)
         self._role = role
-        self._force_offer_timeout_seconds = max(1.0, float(force_offer_timeout_seconds))
-        self._force_offer_default_price = max(1.0, float(force_offer_default_price))
 
-    def _ordered_keys(self, contexts: entity_component.ComponentContextMapping) -> Sequence[str]:
+    def _get_ordered_context_keys(
+        self, contexts: entity_component.ComponentContextMapping
+    ) -> Sequence[str]:
         """Return context keys in deterministic order for prompt assembly."""
         if self._component_order is None:
             return tuple(contexts.keys())
@@ -110,10 +81,12 @@ class HDBStructuredActComponent(
             sorted(set(contexts.keys()) - set(self._component_order))
         )
 
-    def _context_for_action(self, contexts: entity_component.ComponentContextMapping) -> str:
-        """Build fallback prompt context while excluding structured action key."""
+    def _build_action_context(
+        self, contexts: entity_component.ComponentContextMapping
+    ) -> str:
+        """Build prompt context while excluding the action-choice component."""
         lines = []
-        for k in self._ordered_keys(contexts):
+        for k in self._get_ordered_context_keys(contexts):
             if k == self._structured_component_key:
                 continue
             v = contexts.get(k)
@@ -121,7 +94,21 @@ class HDBStructuredActComponent(
                 lines.append(str(v))
         return "\n".join(lines)
 
-    def _normalize_structured_action(self, value: Any) -> str:
+    def _get_action_choice_prompt_context(self) -> str:
+        """Return the upstream chooser prompt context without its question text."""
+        try:
+            component = self.get_entity().get_component(self._structured_component_key)
+        except Exception:
+            return ""
+        getter = getattr(component, "get_last_prompt_context", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter()).strip()
+        except Exception:
+            return ""
+
+    def _stringify_structured_output(self, value: Any) -> str:
         """Convert structured output value to a string representation."""
         if isinstance(value, (BaseModel, RootModel)):
             return value.model_dump_json()
@@ -135,17 +122,17 @@ class HDBStructuredActComponent(
             return txt
         return str(value)
 
-    def _passthrough_action_payload(self, value: Any) -> str:
-        """Return payload as JSON string without applying validation rules."""
-        normalized = self._normalize_structured_action(value)
+    def _serialize_action_payload(self, value: Any) -> str:
+        """Return payload as a normalized JSON string when possible."""
+        normalized = self._stringify_structured_output(value)
         try:
-            json_str = self._extract_json(normalized)
+            json_str = self._extract_first_json_object(normalized)
             payload = json.loads(json_str)
             return json.dumps(payload, ensure_ascii=False)
         except Exception:
             return normalized
 
-    def _extract_json(self, text: str) -> str:
+    def _extract_first_json_object(self, text: str) -> str:
         """Extract the first complete JSON object from text."""
         candidate = text.strip()
         start = candidate.find("{")
@@ -163,25 +150,6 @@ class HDBStructuredActComponent(
                     return candidate[: idx + 1]
         _log_error("Unterminated JSON object in structured action.")
         return "{}"
-
-    def _infer_offer_state_from_options(self, options: Sequence[str]) -> bool | None:
-        """Infer whether there is an active offer from action-type options."""
-        if not options:
-            return None
-        normalized = {str(opt).strip().upper() for opt in options if str(opt).strip()}
-        if not normalized:
-            return None
-        if self._role == RoleType.BUYER:
-            offer_set = set(negotiation_schemas.BUYER_OFFER_ACTIONS)
-            non_offer_set = set(negotiation_schemas.BUYER_NON_OFFER_ACTIONS)
-        else:
-            offer_set = set(negotiation_schemas.SELLER_OFFER_ACTIONS)
-            non_offer_set = set(negotiation_schemas.SELLER_NON_OFFER_ACTIONS)
-        if normalized <= offer_set:
-            return True
-        if normalized <= non_offer_set:
-            return False
-        return None
 
     @staticmethod
     def _schema_for_action_type(action_type: str) -> type[BaseModel] | None:
@@ -212,7 +180,7 @@ class HDBStructuredActComponent(
             lines.append(f"- {key}: {description}")
         return "\n".join(lines)
 
-    def _extract_action_type_hint(
+    def _parse_action_type(
         self,
         raw: Any,
         allowed_types: Sequence[str] = (),
@@ -280,7 +248,7 @@ class HDBStructuredActComponent(
             return None
 
         try:
-            payload = json.loads(self._extract_json(text))
+            payload = json.loads(self._extract_first_json_object(text))
             if isinstance(payload, dict):
                 for key in (
                     "type",
@@ -336,7 +304,7 @@ class HDBStructuredActComponent(
                 return payload
         return {}
 
-    def _extract_decision_brief(
+    def _build_decision_brief(
         self,
         raw: Any,
         preferred_action_type: str | None,
@@ -346,7 +314,7 @@ class HDBStructuredActComponent(
             return ""
 
         chosen_type = (
-            self._extract_action_type_hint(payload)
+            self._parse_action_type(payload)
             or str(preferred_action_type or "").strip().upper()
         )
         lines = []
@@ -359,37 +327,32 @@ class HDBStructuredActComponent(
             return ""
         return "Decision Brief:\n" + "\n".join(lines)
 
-    def _schema_for_turn(self, has_active_offer: bool | None) -> type[RootModel]:
-        """Pick role schema for this turn; fallback to broad schema if unknown."""
-        if has_active_offer is None:
-            if self._role == RoleType.BUYER:
-                return negotiation_schemas.NegotiationBuyerActions
-            return negotiation_schemas.NegotiationSellerActions
-        return negotiation_schemas.get_action_model(self._role, has_active_offer)
-
-    def _validate_action_for_turn(
+    def _append_prompt_section(
         self,
-        raw: Any,
-        has_active_offer: bool | None,
-        allowed_types: Sequence[str] = (),
-        bypass_unified_judge: bool = False,
-    ) -> str:
-        """Validation is disabled; return payload as-is."""
-        del has_active_offer, allowed_types, bypass_unified_judge
-        return self._passthrough_action_payload(raw)
+        prompt: interactive_document.InteractiveDocument,
+        prompt_log_sections: list[str],
+        title: str,
+        body: str,
+    ) -> None:
+        """Append a markdown section to the prompt and mirrored prompt log."""
+        body = str(body).strip()
+        if not body:
+            return
+        section = f"{title}\n{body}\n"
+        prompt.statement(section)
+        prompt_log_sections.append(section.strip())
 
-    def _regenerate_structured_action(
+    def _generate_action_payload(
         self,
         contexts: entity_component.ComponentContextMapping,
         action_spec: entity_lib.ActionSpec,
-        has_active_offer: bool | None,
         allowed_types: Sequence[str] = (),
         preferred_action_type: str | None = None,
         decision_brief: str = "",
+        upstream_prompt_context: str = "",
     ) -> str:
         """Generate payload fields for one already-chosen action type."""
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
-        del has_active_offer
         allowed_set = {str(x).strip().upper() for x in allowed_types}
         preferred_type = str(preferred_action_type or "").strip().upper()
         if not preferred_type and len(allowed_set) == 1:
@@ -416,12 +379,7 @@ class HDBStructuredActComponent(
             else ""
         )
         offer_actions = {"MAKE_OFFER", "MAKE_COUNTEROFFER", "ACCEPT_OFFER"}
-        info_actions = {
-            "INQUIRE_BUYER",
-            "INQUIRE_SELLER",
-            "QUESTION_BUYER",
-            "NORMAL_ANSWER",
-        }
+        info_actions = {"INQUIRE_BUYER","INQUIRE_SELLER","QUESTION_BUYER","NORMAL_ANSWER"}
         action_specific_guardrails = ""
         if preferred_type in offer_actions:
             action_specific_guardrails += HDB_FIELD_GENERATION_MONETARY_GUARDRAILS
@@ -433,39 +391,53 @@ class HDBStructuredActComponent(
             else ""
         )
         prompt = interactive_document.InteractiveDocument(self._model)
-        prompt_context = self._context_for_action(contexts) + "\n"
-        prompt.statement(prompt_context)
         prompt_log_sections = []
-        if decision_brief:
-            decision_brief_text = decision_brief + "\n"
-            prompt.statement(decision_brief_text)
-            prompt_log_sections.append("Decision Brief:\n" + decision_brief)
-        prompt.statement(HDB_FIELD_GENERATION_BASE_GUARDRAILS)
-        prompt_log_sections.append(
-            "Base Guardrails:\n" + HDB_FIELD_GENERATION_BASE_GUARDRAILS.strip()
+        self._append_prompt_section(
+            prompt,
+            prompt_log_sections,
+            "# Current Context",
+            self._build_action_context(contexts),
         )
+        self._append_prompt_section(
+            prompt,
+            prompt_log_sections,
+            "# Action-Choice Context",
+            upstream_prompt_context,
+        )
+        self._append_prompt_section(
+            prompt,
+            prompt_log_sections,
+            "# Decision Brief",
+            decision_brief,
+        )
+        prompt.statement(HDB_FIELD_GENERATION_BASE_GUARDRAILS)
+        prompt_log_sections.append(HDB_FIELD_GENERATION_BASE_GUARDRAILS.strip())
         if action_specific_guardrails:
             prompt.statement(action_specific_guardrails)
-            prompt_log_sections.append(
-                "Action-Specific Guardrails:\n" + action_specific_guardrails.strip()
-            )
-        prompt.statement(call_to_action)
-        prompt_log_sections.append("Call To Action:\n" + call_to_action)
+            prompt_log_sections.append(action_specific_guardrails.strip())
+        self._append_prompt_section(
+            prompt,
+            prompt_log_sections,
+            "## Execution Request",
+            call_to_action,
+        )
         if chosen_action_description:
-            chosen_action_description_text = (
-                f"Chosen action description:\n{chosen_action_description}\n"
-            )
-            prompt.statement(chosen_action_description_text)
-            prompt_log_sections.append(
-                "Chosen Action Description:\n" + chosen_action_description
+            self._append_prompt_section(
+                prompt,
+                prompt_log_sections,
+                "# Fixed Action Type",
+                (
+                    f"- Chosen action type: {preferred_type}\n"
+                    f"- Description:\n{chosen_action_description}"
+                ),
             )
         internal_reasoning_instructions = (
             "- Use internal_reasoning to explain why the final wording supports the chosen action.\n"
             "- Do not use internal_reasoning to re-open the action choice unless the context makes the chosen action impossible.\n"
         )
         field_generation_instructions = (
-            "Field-generation instructions:\n"
-            f"- The chosen action type is fixed: {preferred_type}\n"
+            "# Response Rules\n"
+            f"- The chosen action type is fixed: {preferred_type}.\n"
             "- Keep the final wording aligned with the decision rationale.\n"
             f"{internal_reasoning_instructions}"
             "- Return using 1st person perspective (I, me, my, etc.).\n"
@@ -478,8 +450,11 @@ class HDBStructuredActComponent(
         prompt.statement(field_generation_instructions)
         prompt_log_sections.append(field_generation_instructions.strip())
         structured_question = (
-            "Generate the fields required for exactly one JSON object for the chosen action type "
-            f"{preferred_type}, using the context and decision brief above."
+            "# Output\n"
+            f"Generate exactly one JSON object for action type `{preferred_type}`.\n"
+            "- Use the context above.\n"
+            "- Follow the fixed action type.\n"
+            "- Return only the required fields for the schema."
         )
         self._logging_channel({
             "Summary": (
@@ -497,10 +472,10 @@ class HDBStructuredActComponent(
             max_tokens=2200,
             terminators=(),
         )
-        return self._passthrough_action_payload(generated)
+        return self._serialize_action_payload(generated)
 
     @staticmethod
-    def _is_action_type_choice(action_spec: entity_lib.ActionSpec) -> bool:
+    def _looks_like_action_type_choice(action_spec: entity_lib.ActionSpec) -> bool:
         """True when CHOICE options look like action-type literals."""
         if action_spec.output_type not in entity_lib.CHOICE_ACTION_TYPES:
             return False
@@ -515,121 +490,65 @@ class HDBStructuredActComponent(
     ) -> str:
         """Produce an action attempt, enforcing structured schema on FREE types."""
         use_structured = (
-            self._structured_component_outputs_action_choice
-            or action_spec.output_type in entity_lib.FREE_ACTION_TYPES
-            or self._is_action_type_choice(action_spec)
+            action_spec.output_type in entity_lib.FREE_ACTION_TYPES
+            or self._looks_like_action_type_choice(action_spec)
         )
         if use_structured:
             allowed_types = tuple(str(opt).strip().upper() for opt in action_spec.options)
-            has_active_offer = self._infer_offer_state_from_options(allowed_types)
             raw = contexts.get(self._structured_component_key)
-
-            if self._structured_component_outputs_action_choice:
-                if not raw:
-                    _log_error(
-                        f'Missing action-type choice in "{self._structured_component_key}". '
-                        "Ensure question_about_action writes the chosen action type to this key."
-                    )
-                    if allowed_types:
-                        raw = {"type": allowed_types[0]}
-                    else:
-                        return "{}"
-                preferred_action_type = self._extract_action_type_hint(
-                    raw, allowed_types=allowed_types
-                )
-                if not preferred_action_type:
-                    if allowed_types:
-                        preferred_action_type = allowed_types[0]
-                        self._logging_channel({
-                            "Summary": (
-                                f'Could not parse chosen action type from "{self._structured_component_key}". '
-                                f"Falling back to first allowed option: {preferred_action_type}."
-                            ),
-                            "Value": str(raw),
-                        })
-                    else:
-                        _log_error(
-                            f'Could not parse chosen action type from "{self._structured_component_key}". '
-                            "question_about_action should return exactly one action type token."
-                        )
-                        return "{}"
-                if allowed_types and preferred_action_type not in set(allowed_types):
-                    _log_error(
-                        f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
-                    )
-                    preferred_action_type = allowed_types[0] if allowed_types else None
-                    if preferred_action_type is None:
-                        return "{}"
-                decision_brief = self._extract_decision_brief(
-                    raw,
-                    preferred_action_type=preferred_action_type,
-                )
-                out = self._regenerate_structured_action(
-                    contexts=contexts,
-                    action_spec=action_spec,
-                    has_active_offer=has_active_offer,
-                    allowed_types=allowed_types,
-                    preferred_action_type=preferred_action_type,
-                    decision_brief=decision_brief,
-                )
-                self._logging_channel({
-                    "Summary": (
-                        f"Using chosen action type from {self._structured_component_key} "
-                        f"to generate payload fields ({preferred_action_type})"
-                    ),
-                    "Value": out,
-                })
-                return out
-
-            if raw:
-                preferred_action_type = self._extract_action_type_hint(
-                    raw, allowed_types=allowed_types
-                )
-                try:
-                    if self._disable_action_validation:
-                        out = self._passthrough_action_payload(raw)
-                    else:
-                        out = self._validate_action_for_turn(
-                            raw,
-                            has_active_offer=has_active_offer,
-                            allowed_types=allowed_types,
-                        )
-                except Exception:
-                    out = self._regenerate_structured_action(
-                        contexts=contexts,
-                        action_spec=action_spec,
-                        has_active_offer=has_active_offer,
-                        allowed_types=allowed_types,
-                        preferred_action_type=preferred_action_type,
-                        decision_brief="",
-                    )
-                self._logging_channel({
-                    "Summary": f"Using structured output from {self._structured_component_key}",
-                    "Value": out,
-                })
-                return out
-
-            if not self._fallback_to_llm_for_free:
+            if not raw:
                 _log_error(
-                    f'Missing structured action in "{self._structured_component_key}".'
+                    f'Missing action choice in "{self._structured_component_key}".'
                 )
                 return "{}"
-            out = self._regenerate_structured_action(
+            upstream_prompt_context = self._get_action_choice_prompt_context()
+            preferred_action_type = self._parse_action_type(
+                raw, allowed_types=allowed_types
+            )
+            if not preferred_action_type:
+                if not allowed_types:
+                    _log_error(
+                        f'Could not parse chosen action type from "{self._structured_component_key}".'
+                    )
+                    return "{}"
+                preferred_action_type = allowed_types[0]
+                self._logging_channel({
+                    "Summary": (
+                        f'Could not parse chosen action type from "{self._structured_component_key}". '
+                        f"Falling back to first allowed option: {preferred_action_type}."
+                    ),
+                    "Value": str(raw),
+                })
+            if allowed_types and preferred_action_type not in set(allowed_types):
+                _log_error(
+                    f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
+                )
+                preferred_action_type = allowed_types[0] if allowed_types else None
+                if preferred_action_type is None:
+                    return "{}"
+            decision_brief = self._build_decision_brief(
+                raw,
+                preferred_action_type=preferred_action_type,
+            )
+            out = self._generate_action_payload(
                 contexts=contexts,
                 action_spec=action_spec,
-                has_active_offer=has_active_offer,
                 allowed_types=allowed_types,
-                preferred_action_type=None,
-                decision_brief="",
+                preferred_action_type=preferred_action_type,
+                decision_brief=decision_brief,
+                upstream_prompt_context=upstream_prompt_context,
             )
             self._logging_channel({
-                "Summary": "Regenerated structured output from action spec context",
+                "Summary": (
+                    f"Using chosen action type from {self._structured_component_key} "
+                    f"to generate payload fields ({preferred_action_type})"
+                ),
                 "Value": out,
             })
             return out
 
         prompt = interactive_document.InteractiveDocument(self._model)
-        prompt.statement(self._context_for_action(contexts) + "\n")
+        prompt.statement(self._build_action_context(contexts) + "\n")
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
 
         if action_spec.output_type in entity_lib.CHOICE_ACTION_TYPES:
@@ -660,11 +579,6 @@ class HDBStructuredActComponent(
             "structured_component_key": self._structured_component_key,
             "component_order": list(self._component_order) if self._component_order else None,
             "randomize_choices": self._randomize_choices,
-            "fallback_to_llm_for_free": self._fallback_to_llm_for_free,
-            "structured_component_outputs_action_choice": self._structured_component_outputs_action_choice,
-            "disable_action_validation": self._disable_action_validation,
-            "force_offer_timeout_seconds": self._force_offer_timeout_seconds,
-            "force_offer_default_price": self._force_offer_default_price,
         }
     
     def set_state(self, state: entity_component.ComponentState) -> None:
@@ -677,20 +591,4 @@ class HDBStructuredActComponent(
             self._component_order = tuple(state['component_order']) if state['component_order'] else None
         if 'randomize_choices' in state:
             self._randomize_choices = state['randomize_choices']
-        if 'fallback_to_llm_for_free' in state:
-            self._fallback_to_llm_for_free = state['fallback_to_llm_for_free']
-        if 'structured_component_outputs_action_choice' in state:
-            self._structured_component_outputs_action_choice = bool(
-                state['structured_component_outputs_action_choice']
-            )
-        if 'disable_action_validation' in state:
-            self._disable_action_validation = bool(state['disable_action_validation'])
-        if 'force_offer_timeout_seconds' in state:
-            self._force_offer_timeout_seconds = max(
-                1.0, float(state['force_offer_timeout_seconds'])
-            )
-        if 'force_offer_default_price' in state:
-            self._force_offer_default_price = max(
-                1.0, float(state['force_offer_default_price'])
-            )
         
