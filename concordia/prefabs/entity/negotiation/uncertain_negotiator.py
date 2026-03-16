@@ -9,6 +9,7 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
 from concordia.hdb_simulation.models.schemas import common as common_schemas
+from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import (
     uncertain_buyer,
@@ -206,6 +207,10 @@ class Entity(prefab_lib.Prefab):
                 lambda_=negotiation_config.get('lambda_', 1.0),
                 a=negotiation_config.get('a', 3.0),
                 b=negotiation_config.get('b', 5000.0),
+                listing_price_prior_discount=negotiation_config.get(
+                    'counterpart_listing_price_discount',
+                    0.9,
+                ),
                 emit_pre_act_context=False,
                 recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
             )
@@ -369,6 +374,26 @@ class Entity(prefab_lib.Prefab):
             agent.observe(observation_text)
 
         return agent
+
+
+def update_agent_from_listing(
+    agent: entity_agent_with_logging.EntityAgentWithLogging,
+    listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+) -> None:
+    for component_name in (
+        'NegotiationInstructions',
+        'uncertain_buyer',
+        'uncertain_seller',
+        'NegotiationStrategy',
+    ):
+        try:
+            component = agent.get_component(component_name)
+        except Exception:
+            continue
+        apply_listing_handoff = getattr(component, 'apply_listing_handoff', None)
+        if not callable(apply_listing_handoff):
+            continue
+        apply_listing_handoff(listing_payload)
 
 def build_agent(
     model: language_model.LanguageModel,

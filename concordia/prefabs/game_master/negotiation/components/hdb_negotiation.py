@@ -9,7 +9,9 @@ from absl import logging
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
+from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import uncertain_negotiator
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
 )
@@ -226,33 +228,58 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._scheduler.append_pair(buyer_id, seller_id)
     self._offer_tracker.register_pair(buyer_id, seller_id)
 
-  def _apply_listing_initialization_state(
+  def _parse_listing_transfer_payload(
       self,
-      pair_payload: Mapping[str, Any],
+      pair_payload: Mapping[str, Any] | listing_schemas.ListingNegotiationTransferPayload,
+  ) -> listing_schemas.ListingNegotiationTransferPayload | None:
+    if isinstance(pair_payload, listing_schemas.ListingNegotiationTransferPayload):
+      return pair_payload
+    if not isinstance(pair_payload, Mapping):
+      return None
+    try:
+      return listing_schemas.ListingNegotiationTransferPayload.model_validate(
+          pair_payload
+      )
+    except ValidationError as error:
+      logging.warning('Skipping invalid listing transfer payload: %s', error)
+      return None
+
+  def _apply_listing_transfer_payload(
+      self,
+      pair_payload: listing_schemas.ListingNegotiationTransferPayload,
       *,
       buyer_id: str,
       seller_id: str,
   ) -> None:
-    """Applies placeholder listing-to-negotiation init context once per pair."""
-    listing_state = pair_payload.get('listing_initialization_state')
-    if not isinstance(listing_state, Mapping):
-      return
+    """Applies listing-to-negotiation context once per pair."""
     observation = (
         'Market_Coordinator: Listing handoff context for this negotiation: '
-        f'{json.dumps(dict(listing_state), ensure_ascii=False)}'
+        f'{json.dumps(pair_payload.model_dump(mode="json"), ensure_ascii=False)}'
     )
     buyer_entity = self._entities_by_id.get(buyer_id)
     if buyer_entity is not None:
+      uncertain_negotiator.update_agent_from_listing(buyer_entity, pair_payload)
       buyer_entity.observe(observation)
+    seller_entity = self._entities_by_id.get(seller_id)
+    if seller_entity is not None:
+      uncertain_negotiator.update_agent_from_listing(seller_entity, pair_payload)
+      seller_entity.observe(observation)
 
   def _bind_entities_for_pairs(
       self,
-      new_negotiation_pairs: Sequence[Mapping[str, Any]],
+      new_negotiation_pairs: Sequence[
+          Mapping[str, Any] | listing_schemas.ListingNegotiationTransferPayload
+      ],
   ) -> list[tuple[str, str]]:
     """Binds both participants for each valid negotiation pair."""
     normalized_pairs: list[tuple[str, str]] = []
     for pair in new_negotiation_pairs:
-      buyer_id, seller_id = hdb_negotiation_helpers.normalize_negotiation_pair(pair)
+      transfer_payload = self._parse_listing_transfer_payload(pair)
+      if transfer_payload is not None:
+        buyer_id = str(transfer_payload.buyer_state.id)
+        seller_id = str(transfer_payload.seller_state.id)
+      else:
+        buyer_id, seller_id = hdb_negotiation_helpers.normalize_negotiation_pair(pair)
       if not buyer_id or not seller_id:
         continue
       if buyer_id not in self._participant_specs or seller_id not in self._participant_specs:
@@ -271,9 +298,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         continue
       pair_already_exists = self._pair_exists(buyer_id, seller_id)
       self._register_pair(buyer_id, seller_id)
-      if not pair_already_exists:
-        self._apply_listing_initialization_state(
-            pair,
+      if not pair_already_exists and transfer_payload is not None:
+        self._apply_listing_transfer_payload(
+            transfer_payload,
             buyer_id=buyer_id,
             seller_id=seller_id,
         )
@@ -389,7 +416,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     return memories
 
   def _compress_entity_state_for_listing(self, player_id: str) -> dict[str, Any]:
-    """Builds a compact placeholder negotiation-to-listing return payload."""
+    """Builds a compact negotiation-to-listing return payload."""
     compressed: dict[str, Any] = {
         'id': player_id,
         'name': self._get_player_name(player_id),
@@ -421,7 +448,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self,
       pair_records: Sequence[Mapping[str, Any]],
   ) -> list[dict[str, Any]]:
-    """Builds placeholder negotiation-to-listing return payloads."""
+    """Builds negotiation-to-listing return payloads."""
     payloads: list[dict[str, Any]] = []
     for pair_record in pair_records:
       buyer_id = str(pair_record.get('buyer_id', '')).strip()
@@ -433,8 +460,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           'negotiation_return_state': {
               'buyer_state': self._compress_entity_state_for_listing(buyer_id),
               'seller_state': self._compress_entity_state_for_listing(seller_id),
-              'source': 'negotiation_module',
-              'transfer_status': 'placeholder',
           },
       })
     return payloads

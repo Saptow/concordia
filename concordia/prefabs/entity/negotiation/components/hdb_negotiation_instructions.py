@@ -6,6 +6,7 @@ from typing import Optional, Any
 
 from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation.models.schemas import common as common_schemas
+from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.typing import entity_component
 
@@ -164,6 +165,13 @@ class HDBNegotiationInstructions(action_spec_ignored.ActionSpecIgnored):
     def _make_pre_act_value(self) -> str:
         """Pre-act instruction body used by dependent components."""
         return self._base_instructions
+
+    def apply_listing_handoff(
+        self,
+        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+    ) -> None:
+        self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
+        self._base_instructions = self._generate_base_instructions()
 
     def pre_act(self, action_spec) -> str:
         """Provide negotiation instructions before action without changing prompt shape."""

@@ -295,67 +295,30 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     return self._last_outcome
 
 
-  # Transfer payload builders and cross-module handoff utilities.
-  @staticmethod
-  def _pair_transfer_key(buyer_id: str, seller_id: str) -> str:
-    return f'{buyer_id}|||{seller_id}'
-
-  def _compress_buyer_state_for_negotiation(self, buyer_id: str) -> dict[str, Any]:
-    """Builds a compact listing-owned buyer handoff payload."""
-    buyer_state = self._buyer_state(buyer_id)
-    return {
-        'id': buyer_state.id,
-        'name': buyer_state.name,
-        'budget': buyer_state.budget.model_dump(),
-        'preferences': buyer_state.preferences.model_dump(),
-        'effective_reservation_price': float(
-            buyer_state.effective_reservation_price
-        ),
-        'latest_market_feedback': buyer_state.latest_market_feedback,
-    }
-
-  def _compress_seller_state_for_negotiation(self, seller_id: str) -> dict[str, Any]:
-    """Builds a compact listing-owned seller handoff payload."""
-    seller_state = self._seller_state(seller_id)
-    return {
-        'id': seller_state.id,
-        'name': seller_state.name,
-        'expectations': seller_state.expectations.model_dump(),
-        'listed': bool(seller_state.listed),
-        'current_listing_id': seller_state.current_listing_id,
-        'current_listing_price': seller_state.current_listing_price,
-        'open_requests': int(seller_state.open_requests),
-        'flat_type': str(seller_state.flat.flat_type),
-        'town': seller_state.flat.town,
-    }
-
   def build_negotiation_transfer_payloads(
       self,
       matches: Sequence[listing_schemas.NegotiationMatch],
   ) -> list[dict[str, Any]]:
-    """Builds listing-to-negotiation payloads for newly matched pairs.
-
-    Each payload bundles the match metadata with a compact snapshot of the
-    buyer and seller's current listing-side state. The payload is intentionally
-    lightweight and is meant to be consumed by the coordinator and negotiation
-    module, not persisted here as module-owned state.
-    """
+    """Builds listing-to-negotiation payloads for newly matched pairs."""
     payloads: list[dict[str, Any]] = []
     for match in matches:
       buyer_id = str(match.buyer_id)
       seller_id = str(match.seller_id)
-      payloads.append({
-          **match.model_dump(),
-          'pair_key': self._pair_transfer_key(buyer_id, seller_id),
-          'listing_initialization_state': {
-              'buyer_state': self._compress_buyer_state_for_negotiation(buyer_id),
-              'seller_state': self._compress_seller_state_for_negotiation(
-                  seller_id
-              ),
-              'source': 'listing_module',
-              'transfer_status': 'placeholder',
-          },
-      })
+      listing_record = self._ensure_portal().get_listing_record(seller_id)
+      if listing_record is None:
+        logging.warning(
+            'Skipping listing-to-negotiation transfer for %s because no active listing record was found.',
+            match.match_id,
+        )
+        continue
+      payload = listing_schemas.ListingNegotiationTransferPayload(
+          match_id=match.match_id,
+          week_matched=match.week_matched,
+          listing_record=listing_record,
+          buyer_state=self._buyer_state(buyer_id),
+          seller_state=self._seller_state(seller_id),
+      )
+      payloads.append(payload.model_dump(mode='json'))
     return payloads
 
   def reopen_failed_negotiation_pairs(
@@ -455,6 +418,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     """Builds a runtime listing snapshot for one buyer."""
     buyer = self._buyers[player_id]
     portal = self._ensure_portal()
+    market_state = portal._buyer_market_state(buyer)
     return listing_schemas.ListingBuyerState(
         id=player_id,
         name=buyer.name,
@@ -462,9 +426,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         description=buyer.description,
         budget=buyer.budget.model_copy(deep=True),
         preferences=buyer.preferences.model_copy(deep=True),
-        effective_reservation_price=portal.effective_reservation_price_for_buyer(
-            buyer
-        ),
+        effective_reservation=market_state.effective_reservation,
         latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
         latest_market_feedback=portal.market_feedback_by_buyer.get(
             player_id,

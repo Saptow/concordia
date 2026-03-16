@@ -48,7 +48,7 @@ class ListingRecord(BaseModel):
             'listing_summary': self.listing_summary,
             'listed_week': int(self.listed_week),
             'active': bool(self.active),
-            **self.flat_metadata(),
+            'flat_metadata': self.flat_metadata(),
         }
 
     def to_document(self) -> str:
@@ -79,12 +79,6 @@ class ListingRecord(BaseModel):
 
     def to_search_result(self, score: float) -> listing_schemas.PortalSearchResult:
         return listing_schemas.PortalSearchResult(
-            listing_id=self.listing_id,
-            seller_id=self.seller_id,
-            seller_name=self.seller_name,
+            **self.model_dump(mode='json'),
             score=float(score),
-            listing_price=float(self.listing_price),
-            flat_type=str(self.flat.flat_type),
-            town=self.flat.town,
-            summary=self.listing_summary,
         )

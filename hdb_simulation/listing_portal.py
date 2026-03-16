@@ -13,10 +13,10 @@ from absl import logging
 from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
+from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas.common import Flat
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
-from concordia.hdb_simulation.models.schemas.listing.schema import PortalSearchResult
 
 
 @dataclasses.dataclass
@@ -104,13 +104,14 @@ class ListingPortalRetriever:
         if not points:
             return None
         payload = points[0].payload or {}
+        flat_metadata = dict(payload.get('flat_metadata', {}))
         return listing_schemas.ListingRecord(
             listing_id=str(payload['listing_id']),
             seller_id=str(payload['seller_id']),
             seller_name=str(payload['seller_name']),
             listing_price=float(payload['listing_price']),
             listing_summary=str(payload['listing_summary']),
-            flat=Flat.model_validate(payload),
+            flat=Flat.model_validate(flat_metadata),
             listed_week=int(payload['listed_week']),
             active=bool(payload.get('active', False)),
         )
@@ -160,26 +161,26 @@ class ListingPortalRetriever:
         )
 
 
-        filtered_results: list[PortalSearchResult] = []
+        filtered_results: list[listing_schemas.PortalSearchResult] = []
         for point in results.points:
             payload = point.payload or {}
             if not bool(payload.get('active', False)):
                 continue
-            listing_price = float(payload.get('listing_price', 0.0))
+            flat_metadata = dict(payload.get('flat_metadata', {}))
+            record = listing_schemas.ListingRecord(
+                listing_id=str(payload['listing_id']),
+                seller_id=str(payload['seller_id']),
+                seller_name=str(payload['seller_name']),
+                listing_price=float(payload['listing_price']),
+                listing_summary=str(payload['listing_summary']),
+                flat=Flat.model_validate(flat_metadata),
+                listed_week=int(payload['listed_week']),
+                active=bool(payload.get('active', False)),
+            )
+            listing_price = float(record.listing_price)
             if max_budget is not None and listing_price > float(max_budget):
                 continue
-            filtered_results.append(
-                PortalSearchResult(
-                    listing_id=str(payload['listing_id']),
-                    seller_id=str(payload['seller_id']),
-                    seller_name=str(payload['seller_name']),
-                    score=float(point.score),
-                    listing_price=listing_price,
-                    flat_type=str(payload['flat_type']),
-                    town=str(payload['town']),
-                    summary=str(payload['listing_summary']),
-                )
-            )
+            filtered_results.append(record.to_search_result(score=float(point.score)))
             if len(filtered_results) >= limit:
                 break
 
@@ -301,7 +302,12 @@ class ListingPortal:
             state = listing_schemas.BuyerMarketBeliefState(
                 buyer_id=buyer.id,
                 base_reservation_price=base_reservation_price,
-                effective_reservation_price=base_reservation_price,
+                effective_reservation=uncertain_helper.NormalDistribution(
+                    name='Effective reservation price',
+                    mean=base_reservation_price,
+                    std=max(1000.0, 0.05 * base_reservation_price),
+                    confidence=0.5,
+                ),
             )
             self.private_buyer_market_states[buyer.id] = state
         return state
@@ -310,7 +316,9 @@ class ListingPortal:
         self,
         buyer: listing_schemas.PortalBuyer,
     ) -> float:
-        return float(self._buyer_market_state(buyer).effective_reservation_price)
+        return float(
+            self._buyer_market_state(buyer).effective_reservation.mean
+        )
 
     @staticmethod
     def _derive_query_from_preferences(
@@ -330,29 +338,40 @@ class ListingPortal:
         effective_reservation_price: float,
         results: Sequence[listing_schemas.PortalSearchResult],
     ) -> str:
-        # TODO: implement market feedback generation logic for belief updating. 
-        # if not results:
-        #     return (
-        #         'Current portal search suggests supply is thin for your preferences. '
-        #         'Broaden town or flat-type filters if urgency rises.'
-        #     )
+        if not results:
+            return (
+                'Current portal search suggests supply is thin for your preferences. '
+                'Broaden town or flat-type filters if urgency rises.'
+            )
 
-        # prices = [float(result.listing_price) for result in results]
-        # avg_price = sum(prices) / len(prices)
-        # min_price = min(prices)
-        # max_price = max(prices)
-        # if avg_price <= effective_reservation_price:
-        #     affordability = 'Most matching listings remain within your upper budget bound.'
-        # else:
-        #     affordability = (
-        #         'Most matching listings are above your upper budget bound, so valuation '
-        #         'pressure is increasing.'
-        #     )
-        # return (
-        #     f"Observed portal valuation band this week: SGD {min_price:.0f} to "
-        #     f"SGD {max_price:.0f}, average SGD {avg_price:.0f}. {affordability}"
-        # )
-        return "Market feedback is not implemented yet."
+        prices = [float(result.listing_price) for result in results]
+        avg_price = sum(prices) / len(prices)
+        min_price = min(prices)
+        max_price = max(prices)
+        if avg_price <= effective_reservation_price:
+            affordability = 'Most matching listings remain within your effective reservation bound.'
+        else:
+            affordability = (
+                'Most matching listings are above your effective reservation bound, '
+                'so valuation pressure is increasing.'
+            )
+        return (
+            f"Observed portal valuation band this week: SGD {min_price:.0f} to "
+            f"SGD {max_price:.0f}, average SGD {avg_price:.0f}. {affordability}"
+        )
+
+    @staticmethod
+    def _market_signal_reliability(
+        results: Sequence[listing_schemas.PortalSearchResult],
+    ) -> float:
+        if not results:
+            return 0.0
+        prices = [float(result.listing_price) for result in results]
+        average_price = max(sum(prices) / len(prices), 1.0)
+        relative_spread = (max(prices) - min(prices)) / average_price
+        sample_factor = min(1.0, len(prices) / 5.0)
+        spread_factor = max(0.25, 1.0 - min(relative_spread, 0.75))
+        return max(0.15, min(0.9, 0.15 + (0.75 * sample_factor * spread_factor)))
 
     def _update_buyer_market_state(
         self,
@@ -361,33 +380,26 @@ class ListingPortal:
         feedback: str,
     ) -> listing_schemas.BuyerMarketBeliefState:
         state = self._buyer_market_state(buyer)
-        # TODO: implement robust market belief updating logic based on search results and feedback.
-        # state.latest_market_feedback = feedback
-        # state.feedback_history.append(feedback)
+        state.latest_market_feedback = feedback
+        if not state.feedback_history or state.feedback_history[-1] != feedback:
+            state.feedback_history.append(feedback)
+        if not results:
+            return state
 
-        # if not results:
-        #     return state
+        prices = [float(result.listing_price) for result in results]
+        state.latest_observed_min_price = min(prices)
+        state.latest_observed_avg_price = sum(prices) / len(prices)
+        state.latest_observed_max_price = max(prices)
 
-        # prices = [float(result.listing_price) for result in results]
-        # observed_min_price = min(prices)
-        # observed_avg_price = sum(prices) / len(prices)
-        # observed_max_price = max(prices)
-
-        # state.latest_observed_min_price = observed_min_price
-        # state.latest_observed_avg_price = observed_avg_price
-        # state.latest_observed_max_price = observed_max_price
-
-        # current_effective = float(state.effective_reservation_price)
-        # target_price = observed_avg_price
-        # learning_rate = 0.35
-        # upward_cap = max(float(buyer.budget.max_price), current_effective) * 1.25
-        # updated_effective = current_effective + (
-        #     learning_rate * (target_price - current_effective)
-        # )
-        # state.effective_reservation_price = max(
-        #     float(buyer.budget.min_price),
-        #     min(updated_effective, upward_cap),
-        # )
+        belief = state.effective_reservation
+        belief.update_with_evidence(
+            state.latest_observed_avg_price,
+            reliability=self._market_signal_reliability(results),
+        )
+        belief.mean = max(
+            float(buyer.budget.min_price),
+            min(float(buyer.budget.max_price), belief.mean),
+        )
         return state
 
     def search_and_request(
@@ -400,14 +412,20 @@ class ListingPortal:
         Buyer method to search for listings and send negotiation requests to sellers.
          - Search results are based on the buyer's preferences and effective reservation price.
         """
-        max_budget = float(buyer.budget.max_price)
+        max_budget = min(
+            float(buyer.budget.max_price),
+            self.effective_reservation_price_for_buyer(buyer),
+        )
         effective_query = self._derive_query_from_preferences(buyer, '')
         results = self.retriever.search(
             effective_query,
             max_budget=max_budget,
             limit=10,  # TODO: revise this as needed
         )
-        feedback = self._market_feedback(max_budget, results)
+        feedback = self._market_feedback(
+            self.effective_reservation_price_for_buyer(buyer),
+            results,
+        )
         requested_listing_ids = self._top_valid_listing_ids_for_buyer(
             buyer,
             results,

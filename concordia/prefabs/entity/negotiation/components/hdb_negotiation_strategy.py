@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
+from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.prefabs.entity.negotiation.components.uncertain_buyer import UncertainBuyer
 from concordia.prefabs.entity.negotiation.components.uncertain_seller import UncertainSeller
@@ -102,9 +103,18 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             current_position = uncertain_context._own_reservation
             counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
 
-        self._state = SimpleStrategyState(current_position=current_position, opponent_position=counterpart_position)
+        self._state = SimpleStrategyState(
+            current_position=current_position,
+            opponent_position=counterpart_position,
+        )
+        self._urgency_level = self._judge_urgency_level()
 
-        prompt = (  # TODO: rewrite prompt, instead of description, use previous listing scenario and existing scenario condition to determine urgency level instead.
+    def _judge_urgency_level(
+        self,
+        *,
+        number_of_failed_negotiations: int = 0,
+    ) -> float:
+        prompt = (
             "# Role\n"
             f"You are estimating negotiation urgency for a {self._role} in an HDB resale negotiation.\n\n"
             "# Task\n"
@@ -112,12 +122,15 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "# Input\n"
             "## Agent Description\n"
             f"{self._description}\n\n"
+            "## Number Of Failed Negotiations\n"
+            f"{max(0, int(number_of_failed_negotiations))}\n\n"
             "# Private Reasoning Process\n"
             "Think step by step **privately** before answering:\n\n"
             "1. Identify signals of time pressure, financial pressure, relocation needs, family needs, or willingness to wait.\n"
-            "2. Distinguish strong urgency cues from mild preferences.\n"
-            "3. Convert the overall urgency into a score from `0` to `1`.\n"
-            "4. Return only the final JSON object. Do not reveal your reasoning.\n\n"
+            "2. Treat the number of failed negotiations as an additional urgency signal: repeated failures usually increase pressure to close, unless the description strongly suggests patience.\n"
+            "3. Distinguish strong urgency cues from mild preferences.\n"
+            "4. Convert the overall urgency into a score from `0` to `1`.\n"
+            "5. Return only the final JSON object. Do not reveal your reasoning.\n\n"
             "# Scoring Rubrics\n"
             "The score is continuous between `0` and `1`, where higher values indicate greater urgency to close the deal. For example:\n"
             "- `0.0` = not urgent at all, very patient, can comfortably wait.\n"
@@ -126,7 +139,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "- `0.75` = high urgency, clear pressure or strong need to close soon.\n"
             "- `1.0` = extremely urgent, immediate pressure to close.\n\n"
             "# Rules\n"
-            "- Use only the agent description provided.\n"
+            "- Use only the provided agent description and failed-negotiation count.\n"
             "- Do not invent facts that are not stated or strongly implied.\n"
             "- Output a single urgency value between `0` and `1`.\n\n"
             "# Output\n"
@@ -142,11 +155,26 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
         try:
             urgency_output = UrgencyLevel.model_validate_json(response)
-            self._urgency_level = urgency_output.urgency
+            return urgency_output.urgency
         except Exception as e:
             if self._verbose:
-                print(f"[{self._agent_name}] Failed to parse urgency level, defaulting to 0.5. Error: {e}")
-            self._urgency_level = 0.5
+                print(
+                    f"[{self._agent_name}] Failed to parse urgency level, defaulting to 0.5. Error: {e}"
+                )
+            return 0.5
+
+    def apply_listing_handoff(
+        self,
+        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+    ) -> None:
+        participant_state = (
+            listing_payload.buyer_state
+            if self._role == RoleType.BUYER
+            else listing_payload.seller_state
+        )
+        self._urgency_level = self._judge_urgency_level(
+            number_of_failed_negotiations=len(participant_state.negotiation_history),
+        )
 
     @staticmethod
     def _extract_first_json_object(text: str) -> str | None:
