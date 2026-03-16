@@ -331,8 +331,9 @@ class QuestionOfRecentMemoriesStructured(
     prompt.statement('') # Ensure there's a newline before the question, which can help with formatting in some cases.
     if self._clock_now is not None:
       prompt.statement(f'Current time: {self._clock_now()}.\n')
-    with self._lock:
-      self._last_prompt_context = prompt.view().text().strip()
+    # `ActionSpecIgnored.get_pre_act_value()` already holds `_lock` while calling
+    # `_make_pre_act_value()`, so reacquiring it here would deadlock.
+    self._last_prompt_context = prompt.view().text().strip()
     
     question = self._question.format(agent_name=agent_name)
     active_choice_responses = (
@@ -412,7 +413,9 @@ class QuestionOfRecentMemoriesStructured(
     with self._lock:
       self._runtime_choice_responses = None
       self._last_prompt_context = ''
-    super().update()
+      # Mirror `ActionSpecIgnored.update()` here so we do not reacquire `_lock`
+      # through `super().update()`, which would deadlock with a non-reentrant lock.
+      self._pre_act_value = None
       
 class QuestionOfRecentMemoriesWithoutPreAct(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
