@@ -373,8 +373,10 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         top_issue_question = str(
             uncertainty_summary.get('top_issue_question', '')
         ).strip()
-        if rounds_left <= 1 or not issue_items:
-            return 'No more information gathering; focus entirely on closing the deal with ACCEPT_OFFER, REJECT_OFFER, or WALK_AWAY.'
+        if rounds_left <= 1:
+            return "Time is almost up. Focus on closing the deal."
+        if not issue_items:
+            return "No information to gather. Follow your goals in this negotiation."
         if self._should_ask_question(
             uncertainty_summary=uncertainty_summary,
             rounds_left=rounds_left,
@@ -501,7 +503,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 "- Use OwnVsOpponentReservation and DealOutlook to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
             ) if has_active_offer else (
-                "Base Strategy:\n"
+                "\n Base Strategy:\n"
                 f"- {information_focus}\n"
             )
             if rounds_left <= 1:

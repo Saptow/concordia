@@ -111,15 +111,33 @@ class HDBSimulationEngine(engine_lib.Engine):
   ) -> dict[str, Mapping[str, Any]]:
     """Collects logs from module-owned agents before falling back to outer ones."""
     collected_logs: dict[str, Mapping[str, Any]] = {}
+    negotiation_module = coordinator.get_negotiation_module()
+    listing_module = coordinator.get_listing_module()
+    negotiation_player_ids = (
+        tuple(str(player_id) for player_id in active_negotiation_player_ids)
+        if getattr(negotiation_module, 'is_enabled', lambda: True)()
+        else ()
+    )
+    listing_active_player_ids = (
+        tuple(str(player_id) for player_id in listing_player_ids)
+        if getattr(listing_module, 'is_enabled', lambda: True)()
+        else ()
+    )
+    active_player_ids = set(negotiation_player_ids) | set(listing_active_player_ids)
+    active_entity_names = {
+        coordinator.get_player_name(player_id) for player_id in active_player_ids
+    }
+    if not active_entity_names:
+      return collected_logs
 
     module_requests = (
         (
-            coordinator.get_negotiation_module(),
-            tuple(str(player_id) for player_id in active_negotiation_player_ids),
+            negotiation_module,
+            negotiation_player_ids,
         ),
         (
-            coordinator.get_listing_module(),
-            tuple(str(player_id) for player_id in listing_player_ids),
+            listing_module,
+            listing_active_player_ids,
         ),
     )
     for module, player_ids in module_requests:
@@ -138,7 +156,11 @@ class HDBSimulationEngine(engine_lib.Engine):
         collected_logs[str(entity_name)] = snapshot
 
     for entity in entities:
-      if entity.name in collected_logs or not hasattr(entity, 'get_last_log'):
+      if (
+          entity.name not in active_entity_names
+          or entity.name in collected_logs
+          or not hasattr(entity, 'get_last_log')
+      ):
         continue
       snapshot = entity.get_last_log()
       if not self._has_meaningful_log_value(snapshot):
