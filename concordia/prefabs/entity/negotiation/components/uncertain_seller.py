@@ -106,12 +106,12 @@ class UncertainSeller(
             f'- open_issue_count={len(uncertain_helper.get_open_issues(self._issue_bank))}',
             f'- risk_tolerance={self._risk_tolerance:.2f}',
             f'- scenario_outlook={self._format_scenario_summary()}',
-            'Recent uncertainty updates:',
+            'Latest uncertainty update:',
         ]
         if self._debug_trace:
-            lines.extend(f'- {entry}' for entry in self._debug_trace)
+            lines.append(f'- {self._debug_trace[-1]}')
         else:
-            lines.append('- No uncertainty updates recorded yet.')
+            lines.append('- No uncertainty update recorded yet.')
         return lines
 
     def _format_scenario_summary(self) -> str:
@@ -133,6 +133,7 @@ class UncertainSeller(
             f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
             f'OpenIssueCount={len(uncertain_helper.get_open_issues(self._issue_bank))}',
             f'TopOpenIssue={uncertain_helper.summarize_top_issue(uncertain_helper.get_top_issue(self._issue_bank))}',
+            f'IssueBank={uncertain_helper.format_issue_bank(self._issue_bank)}',
             f'RiskTolerance={self._risk_tolerance:.2f}',
             f'ActionConfidence={action_confidence:.2f}',
             f'ScenarioOutlook={self._format_scenario_summary()}',
@@ -175,6 +176,7 @@ class UncertainSeller(
             f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
             f'OpenIssueCount={len(self._issue_bank)}',
             f'TopOpenIssue={uncertain_helper.summarize_top_issue(uncertain_helper.get_top_issue(self._issue_bank))}',
+            f'IssueBank={uncertain_helper.format_issue_bank(self._issue_bank)}',
             f'ScenarioOutlook={self._format_scenario_summary()}',
         ]
         return '\n'.join(lines)
@@ -188,18 +190,44 @@ class UncertainSeller(
 
     def _update_counterpart_reservation_from_context(self, context: str) -> str:
         """Update beliefs based on new context information."""
-        prompt = f"""
-        You are a seller in a negotiation with perfect information. The counterpart has imperfect information about your own budget and flexibility regarding the HDB flat. However, there is uncertainty about the buyer's budget and flexibility.
-        Given a context, your task is to extract information regarding the counterpart's budget and flexibility in the negotiation, if there is any:
-        
-        Context: {context}
-
-        Focus on extracting BUDGET_INFO, the counterpart's budget or reservation value (in dollars). Determine the confidence level (0-1) through the amount of trust you have in this information.
-        If there is no usable budget information, return trust_info instead and set trust_level from -1 to 1, where -1 means distrust, 0 means neutral, and 1 means trust.
-
-        Return a response using the JSON schema provided. Provide estimates with confidence levels:
-        budget_info: [value estimate] [confidence 0-1]
-        """
+        prompt = (
+            "# Role\n"
+            "You are a seller in an HDB resale negotiation.\n\n"
+            "# Task\n"
+            "Given an observation, infer the following:\n"
+            "- **buyer's likely reservation value**, with a confidence level.\n"
+            "- (ONLY if there is no usable signal on reservation value) **trust level signal** on the buyer "
+            "based on the new information `[-1, 1]`, where `-1` indicates negative trust and `1` indicates positive trust.\n\n"
+            "# Inputs\n"
+            "## Observation\n"
+            f"{context}\n\n"
+            "## Current Belief about Buyer's Reservation Value\n"
+            f"- Reservation value estimate: {self._beliefs['counterpart_reservation'].get_expected_mean:.2f}\n"
+            f"- Confidence in reservation value: `{self._beliefs['counterpart_reservation'].confidence:.2f}`\n\n"
+            "# Private Reasoning Process\n"
+            "Think step by step **privately** before answering:\n\n"
+            "1. Extract **ONLY** concrete evidence about the buyer's maximum acceptable price.\n"
+            "2. Ignore any information that is not directly related to the buyer's reservation value.\n"
+            "3. Treat offers, counters, stated affordability, urgency, willingness to compromise, and financing constraints as evidence, "
+            "but do not assume any single number is automatically the true reservation value.\n"
+            "4. Decide whether there is enough usable evidence to estimate `budget_info`.\n"
+            "5. If yes, provide your best estimate of the buyer's reservation value and a confidence level `(0-1)` for that estimate based on the strength of the evidence.\n"
+            "6. (IMPORTANT) If there is no available estimate on the buyer's reservation value, extract **ANY INFORMATION** about the trustworthiness of the buyer based on the given observation.\n"
+            "   - For example, if you observe that the buyer is intentionally hiding information, being evasive, or providing inconsistent signals, that would be a negative trust signal.\n"
+            "   - For example, if you observe the buyer being transparent, giving reasonable justifications, or showing willingness to find a mutually beneficial deal, that would be a positive trust signal.\n"
+            "7. Decide whether there is enough usable evidence to estimate `trust_info`. If yes, provide a trust level signal between `-1` and `1` through the provided schema.\n"
+            "8. Return only the final JSON object. Do not reveal your reasoning.\n\n"
+            "# Decision Rules\n"
+            "- Return `budget_info` only if the context contains a genuine budget, reservation, or flexibility signal.\n"
+            "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
+            "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
+            "- If there is no usable budget signal but the context suggests how trustworthy the buyer is, return `trust_info`.\n"
+            "- If there is neither a usable budget signal nor a trust signal, return `{}`.\n"
+            "- Do not fabricate hidden motives or private numbers.\n\n"
+            "# Output\n"
+            "- Return JSON only.\n"
+            "- Match the provided schema exactly.\n"
+        )
         response = self._model.sample_text(prompt, json_schema=UpdateOpposingBeliefInfo.model_json_schema())
 
         # Ignore malformed model output so one bad response does not crash the turn.
@@ -332,7 +360,6 @@ class UncertainSeller(
     def get_strategy_uncertainty_summary(
         self,
         context: str,
-        max_info_items: int = 2,
     ) -> Dict[str, Any]:
         """Build a concise uncertainty summary for the strategy component."""
         strategy_context = uncertain_helper.merge_live_context(
@@ -370,8 +397,8 @@ class UncertainSeller(
         top_issue = open_issues[0] if open_issues else None
         top_issue_score = uncertain_helper.compute_issue_score(top_issue)
         issue_items = [
-            uncertain_helper.format_issue_item(issue)
-            for issue in open_issues[:max(1, max_info_items)]
+            uncertain_helper.format_issue_item(issue, include_score=False)
+            for issue in open_issues
         ]
 
         return {

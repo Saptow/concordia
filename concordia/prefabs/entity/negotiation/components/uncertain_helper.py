@@ -284,11 +284,32 @@ def summarize_top_issue(issue: NegotiationIssue | None) -> str:
     return f'{issue.label}: {issue.summary} [score={compute_issue_score(issue):.2f}]'
 
 
-def format_issue_item(issue: NegotiationIssue) -> str:
+def format_issue_item(
+    issue: NegotiationIssue,
+    *,
+    include_score: bool = False,
+) -> str:
     question = issue.suggested_question or 'Not directly answerable now.'
     if len(question) > 90:
         question = question[:87].rstrip() + '...'
-    return f'{issue.label}: {issue.summary} -> "{question}" [S={compute_issue_score(issue):.2f}]'
+    item = f'{issue.label}: {issue.summary} -> "{question}"'
+    if include_score:
+        item += f' [S={compute_issue_score(issue):.2f}]'
+    return item
+
+
+def format_issue_bank(
+    issue_bank: List[NegotiationIssue],
+    *,
+    include_score: bool = False,
+) -> str:
+    open_issues = get_open_issues(issue_bank)
+    if not open_issues:
+        return 'None'
+    return ' | '.join(
+        format_issue_item(issue, include_score=include_score)
+        for issue in open_issues
+    )
 
 
 def normalize_scenario_outcome(outcome: str) -> str:
@@ -423,31 +444,44 @@ def discover_issues(
     issue_bank: List[NegotiationIssue],
     recent_memories: List[str],
 ) -> List[NegotiationIssue]:
-    prompt = f"""
-    You are a {role_description}.
-    Given the full context below, identify up to 5 OPEN issues that matter right now.
-
-    Current issue bank:
-    {json.dumps([issue.model_dump() for issue in issue_bank], ensure_ascii=False)}
-
-    Recent memories:
-    {json.dumps(recent_memories, ensure_ascii=False)}
-
-    Context:
-    {context}
-
-    Use the provided JSON schema exactly.
-
-    Rules:
-    - Return only open issues that are still relevant now.
-    - You may repeat issues from the current issue bank if they are still relevant to the present context.
-    - `summary` should be concise and concrete.
-    - `answerable_now` must be 1 only if the {answerer_name} can realistically answer a direct question right now.
-    - If `answerable_now` is 0, leave `suggested_question` empty.
-    - If `answerable_now` is 1, provide one concise natural question.
-    - Only take `evidence` for new issues from Recent Memories or Context.
-    - If there are no useful open issues, return an empty list.
-    """
+    prompt = (
+        "# Role\n"
+        f"You are a {role_description}.\n\n"
+        "# Task\n"
+        "Given the full context below, as well as the current issue bank and recent memories, identify up to 5 **open issues** that matter right now in this negotiation.\n\n"
+        "# Inputs\n"
+        "## Current Issue Bank\n"
+        f"{json.dumps([issue.model_dump() for issue in issue_bank], ensure_ascii=False)}\n\n"
+        "## Recent Memories\n"
+        f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
+        "## Full Context\n"
+        f"{context}\n\n"
+        "# Private Reasoning Process\n"
+        "Think step by step **privately** before answering:\n\n"
+        "1. Review the current issue bank against the Full Context and Recent Memories and keep only issues that are still open and relevant now.\n"
+        "2. Look for **NEW** unresolved uncertainties in the recent memories and full context.\n"
+        "3. Group these uncertainties into the buckets defined in the schema.\n"
+        "4. Merge ANY duplicates or overlapping issues rather than listing the same concern twice.\n"
+        "5. For each issue, identify any concrete evidence from the recent memories or full context that relates to this issue and quote them **EXACTLY**, to list them as `evidence`.\n"
+        "6. For each issue, give a concise summary in 50 words or less.\n"
+        "7. For each issue, based on the concise summary and evidence, give an `uncertainty` score between 0 and 1 to indicate how uncertain you are about the issue (0 means not at all, 1 means extremely uncertain).\n"
+        f"8. Mark `answerable_now=1` only if the {answerer_name} can realistically answer a direct question immediately, based on the Full Context.\n"
+        "9. If `answerable_now=1`, provide one concise natural question that you would ask the counterpart to clear the uncertainty around this issue. The question should be specific and grounded, based on the evidence and summary you provided.\n"
+        "10. Return only the final JSON object. Do not reveal your reasoning.\n\n"
+        "# Rules\n"
+        "- Return only open issues that are still relevant now.\n"
+        "- You may repeat issues from the current issue bank **IF** they are still relevant to the present context.\n"
+        "- `summary` should be concise, concrete, and no more than 50 words.\n"
+        f"- `answerable_now` must be either `0` or `1`.\n"
+        "- If `answerable_now` is `0`, leave `suggested_question` empty.\n"
+        "- If `answerable_now` is `1`, provide one concise natural question.\n"
+        "- Only take `evidence` for new issues from Recent Memories or Full Context.\n"
+        "- If there are no useful open issues, you are allowed to return an empty list.\n\n"
+        "- Do not return placeholders or hypothetical issues that are not grounded in the current context or recent memories.\n"
+        "# Output\n"
+        "- Return JSON only.\n"
+        "- Match the provided schema exactly.\n"
+    )
     response = model.sample_text(
         prompt,
         json_schema=NegotiationIssueResponse.model_json_schema(),
@@ -485,6 +519,7 @@ __all__ = [
     'discover_issues',
     'extract_observation_actor',
     'format_interval',
+    'format_issue_bank',
     'format_issue_item',
     'format_money',
     'format_observation_summary',
