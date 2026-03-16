@@ -1016,7 +1016,7 @@ function extractEntityTrace(entry) {
   }
 
   return {
-    observed: observed.slice(-4),
+    observed: observed.slice(-1),
     action: action,
   };
 }

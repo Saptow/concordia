@@ -281,7 +281,14 @@ def get_top_issue(issue_bank: List[NegotiationIssue]) -> NegotiationIssue | None
 def summarize_top_issue(issue: NegotiationIssue | None) -> str:
     if issue is None:
         return 'None'
-    return f'{issue.label}: {issue.summary} [score={compute_issue_score(issue):.2f}]'
+    return (
+        f"Category: {issue.label}\n"
+        f"Summary: {issue.summary}\n"
+        f"Evidence: {' |\n '.join(issue.evidence) if issue.evidence else 'None'}\n"
+        f"Uncertainty: {issue.uncertainty:.2f}\n"
+        f"Answerable Now: {'Yes' if issue.answerable_now == 1 else 'No'}\n"
+        f"Suggested Question: {issue.suggested_question if issue.answerable_now == 1 else 'N/A'}"
+    )
 
 
 def format_issue_item(
@@ -292,7 +299,10 @@ def format_issue_item(
     question = issue.suggested_question or 'Not directly answerable now.'
     if len(question) > 90:
         question = question[:87].rstrip() + '...'
-    item = f'{issue.label}: {issue.summary} -> "{question}"'
+    item = (
+        f"Category: {issue.label}\n"
+        f"Question: {question}"
+    )
     if include_score:
         item += f' [S={compute_issue_score(issue):.2f}]'
     return item

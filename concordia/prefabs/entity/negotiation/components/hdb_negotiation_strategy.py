@@ -415,7 +415,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             )
         return (
             'Negotiate rather than stall.'
-            'If you ask anything, keep it to one targeted question: '
+            'If you ask anything, keep it to one targeted question:\n'
             + issue_items[0]
         )
 

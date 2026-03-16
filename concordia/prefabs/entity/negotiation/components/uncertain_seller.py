@@ -221,6 +221,7 @@ class UncertainSeller(
             "- Return `budget_info` only if the context contains a genuine budget, reservation, or flexibility signal.\n"
             "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
             "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
+            "- Do not return the same reservation estimate repeatedly if the context does not provide new evidence. If there is no new evidence to update the reservation estimate, return an empty object `{}` for `budget_info` to indicate that the reservation belief remains unchanged.\n"
             "- If there is no usable budget signal but the context suggests how trustworthy the buyer is, return `trust_info`.\n"
             "- If there is neither a usable budget signal nor a trust signal, return `{}`.\n"
             "- Do not fabricate hidden motives or private numbers.\n\n"

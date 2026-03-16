@@ -433,20 +433,37 @@ class HDBStructuredActComponent(
             else ""
         )
         prompt = interactive_document.InteractiveDocument(self._model)
-        prompt.statement(self._context_for_action(contexts) + "\n")
+        prompt_context = self._context_for_action(contexts) + "\n"
+        prompt.statement(prompt_context)
+        prompt_log_sections = []
         if decision_brief:
-            prompt.statement(decision_brief + "\n")
+            decision_brief_text = decision_brief + "\n"
+            prompt.statement(decision_brief_text)
+            prompt_log_sections.append("Decision Brief:\n" + decision_brief)
         prompt.statement(HDB_FIELD_GENERATION_BASE_GUARDRAILS)
+        prompt_log_sections.append(
+            "Base Guardrails:\n" + HDB_FIELD_GENERATION_BASE_GUARDRAILS.strip()
+        )
         if action_specific_guardrails:
             prompt.statement(action_specific_guardrails)
+            prompt_log_sections.append(
+                "Action-Specific Guardrails:\n" + action_specific_guardrails.strip()
+            )
         prompt.statement(call_to_action)
+        prompt_log_sections.append("Call To Action:\n" + call_to_action)
         if chosen_action_description:
-            prompt.statement(f"Chosen action description:\n{chosen_action_description}\n")
+            chosen_action_description_text = (
+                f"Chosen action description:\n{chosen_action_description}\n"
+            )
+            prompt.statement(chosen_action_description_text)
+            prompt_log_sections.append(
+                "Chosen Action Description:\n" + chosen_action_description
+            )
         internal_reasoning_instructions = (
             "- Use internal_reasoning to explain why the final wording supports the chosen action.\n"
             "- Do not use internal_reasoning to re-open the action choice unless the context makes the chosen action impossible.\n"
         )
-        prompt.statement(
+        field_generation_instructions = (
             "Field-generation instructions:\n"
             f"- The chosen action type is fixed: {preferred_type}\n"
             "- Keep the final wording aligned with the decision rationale.\n"
@@ -458,6 +475,8 @@ class HDBStructuredActComponent(
             "- For regular conversations, avoid repeating the same conversation to avoid looping.\n"
             f"{meaningful_counteroffer_rule}"
         )
+        prompt.statement(field_generation_instructions)
+        prompt_log_sections.append(field_generation_instructions.strip())
         structured_question = (
             "Generate the fields required for exactly one JSON object for the chosen action type "
             f"{preferred_type}, using the context and decision brief above."
@@ -468,7 +487,7 @@ class HDBStructuredActComponent(
                 f"({preferred_type})"
             ),
             "Chain of thought": (
-                prompt.view().text().splitlines()
+                "\n\n".join(prompt_log_sections).splitlines()
                 + ["", "Question:", structured_question]
             ),
         })
