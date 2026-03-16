@@ -1,9 +1,9 @@
 """Listing-specific schemas for the HDB simulation."""
 
-from typing import Optional
-
+from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
 from pydantic import BaseModel, Field
 
+from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.hdb_simulation.models.schemas.common import (
     BaseBuyer,
     BaseSeller,
@@ -12,28 +12,23 @@ from concordia.hdb_simulation.models.schemas.common import (
 
 # TODO: This is the entry schema that initialises portal state for buyers/sellers that joins from negotiation/get initialised. 
 class PortalBuyer(BaseBuyer):
+    negotiation_history: list[str] = Field(default_factory=list) # store ids of past sellers that negotiated but failed to go through with, to avoid rematching with them in the future.
     pass
 
 
 class PortalSeller(BaseSeller):
+    negotiation_history: list[str] = Field(default_factory=list) # store ids of past buyers that negotiated but failed to go through with, to avoid rematching with them in the future.
     pass
 
 
-class PortalSearchResult(BaseModel):
-    listing_id: str
-    seller_id: str
-    seller_name: str
-    score: float
-    listing_price: float
-    flat_type: str
-    town: str
-    summary: str
-
+class PortalSearchResult(ListingRecord):
+    score: float = Field(ge=0.0)
+    
 
 class BuyerMarketBeliefState(BaseModel):
     buyer_id: str
     base_reservation_price: float = Field(ge=0.0)
-    effective_reservation_price: float = Field(ge=0.0)
+    effective_reservation: uncertain_helper.NormalDistribution
     latest_market_feedback: str = 'No market feedback yet.'
     feedback_history: list[str] = Field(default_factory=list)
     latest_observed_min_price: float | None = Field(default=None, ge=0.0)
@@ -51,10 +46,9 @@ class ListingSchedulerSnapshot(BaseModel):
 
 
 class ListingBuyerState(PortalBuyer):
-    effective_reservation_price: float
+    effective_reservation: uncertain_helper.NormalDistribution
     latest_search_results: list[PortalSearchResult] = Field(default_factory=list)
     latest_market_feedback: str = 'No market feedback yet.'
-
 
 class ListingSellerState(PortalSeller):
     listed: bool
@@ -90,7 +84,13 @@ class NegotiationMatch(BaseModel):
     listing_id: str
     week_matched: int = Field(ge=1)
 
-# class ListingNegotiationTransferPayload(BaseModel):
+
+class ListingNegotiationTransferPayload(BaseModel):
+    match_id: str
+    week_matched: int = Field(ge=1)
+    listing_record: ListingRecord
+    buyer_state: ListingBuyerState
+    seller_state: ListingSellerState
 
 class ListingWeeklyBatchOutcome(BaseModel):
     week_number: int = Field(ge=1)
