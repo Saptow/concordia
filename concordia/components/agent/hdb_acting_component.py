@@ -30,6 +30,8 @@ HDB_FIELD_GENERATION_MONETARY_GUARDRAILS = (
 HDB_FIELD_GENERATION_INFO_GUARDRAILS = (
     "## Conversation Rules\n"
     "- Keep inquiry/question/answer content focused on flat condition, lease, location, transaction terms, HDB policies, or timeline.\n"
+    "- Do not repeat or lightly rephrase a recent question if you already asked for the same information.\n"
+    "- If the same issue was already raised recently, move the conversation forward instead of asking it again.\n"
 )
 
 
@@ -93,20 +95,6 @@ class HDBStructuredActComponent(
             if v:
                 lines.append(str(v))
         return "\n".join(lines)
-
-    def _get_action_choice_prompt_context(self) -> str:
-        """Return the upstream chooser prompt context without its question text."""
-        try:
-            component = self.get_entity().get_component(self._structured_component_key)
-        except Exception:
-            return ""
-        getter = getattr(component, "get_last_prompt_context", None)
-        if not callable(getter):
-            return ""
-        try:
-            return str(getter()).strip()
-        except Exception:
-            return ""
 
     def _stringify_structured_output(self, value: Any) -> str:
         """Convert structured output value to a string representation."""
@@ -349,7 +337,6 @@ class HDBStructuredActComponent(
         allowed_types: Sequence[str] = (),
         preferred_action_type: str | None = None,
         decision_brief: str = "",
-        upstream_prompt_context: str = "",
     ) -> str:
         """Generate payload fields for one already-chosen action type."""
         call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
@@ -401,12 +388,6 @@ class HDBStructuredActComponent(
         self._append_prompt_section(
             prompt,
             prompt_log_sections,
-            "# Action-Choice Context",
-            upstream_prompt_context,
-        )
-        self._append_prompt_section(
-            prompt,
-            prompt_log_sections,
             "# Decision Brief",
             decision_brief,
         )
@@ -444,7 +425,7 @@ class HDBStructuredActComponent(
             f"- Return only the fields required by {preferred_type}.\n"
             "- Include extra type-specific fields where required.\n"
             "- Any numeric price field must be a positive integer.\n"
-            "- For regular conversations, avoid repeating the same conversation to avoid looping.\n"
+            "- Avoid loops: do not repeat the same question, request, or answer wording from recent turns unless there is clear new information or you are asking one narrower follow-up.\n"
             f"{meaningful_counteroffer_rule}"
         )
         prompt.statement(field_generation_instructions)
@@ -501,7 +482,6 @@ class HDBStructuredActComponent(
                     f'Missing action choice in "{self._structured_component_key}".'
                 )
                 return "{}"
-            upstream_prompt_context = self._get_action_choice_prompt_context()
             preferred_action_type = self._parse_action_type(
                 raw, allowed_types=allowed_types
             )
@@ -536,7 +516,6 @@ class HDBStructuredActComponent(
                 allowed_types=allowed_types,
                 preferred_action_type=preferred_action_type,
                 decision_brief=decision_brief,
-                upstream_prompt_context=upstream_prompt_context,
             )
             self._logging_channel({
                 "Summary": (
