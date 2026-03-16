@@ -1,14 +1,12 @@
 """Qdrant-facing listing record schemas."""
 
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 from qdrant_client import models
 
 from concordia.hdb_simulation.models.schemas.common import Flat
-from concordia.hdb_simulation.models.schemas.listing import schema as listing_schemas
 
 # Constants for Qdrant vector database
 DENSE_EMBEDDINGS_KEY = 'dense_vector'
@@ -77,8 +75,10 @@ class ListingRecord(BaseModel):
             payload=self.qdrant_payload(),
         )
 
-    def to_search_result(self, score: float) -> listing_schemas.PortalSearchResult:
-        return listing_schemas.PortalSearchResult(
+    def to_search_result(self, score: float) -> "PortalSearchResult":
+        from concordia.hdb_simulation.models.schemas.listing.schema import PortalSearchResult
+
+        return PortalSearchResult(
             **self.model_dump(mode='json'),
             score=float(score),
         )
