@@ -103,8 +103,7 @@ class GameMaster(prefab_lib.Prefab):
 
     negotiation_module_key = 'negotiation_module'
     negotiation_module = hdb_negotiation.NegotiationModule(
-        model=model,
-        memory_bank=memory_bank,
+        entities=self.entities,
         participant_specs=negotiation_params.get('participant_specs', {}),
         negotiation_pairs=negotiation_params.get('negotiation_pairs') or None,
         action_prompt=str(

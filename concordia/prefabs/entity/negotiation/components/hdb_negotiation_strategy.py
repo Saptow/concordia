@@ -7,6 +7,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 from pydantic import BaseModel, Field
 
+from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
 from concordia.hdb_simulation.models.schemas.common import RoleType
@@ -51,7 +52,7 @@ class SimpleNegotiationStrategy(abc.ABC):
         pass
 
 
-class HDBNegotiationStrategy(entity_component.ContextComponent):
+class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     """
     Simple Negotiation Strategy for HDB resale market context to prevent long transactions.
     """
@@ -77,6 +78,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
           agent_name: The name of the agent using this strategy.
           verbose: Whether to enable verbose logging.
         """
+        super().__init__(pre_act_label='Negotiation Strategy State and Numeric Facts')
         self._model = model
         self._agent_name = agent_name
         self._role = role
@@ -424,9 +426,9 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
             )
         return summary
 
-    def pre_act(self, action_spec) -> str:
+    def _make_pre_act_value(self) -> str:
         """Provide simple strategy guidance before each action."""
-        action_context = action_spec.call_to_action
+        action_context = ''
         # Update state first
         if self._role==RoleType.BUYER:
             self._state.current_position= self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
@@ -572,7 +574,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     
     def update(self) -> None:
         """Periodic updates if needed."""
-        pass
+        super().update()
     def get_pre_act_label(self) -> str:
         return 'Negotiation Strategy State and Numeric Facts'
 
@@ -587,15 +589,7 @@ class HDBNegotiationStrategy(entity_component.ContextComponent):
     
     def get_pre_act_value(self) -> str:
         '''Get pre-act value with strategy state and numeric facts for prompting.'''
-        numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)
-        return ('\n'
-            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position:.2f}\n"
-            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
-            f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
-            f"Current Urgency Level (0-1):{self._urgency_level}\n"
-            f"{numeric_facts}\n"
-            f"Strategy Summary:\n{self.strategy_summary}\n"
-        )
+        return super().get_pre_act_value()
 
     def get_state(self)-> str:
         '''Get component state for saving /restoring.'''

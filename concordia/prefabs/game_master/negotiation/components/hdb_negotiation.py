@@ -6,13 +6,10 @@ import json
 from typing import Any
 
 from absl import logging
-from concordia.associative_memory import basic_associative_memory
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
-from concordia.language_model import language_model
-from concordia.prefabs.entity.negotiation import uncertain_negotiator
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
 )
@@ -38,8 +35,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
   def __init__(
       self,
       *,
-      model: language_model.LanguageModel,
-      memory_bank: basic_associative_memory.AssociativeMemoryBank,
+      entities: Sequence[entity_component.EntityWithComponents] = (),
       participant_specs: Mapping[str, Any] | str,
       negotiation_pairs: Sequence[Sequence[str]] | None = None,
       action_prompt: str = 'What should {name} do next?',
@@ -51,8 +47,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'Negotiation module',
   ):
     super().__init__(pre_act_label=pre_act_label)
-    self._model = model
-    self._memory_bank = memory_bank
     self._action_prompt = action_prompt
     self._make_observation_component_key = make_observation_component_key
     self._enabled = bool(enabled)
@@ -61,7 +55,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._player_names: tuple[str, ...] = ()
     self._id_to_name: dict[str, str] = {}
     self._entities_by_id: dict[str, Any] = {}
-    self._pending_entity_states: dict[str, Any] = {}
+    self._canonical_entities: tuple[entity_component.EntityWithComponents, ...] = ()
+    self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=(),
         negotiation_pairs=None,
@@ -89,9 +84,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         max_rounds=max_rounds if max_rounds > 0 else None,
     )
     self._offer_tracker = hdb_negotiation_helpers.ActiveOfferTracker(self._scheduler)
+    self.set_canonical_entities(entities)
     if not self._enabled:
       return
-    self._ensure_entities_initialized()
+    self._ensure_entities_bound()
 
   # Participant normalization
   @staticmethod
@@ -109,8 +105,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       if not isinstance(raw_spec, Mapping):
         logging.error('Participant spec for %s must be a mapping.', player_id)
         continue
-      normalized_player_id = str(player_id)
-      spec = {'id': normalized_player_id, **dict(raw_spec)}
+      spec = {'id': player_id, **dict(raw_spec)}
       role = str(spec.get('role', '')).strip().lower()
       schema_model: type[
           negotiation_schemas.NegotiationBuyer
@@ -132,7 +127,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         logging.error(
             'Participant spec for %s must map to NegotiationBuyer or '
             'NegotiationSeller.',
-            normalized_player_id,
+            player_id,
         )
         continue
 
@@ -141,24 +136,40 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       except ValidationError as error:
         logging.error(
             'Participant spec for %s failed %s validation: %s',
-            normalized_player_id,
+            player_id,
             schema_model.__name__,
             error,
         )
         continue
 
-      normalized[normalized_player_id] = validated_spec.model_dump(mode='json')
+      normalized[player_id] = validated_spec.model_dump(mode='json')
     return normalized
 
-  # Entity and pair initialization
-  def _make_stage_memory_bank(self) -> basic_associative_memory.AssociativeMemoryBank:
-    return basic_associative_memory.AssociativeMemoryBank(
-        sentence_embedder=self._memory_bank._embedder,
-        allow_duplicates=False,
-    )
+  # Entity and pair binding
+  def set_entity(self, entity: entity_component.EntityWithComponents) -> None:
+    super().set_entity(entity)
+    self._bind_known_entities()
 
-  def _initialize_entity(self, player_id: str) -> bool:
-    """Builds the negotiation entity for a participant id on first use."""
+  def set_canonical_entities(
+      self,
+      entities: Sequence[entity_component.EntityWithComponents],
+  ) -> None:
+    """Registers the simulation-owned entities available to negotiation."""
+    self._canonical_entities = tuple(entities)
+    self._canonical_entities_by_name = {
+        entity.name: entity for entity in self._canonical_entities
+    }
+    self._bind_known_entities()
+
+  def _bind_known_entities(self) -> None:
+    """Binds canonical entities to participant ids using id first, then name."""
+    if not self._participant_specs or not self._canonical_entities:
+      return
+    for player_id in self._player_ids:
+      self._bind_entity_for_player(player_id)
+
+  def _bind_entity_for_player(self, player_id: str) -> bool:
+    """Resolves a participant id to its canonical simulation entity."""
     if player_id in self._entities_by_id:
       return True
     spec = self._participant_specs.get(player_id)
@@ -166,12 +177,39 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       logging.error('No participant spec found for player id: %s', player_id)
       return False
 
-    entity = uncertain_negotiator.Entity(params=spec).build(
-        model=self._model,
-        memory_bank=self._make_stage_memory_bank(),
+    for entity in self._canonical_entities:
+      entity_player_id = str(getattr(entity, '_hdb_player_id', '')).strip()
+      if entity_player_id == player_id:
+        self._entities_by_id[player_id] = entity
+        return True
+
+    expected_name = str(spec.get('name', '')).strip()
+    if expected_name:
+      matching_entity = self._canonical_entities_by_name.get(expected_name)
+      if matching_entity is not None:
+        current_player_id = str(getattr(matching_entity, '_hdb_player_id', '')).strip()
+        if current_player_id and current_player_id != player_id:
+          logging.error(
+              'Canonical entity %s is already bound to %s, cannot bind to %s.',
+              matching_entity.name,
+              current_player_id,
+              player_id,
+          )
+          return False
+        matching_entity._hdb_player_id = player_id
+        self._entities_by_id[player_id] = matching_entity
+        return True
+
+    logging.error(
+        'Unable to bind canonical negotiation entity for %s (%s).',
+        player_id,
+        expected_name or 'unnamed participant',
     )
-    self._entities_by_id[player_id] = entity
-    return True
+    return False
+
+  def _bind_entity(self, player_id: str) -> bool:
+    """Binds the canonical simulation entity for a participant id on first use."""
+    return self._bind_entity_for_player(player_id)
 
   def _pair_exists(self, buyer_id: str, seller_id: str) -> bool:
     pair_queue = self._scheduler.get_state().get('pair_queue', [])
@@ -187,11 +225,30 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._scheduler.append_pair(buyer_id, seller_id)
     self._offer_tracker.register_pair(buyer_id, seller_id)
 
-  def _initialize_entities_for_pairs(
+  def _apply_listing_initialization_state(
       self,
-      new_negotiation_pairs: Sequence[Mapping[str, str]],
+      pair_payload: Mapping[str, Any],
+      *,
+      buyer_id: str,
+      seller_id: str,
+  ) -> None:
+    """Applies placeholder listing-to-negotiation init context once per pair."""
+    listing_state = pair_payload.get('listing_initialization_state')
+    if not isinstance(listing_state, Mapping):
+      return
+    observation = (
+        'Market_Coordinator: Listing handoff context for this negotiation: '
+        f'{json.dumps(dict(listing_state), ensure_ascii=False)}'
+    )
+    buyer_entity = self._entities_by_id.get(buyer_id)
+    if buyer_entity is not None:
+      buyer_entity.observe(observation)
+
+  def _bind_entities_for_pairs(
+      self,
+      new_negotiation_pairs: Sequence[Mapping[str, Any]],
   ) -> list[tuple[str, str]]:
-    """Initializes both participants for each valid negotiation pair."""
+    """Binds both participants for each valid negotiation pair."""
     normalized_pairs: list[tuple[str, str]] = []
     for pair in new_negotiation_pairs:
       buyer_id, seller_id = hdb_negotiation_helpers.normalize_negotiation_pair(pair)
@@ -203,32 +260,30 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             (buyer_id, seller_id),
         )
         continue
-      buyer_initialized = self._initialize_entity(buyer_id)
-      seller_initialized = self._initialize_entity(seller_id)
-      if not buyer_initialized or not seller_initialized:
+      buyer_bound = self._bind_entity(buyer_id)
+      seller_bound = self._bind_entity(seller_id)
+      if not buyer_bound or not seller_bound:
         logging.warning(
-            'Skipping negotiation pair due to missing entity initialization: %s',
+            'Skipping negotiation pair due to missing canonical entity binding: %s',
             (buyer_id, seller_id),
         )
         continue
+      pair_already_exists = self._pair_exists(buyer_id, seller_id)
       self._register_pair(buyer_id, seller_id)
+      if not pair_already_exists:
+        self._apply_listing_initialization_state(
+            pair,
+            buyer_id=buyer_id,
+            seller_id=seller_id,
+        )
       normalized_pairs.append((buyer_id, seller_id))
     return normalized_pairs
 
-  def _ensure_entities_initialized(self) -> None:
+  def _ensure_entities_bound(self) -> None:
     pair_queue = self._scheduler.get_state().get('pair_queue', [])
-    self._initialize_entities_for_pairs(
+    self._bind_entities_for_pairs(
         hdb_negotiation_helpers.pair_mappings_from_pair_ids(pair_queue)
     )
-    if not self._pending_entity_states:
-      return
-    for player_id, entity_state in self._pending_entity_states.items():
-      normalized_player_id = str(player_id)
-      if normalized_player_id not in self._entities_by_id:
-        self._initialize_entity(normalized_player_id)
-      if normalized_player_id in self._entities_by_id:
-        self._entities_by_id[normalized_player_id].set_state(entity_state)
-    self._pending_entity_states = {}
 
   # Module state
   def set_enabled(self, enabled: bool) -> None:
@@ -332,6 +387,57 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         memories[self._get_player_name(player_id)] = memory_text
     return memories
 
+  def _compress_entity_state_for_listing(self, player_id: str) -> dict[str, Any]:
+    """Builds a compact placeholder negotiation-to-listing return payload."""
+    compressed: dict[str, Any] = {
+        'id': player_id,
+        'name': self._get_player_name(player_id),
+    }
+    entity = self._entities_by_id.get(player_id)
+    if entity is None:
+      return compressed
+
+    if hasattr(entity, 'get_last_log'):
+      latest_log = entity.get_last_log()
+      if isinstance(latest_log, Mapping) and self._has_meaningful_log_value(latest_log):
+        compressed['last_log'] = dict(latest_log)
+
+    try:
+      entity_memory = entity.get_component(memory_component.DEFAULT_MEMORY_COMPONENT_KEY)
+    except Exception:  # pylint: disable=broad-exception-caught
+      entity_memory = None
+    if (
+        entity_memory is not None
+        and hasattr(entity_memory, 'get_all_memories_as_text')
+    ):
+      memories = list(entity_memory.get_all_memories_as_text())
+      compressed['memory_count'] = len(memories)
+      if memories:
+        compressed['recent_memories'] = memories[-2:]
+    return compressed
+
+  def build_relisting_transfer_payloads(
+      self,
+      pair_records: Sequence[Mapping[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Builds placeholder negotiation-to-listing return payloads."""
+    payloads: list[dict[str, Any]] = []
+    for pair_record in pair_records:
+      buyer_id = str(pair_record.get('buyer_id', '')).strip()
+      seller_id = str(pair_record.get('seller_id', '')).strip()
+      if not buyer_id or not seller_id:
+        continue
+      payloads.append({
+          **dict(pair_record),
+          'negotiation_return_state': {
+              'buyer_state': self._compress_entity_state_for_listing(buyer_id),
+              'seller_state': self._compress_entity_state_for_listing(seller_id),
+              'source': 'negotiation_module',
+              'transfer_status': 'placeholder',
+          },
+      })
+    return payloads
+
   # Observation helpers
   @staticmethod
   def _format_entity_action(entity_name: str, raw_action: str) -> str:
@@ -423,7 +529,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     entity = self._entities_by_id.get(player_id)
     if entity is None:
       logging.error(
-          'No negotiation entity initialized for %s (%s). Closing pair and continuing.',
+          'No canonical negotiation entity bound for %s (%s). Closing pair and continuing.',
           self._get_player_name(player_id),
           player_id,
       )
@@ -566,10 +672,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if not self._enabled:
       return _empty_outcome()
 
-    self._ensure_entities_initialized()
+    self._ensure_entities_bound()
 
     if new_negotiation_pairs:
-      self._initialize_entities_for_pairs(new_negotiation_pairs)
+      self._bind_entities_for_pairs(new_negotiation_pairs)
 
     if self._scheduler.all_pairs_closed():
       return _empty_outcome()
@@ -660,22 +766,21 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     snapshot = {
         'enabled': self._enabled,
         'open_pairs': [list(pair) for pair in self.get_open_pairs()],
-        'initialized_entities': sorted(self._entities_by_id.keys()),
+        'bound_entities': sorted(self._entities_by_id.keys()),
+        'canonical_entity_names': sorted(self._canonical_entities_by_name.keys()),
         'scheduler_state': self._scheduler.get_state(),
         'offer_state': self._offer_tracker.get_state(),
     }
     return json.dumps(snapshot)
 
   def get_state(self) -> entity_component.ComponentState:
-    """Serializes module state, entity state, scheduler state, and offer state."""
-    entity_states = dict(self._pending_entity_states)
-    entity_states.update({
-        player_id: entity.get_state()
-        for player_id, entity in self._entities_by_id.items()
-    })
+    """Serializes module-owned negotiation state only.
+
+    Canonical entity state is owned and checkpointed by the simulation layer,
+    not by this module.
+    """
     return {
         'participant_specs': self._participant_specs,
-        'entity_states': entity_states,
         'scheduler_state': self._scheduler.get_state(),
         'offer_state': self._offer_tracker.get_state(),
         'action_prompt': self._action_prompt,
@@ -690,7 +795,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
-    """Restores module state and re-initializes entities for tracked pairs."""
+    """Restores module state and re-binds canonical entities for tracked pairs."""
     if 'participant_specs' in state:
       self._participant_specs = self._normalize_participant_specs(
           state['participant_specs']  # type: ignore[arg-type]
@@ -708,12 +813,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self._scheduler.set_state(state['scheduler_state'])
     if 'offer_state' in state:
       self._offer_tracker.set_state(state['offer_state'])
-    if 'entity_states' in state:
-      entity_states = state['entity_states']  # type: ignore[assignment]
-      self._pending_entity_states = {
-          str(player_id): entity_state
-          for player_id, entity_state in entity_states.items()  # type: ignore[union-attr]
-      }
     if 'action_prompt' in state:
       self._action_prompt = str(state['action_prompt'])
     if 'make_observation_component_key' in state:
@@ -721,3 +820,6 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           state['make_observation_component_key']
       )
     self._enabled = bool(state.get('enabled', 1))
+    self._entities_by_id = {}
+    self._bind_known_entities()
+    self._ensure_entities_bound()

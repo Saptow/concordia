@@ -1,11 +1,10 @@
-"""Shared weekly coordinator state for the HDB market game master."""
-
 from collections.abc import Mapping, Sequence
 import json
 from typing import TYPE_CHECKING, Any
 
 from absl import logging
 from concordia.components.agent import action_spec_ignored
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.typing import entity_component
 
 if TYPE_CHECKING:
@@ -14,7 +13,17 @@ if TYPE_CHECKING:
 
 
 class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
-  """Owns shared weekly state across listing and negotiation modules."""
+  """Owns shared weekly state across listing and negotiation modules.
+
+  Responsibilities:
+  - track the global week counter
+  - keep canonical player id/name mappings for logging and engine use
+  - decide which players stay in listing versus negotiation each week
+  - stage listing matches as pending negotiation transfers
+  - emit a durable week summary for logging, checkpoints, and restore.
+
+  Only cross-module state owned by WeeklyCoordinator.
+  """
 
   def __init__(
       self,
@@ -92,12 +101,22 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     normalized_player_id = str(player_id)
     return self._id_to_name.get(normalized_player_id, normalized_player_id)
 
-
   # Week preparation helpers.
   def _compute_assignments(
       self,
       new_negotiation_pairs: Sequence[Mapping[str, Any]] = (),
   ) -> tuple[set[str], list[tuple[str, str]]]:
+    """Computes this week's listing participants and negotiation pairs.
+
+    Args:
+      new_negotiation_pairs: Buyer/seller pairs transferred in from listing,
+        typically matches produced during the previous completed week.
+
+    Returns:
+      A tuple of:
+      - listing player ids that remain open and are not already negotiating, and
+      - the full set of open negotiation pairs for the week.
+    """
     listing = self.get_listing_module()
     negotiation = self.get_negotiation_module()
 
@@ -134,6 +153,12 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
 
   # Weekly lifecycle methods called by the engine.
   def prepare_week(self) -> dict[str, Any]:
+    """Builds the engine-facing context for the next weekly step.
+
+    This method snapshots the coordinator-owned scheduling state before either
+    module runs. In particular, any pending listing matches are exposed as
+    `new_negotiation_pairs` so negotiation can absorb them during this week.
+    """
     listing = self.get_listing_module()
     negotiation = self.get_negotiation_module()
     current_week = self._week_number
@@ -174,6 +199,35 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     if isinstance(value, Sequence) and not isinstance(value, str):
       return list(value)
     return []
+
+  @staticmethod
+  def _failed_pairs_to_relist(
+      negotiation_outcome: Mapping[str, Any] | None,
+  ) -> list[dict[str, Any]]:
+    """Extracts failed negotiation pairs that should return to listing."""
+    if negotiation_outcome is None:
+      return []
+    closed_pairs = negotiation_outcome.get('closed_pairs', ())
+    if not isinstance(closed_pairs, Sequence) or isinstance(closed_pairs, str):
+      return []
+
+    reopened_pairs: list[dict[str, Any]] = []
+    for record in closed_pairs:
+      if not isinstance(record, Mapping):
+        continue
+      outcome = str(record.get('outcome', '')).strip().upper()
+      if outcome != negotiation_schemas.NegotiationOutcome.CLOSED_WITHOUT_SUCCESS:
+        continue
+      buyer_id = str(record.get('buyer_id', '')).strip()
+      seller_id = str(record.get('seller_id', '')).strip()
+      if not buyer_id or not seller_id:
+        continue
+      reopened_pairs.append({
+          **dict(record),
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+      })
+    return reopened_pairs
 
   def _format_listing_summary(self, listing_outcome: Any | None) -> list[str]:
     if listing_outcome is None:
@@ -321,19 +375,41 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
       listing_outcome: Any | None = None,
       negotiation_outcome: Mapping[str, Any] | None = None,
   ) -> dict[str, Any]:
+    """Finalizes the current week and stages cross-module handoff state.
+
+    Listing output is converted into `pending_matches` for the next week, while
+    negotiation output is recorded only for summary/logging purposes.
+
+    Args:
+      listing_outcome: Result returned by `ListingModule.run_week`.
+      negotiation_outcome: Result returned by `NegotiationModule.run_week`.
+
+    Returns:
+      The persisted week summary captured before advancing the week counter.
+    """
+    # Get respective modules for state and method access
     listing = self.get_listing_module()
     negotiation = self.get_negotiation_module()
+
     current_week = self._week_number
 
+    # Prepare listing -> negotiation handoff.
     next_pending_matches = []
-    # Listing matches are staged for the next week's negotiation intake.
     if listing_outcome is not None:
-      next_pending_matches = [
-          match.model_dump() for match in listing_outcome.matched_pairs
-      ]
+      next_pending_matches = listing.build_negotiation_transfer_payloads(
+          listing_outcome.matched_pairs
+      )
+
+    relisting_pair_payloads = negotiation.build_relisting_transfer_payloads(
+        self._failed_pairs_to_relist(negotiation_outcome)
+    )
+    reopened_listing_pairs = listing.reopen_failed_negotiation_pairs(
+        relisting_pair_payloads
+    )
 
     self._pending_matches = next_pending_matches
 
+    # Logging 
     self._last_week_summary = {
         'week_number': current_week,
         'assignments': dict(self._module_assignments),
@@ -342,6 +418,7 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         'listing': listing_outcome.model_dump() if listing_outcome else None,
         'negotiation': dict(negotiation_outcome) if negotiation_outcome else None,
         'pending_matches_for_next_week': list(self._pending_matches),
+        'reopened_listing_pairs': reopened_listing_pairs,
     }
     self._log_week_summary(
         summary=self._last_week_summary,
@@ -349,11 +426,13 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         listing_outcome=listing_outcome,
         negotiation_outcome=negotiation_outcome,
     )
+    # Increment week number
     self._week_number += 1
     return dict(self._last_week_summary)
 
   # Snapshot and persistence helpers.
   def get_week_snapshot(self) -> dict[str, Any]:
+    """Returns the latest completed-week summary or the current live snapshot."""
     if self._last_week_summary:
       return dict(self._last_week_summary)
     return {
@@ -363,6 +442,12 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     }
 
   def should_terminate(self) -> bool:
+    """Returns whether the weekly engine can stop advancing the simulation.
+
+    Termination waits for both enabled modules to finish and also blocks if the
+    coordinator is still holding pending listing matches that negotiation has
+    not yet consumed.
+    """
     listing = self.get_listing_module()
     negotiation = self.get_negotiation_module()
     enabled_modules = [listing.is_enabled(), negotiation.is_enabled()]
@@ -379,6 +464,7 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     return json.dumps(self.get_week_snapshot())
 
   def get_state(self) -> entity_component.ComponentState:
+    """Serializes coordinator-owned cross-module scheduling state."""
     return {
         'player_ids': list(self._player_ids),
         'id_to_name': dict(self._id_to_name),
@@ -391,12 +477,14 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     }
 
   def get_dynamic_state(self) -> entity_component.ComponentState:
+    """Serializes the lightweight mutable state needed for live inspection."""
     return {
         'week_number': self._week_number,
         'pending_matches': list(self._pending_matches),
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
+    """Restores coordinator-owned state without touching module internals."""
     # Restore only the coordinator-owned global state. Module internals are
     # restored by their own components.
     if 'player_ids' in state:

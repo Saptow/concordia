@@ -76,20 +76,28 @@ class NormalInverseGamma:
         self.a = new_a
         self.b = new_b
 
-    def update_trust(self, trust_level: float, scale: float = 7.0) -> None:
-        weight = max(0.0, min(1.0, float(trust_level)))
-        if weight <= 0.0:
+    def update_trust(self, trust_level: float, scale: float = 1.0) -> None:
+        trust = max(-1.0, min(1.0, float(trust_level)))
+        if math.isclose(trust, 0.0, abs_tol=1e-6):
             return
 
-        m_eff = scale * weight
+        effective_scale = 0.25 * min(1.0, max(0.0, float(scale)))
+        m_eff = effective_scale * abs(trust)
+        if m_eff <= 0.0:
+            return
+
+        direction = 1.0 if trust > 0.0 else -1.0
         expected_variance = max(1e-9, self.get_expected_variance)
-        a_new = self.a + 0.5 * m_eff
+        a_new = max(1.05, self.a + direction * 0.5 * m_eff)
         b_new = expected_variance * max(1e-9, (a_new - 1.0))
 
         self.a = a_new
         self.b = b_new
         self.evidence_count += 1
-        self.confidence = min(0.95, self.confidence + 0.02 * (1 - math.exp(-m_eff / 5.0)))
+        self.confidence = max(
+            0.05,
+            min(0.95, self.confidence + (m_eff * direction)),
+        )
 
 
 @dataclasses.dataclass
@@ -155,7 +163,7 @@ class NegotiationIssueBucket(StrEnum):
     FLAT_AMENITIES = 'Flat Amenities'
     FINANCING = 'Financing'
     TIMELINE_AND_PROCESS = 'Timeline and Process'
-    COUNTERPART = 'Counterpart'
+    COUNTERPART = 'Counterpart\'s Circumstances'
     OTHERS = 'Others'
 
 

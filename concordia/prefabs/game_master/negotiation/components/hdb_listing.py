@@ -174,6 +174,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
   - owns buyer/seller portal profiles
   - owns portal state across weeks
   - runs one listing week when asked by the coordinator
+  - provides listing-to-negotiation transfer payloads for matched pairs
+  - provides a method to reopen failed negotiation pairs back into the listing workflow
   - exposes a compact snapshot for inspection/serialization
 
   run_week runs one weekly listing-market step in three concurrent phases:
@@ -240,6 +242,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._ensure_portal()
 
   def _ensure_portal(self) -> listing_portal_lib.ListingPortal:
+    """Lazily constructs or restores the backing `ListingPortal` instance."""
     if self._portal is None:
       retriever = None
       if self._client is not None or self._dense_embedding_model is not None:
@@ -290,6 +293,106 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def get_last_outcome(self) -> listing_schemas.ListingWeeklyBatchOutcome:
     return self._last_outcome
+
+
+  # Transfer payload builders and cross-module handoff utilities.
+  @staticmethod
+  def _pair_transfer_key(buyer_id: str, seller_id: str) -> str:
+    return f'{buyer_id}|||{seller_id}'
+
+  def _compress_buyer_state_for_negotiation(self, buyer_id: str) -> dict[str, Any]:
+    """Builds a compact listing-owned buyer handoff payload."""
+    buyer_state = self._buyer_state(buyer_id)
+    return {
+        'id': buyer_state.id,
+        'name': buyer_state.name,
+        'budget': buyer_state.budget.model_dump(),
+        'preferences': buyer_state.preferences.model_dump(),
+        'effective_reservation_price': float(
+            buyer_state.effective_reservation_price
+        ),
+        'latest_market_feedback': buyer_state.latest_market_feedback,
+    }
+
+  def _compress_seller_state_for_negotiation(self, seller_id: str) -> dict[str, Any]:
+    """Builds a compact listing-owned seller handoff payload."""
+    seller_state = self._seller_state(seller_id)
+    return {
+        'id': seller_state.id,
+        'name': seller_state.name,
+        'expectations': seller_state.expectations.model_dump(),
+        'listed': bool(seller_state.listed),
+        'current_listing_id': seller_state.current_listing_id,
+        'current_listing_price': seller_state.current_listing_price,
+        'open_requests': int(seller_state.open_requests),
+        'flat_type': str(seller_state.flat.flat_type),
+        'town': seller_state.flat.town,
+    }
+
+  def build_negotiation_transfer_payloads(
+      self,
+      matches: Sequence[listing_schemas.NegotiationMatch],
+  ) -> list[dict[str, Any]]:
+    """Builds listing-to-negotiation payloads for newly matched pairs.
+
+    Each payload bundles the match metadata with a compact snapshot of the
+    buyer and seller's current listing-side state. The payload is intentionally
+    lightweight and is meant to be consumed by the coordinator and negotiation
+    module, not persisted here as module-owned state.
+    """
+    payloads: list[dict[str, Any]] = []
+    for match in matches:
+      buyer_id = str(match.buyer_id)
+      seller_id = str(match.seller_id)
+      payloads.append({
+          **match.model_dump(),
+          'pair_key': self._pair_transfer_key(buyer_id, seller_id),
+          'listing_initialization_state': {
+              'buyer_state': self._compress_buyer_state_for_negotiation(buyer_id),
+              'seller_state': self._compress_seller_state_for_negotiation(
+                  seller_id
+              ),
+              'source': 'listing_module',
+              'transfer_status': 'placeholder',
+          },
+      })
+    return payloads
+
+  def reopen_failed_negotiation_pairs(
+      self,
+      pair_records: Sequence[Mapping[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Reopens failed negotiation pairs back into the listing workflow.
+
+    Each reopened pair removes the buyer and seller from the portal's closed
+    participant sets. The seller's listing stays inactive until a later
+    listing week relists it through the normal `list_flat` flow.
+
+    Args:
+      pair_records: Closed-pair summary records, typically from negotiation.
+
+    Returns:
+      Normalized relisting payloads for pairs that were successfully reopened.
+    """
+    portal = self._ensure_portal()
+    reopened_pairs: list[dict[str, Any]] = []
+    for pair_record in pair_records:
+      buyer_id = str(pair_record.get('buyer_id', '')).strip()
+      seller_id = str(pair_record.get('seller_id', '')).strip()
+      if not buyer_id or not seller_id:
+        logging.warning(
+            'Skipping failed negotiation reopen with invalid ids: %s',
+            pair_record,
+        )
+        continue
+      portal.closed_buyers.discard(buyer_id)
+      portal.closed_sellers.discard(seller_id)
+      reopened_pairs.append({
+          **dict(pair_record),
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+      })
+    return reopened_pairs
 
   def _empty_outcome(
       self,
@@ -349,18 +452,19 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     return outcome
 
   def _buyer_state(self, player_id: str) -> listing_schemas.ListingBuyerState:
+    """Builds a runtime listing snapshot for one buyer."""
     buyer = self._buyers[player_id]
     portal = self._ensure_portal()
     return listing_schemas.ListingBuyerState(
-        player_id=player_id,
-        player_name=buyer.name,
-        budget_min_price=buyer.budget.min_price,
-        budget_max_price=buyer.budget.max_price,
+        id=player_id,
+        name=buyer.name,
+        role=buyer.role,
+        description=buyer.description,
+        budget=buyer.budget.model_copy(deep=True),
+        preferences=buyer.preferences.model_copy(deep=True),
         effective_reservation_price=portal.effective_reservation_price_for_buyer(
             buyer
         ),
-        preferred_flat_types=list(buyer.preferences.flat_type),
-        preferred_towns=list(buyer.preferences.towns),
         latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
         latest_market_feedback=portal.market_feedback_by_buyer.get(
             player_id,
@@ -369,22 +473,26 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     )
 
   def _seller_state(self, player_id: str) -> listing_schemas.ListingSellerState:
+    """Builds a runtime listing snapshot for one seller."""
     seller = self._sellers[player_id]
     portal = self._ensure_portal()
     listing_id = portal.listing_id_for_seller(player_id)
     listing = portal.get_listing_record(player_id)
     return listing_schemas.ListingSellerState(
-        player_id=player_id,
-        player_name=seller.name,
+        id=player_id,
+        name=seller.name,
+        role=seller.role,
+        description=seller.description,
+        flat=seller.flat.model_copy(deep=True),
+        expectations=seller.expectations.model_copy(deep=True),
         listed=portal.is_seller_listed(player_id),
         current_listing_id=listing_id if listing is not None else None,
         current_listing_price=float(listing.listing_price) if listing is not None else None,
         open_requests=portal.pending_request_count(player_id),
-        flat_type=str(seller.flat.flat_type),
-        town=seller.flat.town,
     )
 
   def _make_pre_act_value(self) -> str:
+    """Returns a compact JSON snapshot for GM inspection and logging."""
     if self._portal is None:
       snapshot = listing_schemas.ListingPortalSnapshot(
           week_number=max(1, self._last_run_week or 1),
@@ -408,6 +516,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     return snapshot.model_dump_json()
 
   def get_state(self) -> entity_component.ComponentState:
+    """Serializes listing-owned profiles, portal state, and progress counters."""
     return {
         'buyers': {
             buyer_id: buyer.model_dump()
@@ -431,6 +540,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     }
 
   def get_dynamic_state(self) -> entity_component.ComponentState:
+    """Serializes only the lightweight mutable progress fields."""
     return {
         'enabled': int(self._enabled),
         'max_rounds': self._max_rounds or 0,
@@ -440,6 +550,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
+    """Restores listing-owned state and defers portal reconstruction lazily."""
     if 'portal_state' in state:
       self._portal_state = dict(state.get('portal_state', {}))
       self._portal = None

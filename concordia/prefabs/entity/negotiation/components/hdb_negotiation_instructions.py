@@ -4,6 +4,7 @@
 from collections.abc import Mapping
 from typing import Optional, Any
 
+from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.typing import entity_component
@@ -11,7 +12,7 @@ from concordia.typing import entity_component
 # TODO: This should be the part to inject government policies and HDB-specific constraints
 # into the negotiation instructions for agents negotiating HDB resale flats.
 
-class HDBNegotiationInstructions(entity_component.ContextComponent):
+class HDBNegotiationInstructions(action_spec_ignored.ActionSpecIgnored):
     """Instructions component specialized for HDB negotiation contexts.
 
     This component provides dynamic negotiation guidance based on:
@@ -46,6 +47,7 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
             ethical_constraints: Optional ethical guidelines
             verbose: Whether to print debug information
         """
+        super().__init__(pre_act_label=pre_act_label)
         self._agent_name = agent_name
         self._role = role
         self._description = description
@@ -159,12 +161,12 @@ class HDBNegotiationInstructions(entity_component.ContextComponent):
         """Label used when other components reference this pre-act context."""
         return self._pre_act_label
 
-    def get_pre_act_value(self) -> str:
+    def _make_pre_act_value(self) -> str:
         """Pre-act instruction body used by dependent components."""
         return self._base_instructions
-    
+
     def pre_act(self, action_spec) -> str:
-        """Provide negotiation instructions before action."""
+        """Provide negotiation instructions before action without changing prompt shape."""
         del action_spec
         return self.get_pre_act_value()
 

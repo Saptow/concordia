@@ -50,29 +50,17 @@ class ListingSchedulerSnapshot(BaseModel):
     max_rounds: int = Field(ge=0)
 
 
-class ListingBuyerState(BaseModel):
-    role: RoleType = Field(default=RoleType.BUYER)
-    player_id: str
-    player_name: str
-    budget_min_price: float
-    budget_max_price: float
+class ListingBuyerState(PortalBuyer):
     effective_reservation_price: float
-    preferred_flat_types: list[str] = Field(default_factory=list)
-    preferred_towns: list[str] = Field(default_factory=list)
     latest_search_results: list[PortalSearchResult] = Field(default_factory=list)
     latest_market_feedback: str = 'No market feedback yet.'
 
 
-class ListingSellerState(BaseModel):
-    role: RoleType = Field(default=RoleType.SELLER)
-    player_id: str
-    player_name: str
+class ListingSellerState(PortalSeller):
     listed: bool
     current_listing_id: str | None = None
     current_listing_price: float | None = None
     open_requests: int = Field(ge=0)
-    flat_type: str
-    town: str
 
 
 class ListingPortalSnapshot(BaseModel):
@@ -102,6 +90,7 @@ class NegotiationMatch(BaseModel):
     listing_id: str
     week_matched: int = Field(ge=1)
 
+# class ListingNegotiationTransferPayload(BaseModel):
 
 class ListingWeeklyBatchOutcome(BaseModel):
     week_number: int = Field(ge=1)

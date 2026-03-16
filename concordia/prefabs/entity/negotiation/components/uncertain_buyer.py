@@ -27,7 +27,11 @@ class UpdateOpposingBeliefInfoMetadata(BaseModel):
 
 class UpdateOpposingBeliefTrustMetadata(BaseModel):
     '''Metadata for trust updates during negotiations.'''
-    trust_level: float = Field(ge=0.0, le=1.0, description="Trust level in the counterpart based on the new information")
+    trust_level: float = Field(
+        ge=-1.0,
+        le=1.0,
+        description='Signed trust signal in the counterpart based on the new information (-1 distrust, 0 neutral, 1 trust)',
+    )
 
 class UpdateOpposingBeliefInfo(BaseModel):
     '''Information to update belief during negotiations.'''
@@ -264,7 +268,7 @@ class UncertainBuyer(
         Context: {context}
 
         First, focus on extracting BUDGET_INFO, the counterpart's budget or reservation value (in dollars), if any. Determine the confidence level (0-1) through the amount of trust you have in this information.
-        Should there be no explicit budget information from the counterpart, focus next on extracting your TRUST in the counterpart based on the context, and determine a trust level (0-1) that reflects how much you trust the counterpart based on the given context. 
+        Should there be no explicit budget information from the counterpart, focus next on extracting your TRUST in the counterpart based on the context, and determine a signed trust level from -1 to 1, where -1 means distrust, 0 means neutral, and 1 means trust.
         Return a response using the JSON schema provided.
         """
 
