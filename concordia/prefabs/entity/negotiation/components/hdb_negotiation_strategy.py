@@ -361,7 +361,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         risk_tolerance = float(uncertainty_summary.get('risk_tolerance', 0.5))
         action_confidence = max(0.0, min(1.0, action_confidence))
         risk_tolerance = max(0.0, min(1.0, risk_tolerance))
-        return action_confidence <= risk_tolerance
+        return (1-action_confidence) > risk_tolerance
 
     def _build_information_focus(
         self,
@@ -389,7 +389,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 f'"{top_issue_question}"'
             )
         return (
-            'Negotiate rather than stall. '
+            'Negotiate rather than stall.'
             'If you ask anything, keep it to one targeted question: '
             + issue_items[0]
         )
