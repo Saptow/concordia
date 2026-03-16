@@ -104,11 +104,34 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
         self._state = SimpleStrategyState(current_position=current_position, opponent_position=counterpart_position)
 
-        prompt = ( #TODO: rewrite prompt, instead of description, use previous listing scenario and existing scenario condition to determine urgency level instead. 
-            f"You are given the description of a {self._role} in an HDB resale negotiation:\n"
-            f"Description: {self._description}\n"
-            f"Determine how urgent {self._agent_name} is to close the negotiation from 0 to 1 (0 = not urgent, 1 = extremely urgent)."
-            f"Output using the schema provided."
+        prompt = (  # TODO: rewrite prompt, instead of description, use previous listing scenario and existing scenario condition to determine urgency level instead.
+            "# Role\n"
+            f"You are estimating negotiation urgency for a {self._role} in an HDB resale negotiation.\n\n"
+            "# Task\n"
+            f"Estimate how urgent **{self._agent_name}** is to close the negotiation.\n\n"
+            "# Input\n"
+            "## Agent Description\n"
+            f"{self._description}\n\n"
+            "# Private Reasoning Process\n"
+            "Think step by step **privately** before answering:\n\n"
+            "1. Identify signals of time pressure, financial pressure, relocation needs, family needs, or willingness to wait.\n"
+            "2. Distinguish strong urgency cues from mild preferences.\n"
+            "3. Convert the overall urgency into a score from `0` to `1`.\n"
+            "4. Return only the final JSON object. Do not reveal your reasoning.\n\n"
+            "# Scoring Rubrics\n"
+            "The score is continuous between `0` and `1`, where higher values indicate greater urgency to close the deal. For example:\n"
+            "- `0.0` = not urgent at all, very patient, can comfortably wait.\n"
+            "- `0.25` = low urgency, some preference to close but no real pressure.\n"
+            "- `0.5` = moderate urgency, meaningful motivation to close but not time-critical.\n"
+            "- `0.75` = high urgency, clear pressure or strong need to close soon.\n"
+            "- `1.0` = extremely urgent, immediate pressure to close.\n\n"
+            "# Rules\n"
+            "- Use only the agent description provided.\n"
+            "- Do not invent facts that are not stated or strongly implied.\n"
+            "- Output a single urgency value between `0` and `1`.\n\n"
+            "# Output\n"
+            "- Return JSON only.\n"
+            "- Match the provided schema exactly.\n"
         )
 
         response = self._model.sample_text(
