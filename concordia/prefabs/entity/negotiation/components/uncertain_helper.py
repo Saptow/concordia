@@ -1,5 +1,6 @@
 """Shared helpers for uncertainty-aware negotiation components."""
 
+import copy
 import dataclasses
 import json
 import math
@@ -59,6 +60,11 @@ class NormalInverseGamma:
             n,
         )
         return mu_samples[0] if n == 1 else mu_samples.tolist()
+
+    def model_copy(self, *, deep: bool = False) -> 'NormalInverseGamma':
+        if deep:
+            return copy.deepcopy(self)
+        return copy.copy(self)
 
     def update_with_evidence(self, observation: float, reliability: float = 1.0) -> None:
         reliability = max(0.0, min(1.0, reliability))
@@ -123,12 +129,16 @@ class NormalDistribution:
         samples = np.random.normal(self.mean, self.std, n)
         return samples[0] if n == 1 else samples.tolist()
 
+    def model_copy(self, *, deep: bool = False) -> 'NormalDistribution':
+        if deep:
+            return copy.deepcopy(self)
+        return copy.copy(self)
+
     def update_with_evidence(self, observation: float, reliability: float = 1.0) -> None:
         reliability = max(0.0, min(1.0, reliability))
         observation = max(0.0, observation)
-        std = max(0.01, self.std)
-        prior_precision = 1 / (std ** 2)
-        evidence_precision = reliability / (std ** 2)
+        prior_precision = 1 / (self.std ** 2)
+        evidence_precision = reliability / (self.std ** 2)
         total_precision = prior_precision + evidence_precision
         new_mean = (
             (prior_precision * self.mean + evidence_precision * observation)
@@ -139,7 +149,7 @@ class NormalDistribution:
         self.evidence_count += 1
         self.confidence = min(0.95, self.confidence + 0.05 * reliability)
         self.mean = max(0.0, new_mean)
-        self.std = max(0.01, new_std)
+        self.std = new_std
 
     def get_confidence_interval(self, level: float = 0.95) -> Tuple[float, float]:
         z_score = 1.96 if level == 0.95 else 2.58

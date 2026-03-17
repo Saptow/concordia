@@ -402,7 +402,8 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
 
     if negotiation._enabled and negotiation_outcome is not None:
       relisting_pair_payloads = negotiation.build_relisting_transfer_payloads(
-          self._failed_pairs_to_relist(negotiation_outcome)
+          self._failed_pairs_to_relist(negotiation_outcome),
+          week_number=current_week,
       )
     else:
       relisting_pair_payloads = []

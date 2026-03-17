@@ -7,6 +7,8 @@ from absl import logging
 from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation import listing_portal as listing_portal_lib
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
 from concordia.typing import entity_component
 from concordia.utils import concurrency
 
@@ -195,6 +197,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       seller_profiles: Mapping[str, Mapping[str, Any]] | str = (),
       client: Any | None = None,
       dense_embedding_model: Any | None = None,
+      collection_name: str | None = None,
+      db_path: str | None = None,
       random_seed: int = 0,
       max_rounds: int | None = None,
       enabled: bool = True,
@@ -204,6 +208,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._enabled = bool(enabled)
     self._client = client
     self._dense_embedding_model = dense_embedding_model
+    self._collection_name = str(collection_name).strip() or qdrant_schemas.DEFAULT_COLLECTION_NAME
+    self._db_path = str(db_path).strip() or qdrant_schemas.DEFAULT_DB_PATH
     self._random_seed = random_seed
     self._player_names = tuple(player_names)
     self._player_ids = tuple(player_ids) if player_ids else tuple(player_names)
@@ -249,6 +255,11 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         retriever = listing_portal_lib.ListingPortalRetriever(
             client=self._client,
             dense_embedding_model=self._dense_embedding_model,
+            collection_name=(
+                self._collection_name
+                or listing_portal_lib.qdrant_schemas.DEFAULT_COLLECTION_NAME
+            ),
+            db_path=self._db_path or listing_portal_lib.qdrant_schemas.DEFAULT_DB_PATH,
         )
       if self._portal_state:
         self._portal = listing_portal_lib.ListingPortal.from_state(
@@ -340,21 +351,44 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     portal = self._ensure_portal()
     reopened_pairs: list[dict[str, Any]] = []
     for pair_record in pair_records:
-      buyer_id = str(pair_record.get('buyer_id', '')).strip()
-      seller_id = str(pair_record.get('seller_id', '')).strip()
+      try:
+        payload = negotiation_schemas.NegotiationToListingPayload.model_validate(
+            pair_record
+        )
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            'Skipping invalid negotiation-to-listing payload %s: %s',
+            pair_record,
+            error,
+        )
+        continue
+      buyer_id = str(payload.negotiation_history.buyer_id).strip()
+      seller_id = str(payload.negotiation_history.seller_id).strip()
       if not buyer_id or not seller_id:
         logging.warning(
             'Skipping failed negotiation reopen with invalid ids: %s',
             pair_record,
         )
         continue
+      buyer = self._buyers.get(buyer_id)
+      seller = self._sellers.get(seller_id)
+      if buyer is None or seller is None:
+        logging.warning(
+            'Skipping failed negotiation reopen with unknown ids: %s',
+            payload.negotiation_history,
+        )
+        continue
+      buyer.negotiation_history.append(payload.negotiation_history.model_copy(deep=True))
+      seller.negotiation_history.append(payload.negotiation_history.model_copy(deep=True))
+      portal._buyer_market_state(buyer).effective_reservation = (
+          payload.buyer_state.effective_reservation.model_copy(deep=True)
+      )
+      portal._seller_market_state(seller).effective_reservation = (
+          payload.seller_state.effective_reservation.model_copy(deep=True)
+      )
       portal.closed_buyers.discard(buyer_id)
       portal.closed_sellers.discard(seller_id)
-      reopened_pairs.append({
-          **dict(pair_record),
-          'buyer_id': buyer_id,
-          'seller_id': seller_id,
-      })
+      reopened_pairs.append(payload.model_dump(mode='json'))
     return reopened_pairs
 
   def _empty_outcome(
@@ -426,6 +460,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         description=buyer.description,
         budget=buyer.budget.model_copy(deep=True),
         preferences=buyer.preferences.model_copy(deep=True),
+        negotiation_history=[
+            record.model_copy(deep=True) for record in buyer.negotiation_history
+        ],
         effective_reservation=market_state.effective_reservation,
         latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
         latest_market_feedback=portal.market_feedback_by_buyer.get(
@@ -438,6 +475,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     """Builds a runtime listing snapshot for one seller."""
     seller = self._sellers[player_id]
     portal = self._ensure_portal()
+    market_state = portal._seller_market_state(seller)
     listing_id = portal.listing_id_for_seller(player_id)
     listing = portal.get_listing_record(player_id)
     return listing_schemas.ListingSellerState(
@@ -447,6 +485,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         description=seller.description,
         flat=seller.flat.model_copy(deep=True),
         expectations=seller.expectations.model_copy(deep=True),
+        negotiation_history=[
+            record.model_copy(deep=True) for record in seller.negotiation_history
+        ],
+        effective_reservation=market_state.effective_reservation.model_copy(deep=True),
         listed=portal.is_seller_listed(player_id),
         current_listing_id=listing_id if listing is not None else None,
         current_listing_price=float(listing.listing_price) if listing is not None else None,
@@ -493,6 +535,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             if self._portal is not None
             else dict(self._portal_state)
         ),
+        'collection_name': self._collection_name or '',
+        'db_path': self._db_path or '',
         'max_rounds': self._max_rounds or 0,
         'enabled': int(self._enabled),
         'completed_weeks': self._completed_weeks,
@@ -505,6 +549,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     """Serializes only the lightweight mutable progress fields."""
     return {
         'enabled': int(self._enabled),
+        'collection_name': self._collection_name or '',
+        'db_path': self._db_path or '',
         'max_rounds': self._max_rounds or 0,
         'completed_weeks': self._completed_weeks,
         'last_run_week': self._last_run_week,
@@ -526,6 +572,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
           str(seller_id): listing_schemas.PortalSeller.model_validate(payload)
           for seller_id, payload in state['sellers'].items()
       }
+    if 'collection_name' in state:
+      self._collection_name = str(state.get('collection_name', '')).strip() or None
+    if 'db_path' in state:
+      self._db_path = str(state.get('db_path', '')).strip() or None
     max_rounds = int(state.get('max_rounds', 0))
     self._max_rounds = max_rounds if max_rounds > 0 else None
     self._enabled = bool(state.get('enabled', 1))

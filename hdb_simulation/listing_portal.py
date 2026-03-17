@@ -41,11 +41,12 @@ class ListingPortalRetriever:
         client: QdrantClient | None = None,
         dense_embedding_model: SentenceTransformer | None = None,
         collection_name: str = qdrant_schemas.DEFAULT_COLLECTION_NAME,
+        db_path: str = qdrant_schemas.DEFAULT_DB_PATH,
     ):
         if client is None:
             # Initialise Qdrant client
             client = QdrantClient(
-                location=qdrant_schemas.DEFAULT_DB_PATH,
+                location=db_path,
             )
         
         self._dense_embedder=dense_embedding_model
@@ -218,6 +219,7 @@ class ListingPortal:
         self.requests_by_seller: dict[str, list[listing_schemas.NegotiationRequest]] = {}
         self.search_results_by_buyer: dict[str, list[listing_schemas.PortalSearchResult]] = {}
         self.private_buyer_market_states: dict[str, listing_schemas.BuyerMarketBeliefState] = {}
+        self.private_seller_market_states: dict[str, listing_schemas.SellerMarketBeliefState] = {}
         self.market_feedback_by_buyer: dict[str, str] = {}
         self.matched_pairs: list[listing_schemas.NegotiationMatch] = []
         # Closed participants are temporarily inactive in the portal workflow.
@@ -310,6 +312,26 @@ class ListingPortal:
                 ),
             )
             self.private_buyer_market_states[buyer.id] = state
+        return state
+
+    def _seller_market_state(
+        self,
+        seller: listing_schemas.PortalSeller,
+    ) -> listing_schemas.SellerMarketBeliefState:
+        state = self.private_seller_market_states.get(seller.id)
+        if state is None:
+            base_reservation_price = float(seller.expectations.min_price)
+            state = listing_schemas.SellerMarketBeliefState(
+                seller_id=seller.id,
+                base_reservation_price=base_reservation_price,
+                effective_reservation=uncertain_helper.NormalDistribution(
+                    name='Effective reservation price',
+                    mean=base_reservation_price,
+                    std=max(1000.0, 0.05 * base_reservation_price),
+                    confidence=0.5,
+                ),
+            )
+            self.private_seller_market_states[seller.id] = state
         return state
 
     def effective_reservation_price_for_buyer(
@@ -549,6 +571,10 @@ class ListingPortal:
                 buyer_id: state.model_dump()
                 for buyer_id, state in self.private_buyer_market_states.items()
             },
+            'private_seller_market_states': {
+                seller_id: state.model_dump()
+                for seller_id, state in self.private_seller_market_states.items()
+            },
             'market_feedback_by_buyer': dict(self.market_feedback_by_buyer),
             'matched_pairs': [match.model_dump() for match in self.matched_pairs],
             'closed_buyers': sorted(self.closed_buyers),
@@ -589,6 +615,12 @@ class ListingPortal:
             buyer_id: listing_schemas.BuyerMarketBeliefState.model_validate(payload)
             for buyer_id, payload in dict(
                 state.get('private_buyer_market_states', {})
+            ).items()
+        }
+        restored.private_seller_market_states = {
+            seller_id: listing_schemas.SellerMarketBeliefState.model_validate(payload)
+            for seller_id, payload in dict(
+                state.get('private_seller_market_states', {})
             ).items()
         }
         restored.market_feedback_by_buyer = dict(

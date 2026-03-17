@@ -96,6 +96,8 @@ class GameMaster(prefab_lib.Prefab):
         seller_profiles=listing_params.get('seller_profiles', {}),
         client=listing_params.get('client'),
         dense_embedding_model=listing_params.get('dense_embedding_model'),
+        collection_name=listing_params.get('collection_name'),
+        db_path=listing_params.get('db_path'),
         random_seed=int(listing_params.get('random_seed', 0) or 0),
         max_rounds=int(listing_params.get('max_rounds', 0) or 0) or None,
         enabled=bool(listing_params.get('enabled', True)),

@@ -1,6 +1,7 @@
 """Listing-specific schemas for the HDB simulation."""
 
 from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from pydantic import BaseModel, Field
 
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
@@ -10,15 +11,16 @@ from concordia.hdb_simulation.models.schemas.common import (
     RoleType,
 )
 
-# TODO: This is the entry schema that initialises portal state for buyers/sellers that joins from negotiation/get initialised. 
 class PortalBuyer(BaseBuyer):
-    negotiation_history: list[str] = Field(default_factory=list) # store ids of past sellers that negotiated but failed to go through with, to avoid rematching with them in the future.
-    pass
+    negotiation_history: list[negotiation_schemas.NegotiationHistoryRecord] = Field(
+        default_factory=list
+    )
 
 
 class PortalSeller(BaseSeller):
-    negotiation_history: list[str] = Field(default_factory=list) # store ids of past buyers that negotiated but failed to go through with, to avoid rematching with them in the future.
-    pass
+    negotiation_history: list[negotiation_schemas.NegotiationHistoryRecord] = Field(
+        default_factory=list
+    )
 
 
 class PortalSearchResult(ListingRecord):
@@ -36,6 +38,12 @@ class BuyerMarketBeliefState(BaseModel):
     latest_observed_max_price: float | None = Field(default=None, ge=0.0)
 
 
+class SellerMarketBeliefState(BaseModel):
+    seller_id: str
+    base_reservation_price: float = Field(ge=0.0)
+    effective_reservation: uncertain_helper.NormalDistribution
+
+
 class ListingSchedulerSnapshot(BaseModel):
     week_number: int = Field(ge=0)
     active_player_names: list[str] = Field(default_factory=list)
@@ -51,6 +59,7 @@ class ListingBuyerState(PortalBuyer):
     latest_market_feedback: str = 'No market feedback yet.'
 
 class ListingSellerState(PortalSeller):
+    effective_reservation: uncertain_helper.NormalDistribution
     listed: bool
     current_listing_id: str | None = None
     current_listing_price: float | None = None

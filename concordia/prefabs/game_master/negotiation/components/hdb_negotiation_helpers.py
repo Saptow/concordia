@@ -361,6 +361,8 @@ class ActiveOfferTracker:
     self._pair_members: dict[str, tuple[str, str]] = {}
     self._pair_order: list[str] = []
     self._active_offers: dict[str, dict[str, object] | None] = {}
+    self._offer_history: dict[str, list[dict[str, object]]] = {}
+    self._turn_counts: dict[str, int] = {}
     self._closed_pairs: set[str] = set()
     self._closed_pair_outcomes: dict[str, hdb_schemas.NegotiationOutcome] = {}
 
@@ -398,6 +400,8 @@ class ActiveOfferTracker:
       self._player_to_pair[buyer_id] = key
       self._player_to_pair[seller_id] = key
       self._active_offers.setdefault(key, None)
+      self._offer_history.setdefault(key, [])
+      self._turn_counts.setdefault(key, 0)
 
   def register_pair(self, buyer_id: str, seller_id: str) -> None:
     """Registers a newly added pair with empty offer state."""
@@ -410,6 +414,8 @@ class ActiveOfferTracker:
     self._player_to_pair[buyer_id] = current_pair_key
     self._player_to_pair[seller_id] = current_pair_key
     self._active_offers[current_pair_key] = None
+    self._offer_history[current_pair_key] = []
+    self._turn_counts[current_pair_key] = 0
 
   def close_pair(
       self,
@@ -444,21 +450,24 @@ class ActiveOfferTracker:
     )
     return hdb_schemas.RoleType.PLACEHOLDER
 
-  def record_resolved_event(self, event: str, *, actor_id: str) -> None:
-    """Applies one resolved event to pair offer state and closure state."""
+  def record_pair_event(
+      self,
+      pair_key: str,
+      *,
+      actor_role: hdb_schemas.RoleType,
+      event: str,
+      week_number: int,
+  ) -> None:
+    """Applies one resolved event to pair offer state, history, and closure."""
     self._ensure_initialized()
     _, sep, payload = event.partition(':')
-    if not sep:
+    if not sep or not pair_key:
       return
-    pair_key = self._player_to_pair.get(actor_id)
-    if not pair_key:
-      logging.warning(
-          'Unable to resolve negotiation pair for actor %s (%s).',
-          self._scheduler.get_player_name(actor_id),
-          actor_id,
-      )
+    if pair_key not in self._pair_members:
+      logging.warning('Unable to resolve negotiation pair for key %s.', pair_key)
       return
 
+    self._turn_counts[pair_key] = self._turn_counts.get(pair_key, 0) + 1
     payload_json = self._extract_json_object(payload)
     if not payload_json:
       return
@@ -475,9 +484,17 @@ class ActiveOfferTracker:
     if action_type in ('MAKE_OFFER', 'MAKE_COUNTEROFFER'):
       if pair_key in self._closed_pairs:
         return
+      price_field = 'offer_price' if action_type == 'MAKE_OFFER' else 'counteroffer_price'
+      offer_price = action.get(price_field)
+      if isinstance(offer_price, (int, float)):
+        self._offer_history.setdefault(pair_key, []).append({
+            'offer_price': int(round(float(offer_price))),
+            'offer_week': int(week_number),
+            'offer_turn': int(self._turn_counts[pair_key]),
+            'offerer_role': actor_role.value,
+        })
       self._active_offers[pair_key] = {
-          'offerer_id': actor_id,
-          'offerer_name': self._scheduler.get_player_name(actor_id),
+          'offerer_role': actor_role.value,
           'action_type': action_type,
           'payload': action,
       }
@@ -488,22 +505,23 @@ class ActiveOfferTracker:
       return
 
     if action_type == 'ACCEPT_OFFER':
+      buyer_id, seller_id = self._pair_members[pair_key]
       self._active_offers[pair_key] = None
       self._closed_pairs.add(pair_key)
       self._closed_pair_outcomes[pair_key] = hdb_schemas.NegotiationOutcome.SUCCESS
-      self._scheduler.close_pair_for_player(actor_id)
+      self._scheduler.close_pair(buyer_id, seller_id)
       return
 
     if action_type == 'WALK_AWAY':
-      role = self._role_for_player(actor_id, pair_key)
-      if role != hdb_schemas.RoleType.BUYER:
+      if actor_role != hdb_schemas.RoleType.BUYER:
         return
+      buyer_id, seller_id = self._pair_members[pair_key]
       self._active_offers[pair_key] = None
       self._closed_pairs.add(pair_key)
       self._closed_pair_outcomes[pair_key] = (
           hdb_schemas.NegotiationOutcome.CLOSED_WITHOUT_SUCCESS
       )
-      self._scheduler.close_pair_for_player(actor_id)
+      self._scheduler.close_pair(buyer_id, seller_id)
 
   # Query helpers
   def has_active_offer_for_player(self, player_id: str) -> bool:
@@ -566,6 +584,14 @@ class ActiveOfferTracker:
       return None
     return self._pair_members.get(pair_key)
 
+  def get_offer_history_for_pair(
+      self,
+      buyer_id: str,
+      seller_id: str,
+  ) -> list[dict[str, object]]:
+    self._ensure_initialized()
+    return list(self._offer_history.get(self._pair_key(buyer_id, seller_id), []))
+
   def all_pairs_closed(self) -> bool:
     self._ensure_initialized()
     return not self._pair_order or len(self._closed_pairs) >= len(
@@ -580,6 +606,10 @@ class ActiveOfferTracker:
         'pair_members': {k: list(v) for k, v in self._pair_members.items()},
         'pair_order': list(self._pair_order),
         'active_offers': dict(self._active_offers),
+        'offer_history': {
+            key: list(history) for key, history in self._offer_history.items()
+        },
+        'turn_counts': dict(self._turn_counts),
         'closed_pairs': sorted(self._closed_pairs),
         'closed_pair_outcomes': {
             key: value.value for key, value in self._closed_pair_outcomes.items()
@@ -600,6 +630,16 @@ class ActiveOfferTracker:
       self._pair_order = [str(x) for x in state['pair_order']]  # type: ignore[index]
     if 'active_offers' in state:
       self._active_offers = dict(state['active_offers'])  # type: ignore[arg-type]
+    if 'offer_history' in state:
+      self._offer_history = {
+          str(key): list(value)
+          for key, value in state['offer_history'].items()
+      }
+    if 'turn_counts' in state:
+      self._turn_counts = {
+          str(key): int(value)
+          for key, value in state['turn_counts'].items()
+      }
     if 'closed_pairs' in state:
       self._closed_pairs = {str(x) for x in state['closed_pairs']}  # type: ignore[index]
     if 'closed_pair_outcomes' in state:

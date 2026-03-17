@@ -53,7 +53,7 @@ class UncertainBuyer(
         preferences: Optional[dict] = None,
         flat_listing: Optional[dict] = None,
         own_reservation_: float=0.0,
-        own_reservation_std: float=1000.0,
+        own_reservation_std: float=100.0,
         mu: float = 0.0,
         lambda_: float = 1.0,
         a: float = 1.0,
@@ -72,9 +72,7 @@ class UncertainBuyer(
         """
         super().__init__(pre_act_label='uncertain_buyer')
         self._model = model
-        self._own_confidence = max(0.0, min(1.0, own_confidence))
-        self._counterpart_confidence = max(0.0, min(1.0, counterpart_confidence))
-        self._risk_tolerance = risk_tolerance
+        self._risk_tolerance = max(0.0, min(1.0, risk_tolerance))
         self._preferences = preferences or {}
         self._flat_listing = dict(flat_listing) if flat_listing else {}
         self._emit_pre_act_context = emit_pre_act_context
@@ -91,7 +89,7 @@ class UncertainBuyer(
         self._issue_bank: List[uncertain_helper.NegotiationIssue] = []
 
         # Initialize common negotiation beliefs
-        self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_, own_reservation_std)
+        self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_, own_reservation_std, own_confidence, counterpart_confidence)
 
     def _get_action_confidence(self) -> float:
         own_confidence = float(self._beliefs['own_reservation'].confidence)
@@ -186,7 +184,7 @@ class UncertainBuyer(
         own_belief = self._beliefs['own_reservation']
         distribution = buyer_state.effective_reservation
         own_belief.mean = max(0.0, float(distribution.mean))
-        own_belief.std = max(0.01, float(distribution.std))
+        own_belief.std = float(distribution.std)
         own_belief.confidence = max(
             own_belief.confidence,
             max(0.0, min(1.0, float(distribution.confidence))),
@@ -203,7 +201,12 @@ class UncertainBuyer(
             self._beliefs['counterpart_reservation'].mu = listing_price
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
 
-    def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0):
+    def get_effective_reservation_distribution(
+        self,
+    ) -> uncertain_helper.NormalDistribution:
+        return self._beliefs['own_reservation'].model_copy(deep=True)
+
+    def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0, own_confidence: float = 0.5, counterpart_confidence: float = 0.5):
         """Initialize default beliefs about negotiation parameters."""
         # Counterpart's reservation value (start with high uncertainty)
         self._beliefs['counterpart_reservation'] = uncertain_helper.NormalInverseGamma(
@@ -212,14 +215,14 @@ class UncertainBuyer(
             lambda_=max(1e-6, lambda_),
             a=max(1e-6, a),
             b=max(1e-6, b),
-            confidence=self._counterpart_confidence,
+            confidence=max(0.0, min(1.0, counterpart_confidence)),
         )
 
         self._beliefs['own_reservation'] = uncertain_helper.NormalDistribution(
             name='Your Own Reservation Value',
             mean=max(0.0, own_reservation_),
-            std=max(0.01, own_reservation_std),
-            confidence=self._own_confidence,
+            std=max(0.0, own_reservation_std),
+            confidence=max(0.0, min(1.0, own_confidence)),
         )
 
     def _build_belief_summary_for_strategy(self) -> str:
@@ -617,8 +620,8 @@ class UncertainBuyer(
 
         return {
             'beliefs': belief_states,
-            'own_confidence': self._own_confidence,
-            'counterpart_confidence': self._counterpart_confidence,
+            'own_confidence': self._beliefs['own_reservation'].confidence,
+            'counterpart_confidence': self._beliefs['counterpart_reservation'].confidence,
             'issue_bank': [
                 issue.model_dump()
                 for issue in self._issue_bank
@@ -630,18 +633,32 @@ class UncertainBuyer(
 
     def set_state(self, state: Dict[str, Any]) -> None:
         """Set component state."""
-        self._own_confidence = max(0.0, min(1.0, state.get('own_confidence', self._own_confidence)))
-        self._counterpart_confidence = max(0.0, min(1.0, state.get('counterpart_confidence', self._counterpart_confidence)))
+        own_belief = self._beliefs['own_reservation']
+        own_belief.confidence = max(
+            0.0,
+            min(1.0, state.get('own_confidence', own_belief.confidence)),
+        )
+        counterpart_belief = self._beliefs['counterpart_reservation']
+        counterpart_belief.confidence = max(
+            0.0,
+            min(
+                1.0,
+                state.get('counterpart_confidence', counterpart_belief.confidence),
+            ),
+        )
         for name, belief_data in state.get('beliefs', {}).items():
             if name in self._beliefs:
                 belief = self._beliefs[name]
-                belief.confidence = belief_data.get('confidence', belief.confidence)
+                belief.confidence = max(
+                    0.0,
+                    min(1.0, belief_data.get('confidence', belief.confidence)),
+                )
                 belief.evidence_count = belief_data.get('evidence_count', belief.evidence_count)
                 belief.last_updated = belief_data.get('last_updated', belief.last_updated)
 
                 if isinstance(belief, uncertain_helper.NormalDistribution):
-                    belief.mean = belief_data.get('mean', belief.mean)
-                    belief.std = max(0.01, belief_data.get('std', belief.std))
+                    belief.mean = max(0.0, belief_data.get('mean', belief.mean))
+                    belief.std = max(0.0, belief_data.get('std', belief.std))
                 elif isinstance(belief, uncertain_helper.NormalInverseGamma):
                     belief.mu = max(0.0, belief_data.get('mu', belief.mu))
                     belief.lambda_ = max(1e-6, belief_data.get('lambda_', belief.lambda_))

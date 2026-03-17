@@ -44,6 +44,7 @@ class UncertainSeller(
         risk_tolerance: float = 0.3,
         flat_listing: Optional[dict] = None,
         own_reservation_: float = 0.0, # note that this is the minimum reservation price for the seller
+        own_reservation_std: float = 100.0, # this is the uncertainty in the seller's own reservation price (to simulate cases where the seller is not sure about their own reservation price due to factors like uncertain valuation of the flat, emotional attachment, etc.)
         mu: float = 0.0,
         lambda_: float = 1.0,
         a: float = 1.0,
@@ -63,12 +64,9 @@ class UncertainSeller(
         """
         super().__init__(pre_act_label='uncertain_seller')
         self._model = model
-        self._own_confidence = max(0.0, min(1.0, own_confidence))
-        self._counterpart_confidence = max(0.0, min(1.0, counterpart_confidence))
-        self._risk_tolerance = risk_tolerance
+        self._risk_tolerance = max(0.0, min(1.0, risk_tolerance))
         self._flat_listing = dict(flat_listing) if flat_listing else {}
         # TODO: think whether we need a separate belief for own reservation price (should not be to simulate information asymmetry of the product)
-        self._own_reservation = max(0.0, own_reservation_) # for seller, we first assume that they are sure of their reservation price
         self._listing_price_prior_discount = max(
             0.0, min(1.0, float(listing_price_prior_discount))
         )
@@ -79,23 +77,43 @@ class UncertainSeller(
         self._debug_trace: List[str] = []
 
         # Belief state tracking
-        self._beliefs: Dict[str, uncertain_helper.NormalInverseGamma] = {}
+        self._beliefs: Dict[
+            str,
+            uncertain_helper.NormalDistribution | uncertain_helper.NormalInverseGamma,
+        ] = {}
         self._issue_bank: List[uncertain_helper.NegotiationIssue] = []
 
         # Initialize common negotiation beliefs
-        self._initialize_default_beliefs(mu, lambda_, a, b, own_reservation_)
+        self._initialize_default_beliefs(
+            mu,
+            lambda_,
+            a,
+            b,
+            own_reservation_,
+            own_reservation_std,
+            own_confidence,
+            counterpart_confidence,
+        )
 
     def _get_action_confidence(self) -> float:
-        own_confidence = self._own_confidence
+        own_confidence = float(self._beliefs['own_reservation'].confidence)
         counterpart_confidence = float(self._beliefs['counterpart_reservation'].confidence)
         return max(0.0, min(1.0, min(own_confidence, counterpart_confidence)))
 
     def _build_debug_chain_of_thought(self) -> List[str]:
+        own_reservation = self._beliefs['own_reservation']
         counterpart_reservation = self._beliefs['counterpart_reservation']
         lines = [
             'Belief snapshot:',
-            f'- own_reservation={uncertain_helper.format_money(self._own_reservation)}',
-            f'- own_reservation.confidence={self._own_confidence:.2f}',
+            (
+                f'- own_reservation.mean='
+                f'{uncertain_helper.format_money(own_reservation.get_expected_mean)}'
+            ),
+            (
+                f'- own_reservation.ci95='
+                f'{uncertain_helper.format_interval(own_reservation.get_confidence_interval())}'
+            ),
+            f'- own_reservation.confidence={own_reservation.confidence:.2f}',
             (
                 f'- counterpart_reservation.mean='
                 f'{uncertain_helper.format_money(counterpart_reservation.get_expected_mean)}'
@@ -126,13 +144,15 @@ class UncertainSeller(
         return uncertain_helper.build_strategy_scenario_summary(scenarios)
 
     def _make_pre_act_value(self) -> str:
+        own_reservation = self._beliefs['own_reservation']
         counterpart_reservation = self._beliefs['counterpart_reservation']
         action_confidence = self._get_action_confidence()
 
         lines = [
             'Perspective=Seller',
-            f'OwnReservation={uncertain_helper.format_money(self._own_reservation)}',
-            f'OwnReservationConfidence={self._own_confidence:.2f}',
+            f'OwnReservationMean={uncertain_helper.format_money(own_reservation.get_expected_mean)}',
+            f'OwnReservationCI95={uncertain_helper.format_interval(own_reservation.get_confidence_interval())}',
+            f'OwnReservationConfidence={own_reservation.confidence:.2f}',
             f'CounterpartReservationMean={uncertain_helper.format_money(counterpart_reservation.get_expected_mean)}',
             f'CounterpartReservationCI95={uncertain_helper.format_interval(counterpart_reservation.get_confidence_interval())}',
             f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
@@ -163,6 +183,7 @@ class UncertainSeller(
         self,
         listing_payload: listing_schemas.ListingNegotiationTransferPayload,
     ) -> None:
+        self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         listing_price = uncertain_helper.coerce_positive_float(
             listing_payload.listing_record.listing_price
         )
@@ -171,10 +192,30 @@ class UncertainSeller(
         self._beliefs['counterpart_reservation'].mu = (
             listing_price * self._listing_price_prior_discount
         )
-        self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
 
-    def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0):
+    def get_effective_reservation_distribution(
+        self,
+    ) -> uncertain_helper.NormalDistribution:
+        return self._beliefs['own_reservation'].model_copy(deep=True)
+
+    def _initialize_default_beliefs(
+        self,
+        mu: float = 0.0,
+        lambda_: float = 1.0,
+        a: float = 1.0,
+        b: float = 1.0,
+        own_reservation_: float = 0.0,
+        own_reservation_std: float = 1.0,
+        own_confidence: float = 1.0,
+        counterpart_confidence: float = 0.7,
+    ):
         """Initialize default beliefs about negotiation parameters."""
+        self._beliefs['own_reservation'] = uncertain_helper.NormalDistribution(
+            name='Your Own Reservation Value',
+            mean=max(0.0, own_reservation_),
+            std=max(0.0, own_reservation_std),
+            confidence=max(0.0, min(1.0, own_confidence)),
+        )
         # Counterpart's reservation value (start with high uncertainty)
         self._beliefs['counterpart_reservation'] = uncertain_helper.NormalInverseGamma(
             name="Counterpart's Reservation Value",
@@ -182,14 +223,16 @@ class UncertainSeller(
             lambda_=max(1e-6, lambda_),
             a=max(1e-6, a),
             b=max(1e-6, b),
-            confidence=self._counterpart_confidence,
+            confidence=max(0.0, min(1.0, counterpart_confidence)),
         )
 
     def _build_belief_summary_for_strategy(self) -> str:
+        own_reservation = self._beliefs['own_reservation']
         counterpart_reservation = self._beliefs['counterpart_reservation']
         lines = [
-            f'OwnReservation={uncertain_helper.format_money(self._own_reservation)}',
-            f'OwnReservationConfidence={self._own_confidence:.2f}',
+            f'OwnReservationMean={uncertain_helper.format_money(own_reservation.get_expected_mean)}',
+            f'OwnReservationCI95={uncertain_helper.format_interval(own_reservation.get_confidence_interval())}',
+            f'OwnReservationConfidence={own_reservation.confidence:.2f}',
             f'CounterpartReservationMean={uncertain_helper.format_money(counterpart_reservation.get_expected_mean)}',
             f'CounterpartReservationCI95={uncertain_helper.format_interval(counterpart_reservation.get_confidence_interval())}',
             f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
@@ -340,15 +383,16 @@ class UncertainSeller(
         mu_cp = cp_belief.mu
 
         # own distribution's summary statistics
-        own_reservation=self._own_reservation # for the seller, we assume they know their own reservation price
+        own_reservation = self._beliefs['own_reservation']
+        mu_own, var_own = own_reservation.mean, own_reservation.std**2
 
         # find surplus; for the seller, its 
-        mu_diff = mu_cp - own_reservation
+        mu_diff = mu_cp - mu_own
 
         # TODO: we assume independence for now (i.e. covariance = 0) but assumption is weak since we are talking about the same product. 
         # However, it is fine for now, since we assume maximum variance between the differences => more conservative estimates for ZOPA. 
-        zopa_dist = NormalDist(mu_diff, math.sqrt(var_cp + 0)) # variance of own reservation is 0 since we assume full knowledge
-        p_upper = 0.5 + ((1 - self._risk_tolerance) / 2.0)
+        zopa_dist = NormalDist(mu_diff, math.sqrt(var_cp + var_own))
+        p_upper = max(1e-6, min(1.0 - 1e-6, 0.5 + ((1 - self._risk_tolerance) / 2.0)))
         
         z_width = NormalDist(mu=0, sigma=1).inv_cdf(p_upper)
         
@@ -487,6 +531,11 @@ class UncertainSeller(
                 'evidence_count': belief.evidence_count,
                 'last_updated': belief.last_updated,
             }
+            if isinstance(belief, uncertain_helper.NormalDistribution):
+                belief_state.update({
+                    'mean': belief.mean,
+                    'std': belief.std,
+                })
             if isinstance(belief, uncertain_helper.NormalInverseGamma):
                 belief_state.update({
                     'mu': belief.mu,
@@ -500,9 +549,9 @@ class UncertainSeller(
 
         return {
             'beliefs': belief_states,
-            'own_reservation': self._own_reservation,
-            'own_confidence': self._own_confidence,
-            'counterpart_confidence': self._counterpart_confidence,
+            'own_reservation': self._beliefs['own_reservation'].mean,
+            'own_confidence': self._beliefs['own_reservation'].confidence,
+            'counterpart_confidence': self._beliefs['counterpart_reservation'].confidence,
             'listing_price_prior_discount': self._listing_price_prior_discount,
             'issue_bank': [
                 issue.model_dump()
@@ -515,9 +564,6 @@ class UncertainSeller(
 
     def set_state(self, state: Dict[str, Any]) -> None:
         """Set component state."""
-        self._own_reservation = max(0.0, state.get('own_reservation', self._own_reservation))
-        self._own_confidence = max(0.0, min(1.0, state.get('own_confidence', self._own_confidence)))
-        self._counterpart_confidence = max(0.0, min(1.0, state.get('counterpart_confidence', self._counterpart_confidence)))
         self._listing_price_prior_discount = max(
             0.0,
             min(
@@ -530,13 +576,33 @@ class UncertainSeller(
                 ),
             ),
         )
+        own_belief = self._beliefs['own_reservation']
+        own_belief.mean = max(0.0, state.get('own_reservation', own_belief.mean))
+        own_belief.confidence = max(
+            0.0,
+            min(1.0, state.get('own_confidence', own_belief.confidence)),
+        )
+        counterpart_belief = self._beliefs['counterpart_reservation']
+        counterpart_belief.confidence = max(
+            0.0,
+            min(
+                1.0,
+                state.get('counterpart_confidence', counterpart_belief.confidence),
+            ),
+        )
         for name, belief_data in state.get('beliefs', {}).items():
             if name in self._beliefs:
                 belief = self._beliefs[name]
-                belief.confidence = belief_data.get('confidence', belief.confidence)
+                belief.confidence = max(
+                    0.0,
+                    min(1.0, belief_data.get('confidence', belief.confidence)),
+                )
                 belief.evidence_count = belief_data.get('evidence_count', belief.evidence_count)
                 belief.last_updated = belief_data.get('last_updated', belief.last_updated)
 
+                if isinstance(belief, uncertain_helper.NormalDistribution):
+                    belief.mean = max(0.0, belief_data.get('mean', belief.mean))
+                    belief.std = max(0.0, belief_data.get('std', belief.std))
                 if isinstance(belief, uncertain_helper.NormalInverseGamma):
                     belief.mu = max(0.0, belief_data.get('mu', belief.mu))
                     belief.lambda_ = max(1e-6, belief_data.get('lambda_', belief.lambda_))

@@ -59,6 +59,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._entities_by_id: dict[str, Any] = {}
     self._canonical_entities: tuple[entity_component.EntityWithComponents, ...] = ()
     self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
+    self._pair_start_weeks: dict[str, int] = {}
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=(),
         negotiation_pairs=None,
@@ -252,18 +253,31 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       seller_id: str,
   ) -> None:
     """Applies listing-to-negotiation context once per pair."""
-    observation = (
-        'Market_Coordinator: Listing handoff context for this negotiation: '
-        f'{json.dumps(pair_payload.model_dump(mode="json"), ensure_ascii=False)}'
+    listing_record = pair_payload.listing_record
+    pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+    self._pair_start_weeks.setdefault(pair_key, int(pair_payload.week_matched))
+    buyer_name = pair_payload.buyer_state.name
+    seller_name = pair_payload.seller_state.name
+    listing_price = float(listing_record.listing_price)
+    buyer_observation = (
+        f"{buyer_name}, you submitted a negotiation request for {seller_name}'s flat, "
+        f"and {seller_name} accepted it. You are now negotiating directly as the buyer.\n"
+        f"Full listing:\n"
+        f"{json.dumps(listing_record.model_dump(mode='json'), ensure_ascii=False)}\n"
+        f"Listing price: SGD {listing_price:.2f}"
+    )
+    seller_observation = (
+        f"{seller_name}, you accepted {buyer_name}'s negotiation request for your flat. "
+        f"You are now negotiating directly as the seller."
     )
     buyer_entity = self._entities_by_id.get(buyer_id)
     if buyer_entity is not None:
       uncertain_negotiator.update_agent_from_listing(buyer_entity, pair_payload)
-      buyer_entity.observe(observation)
+      buyer_entity.observe(buyer_observation)
     seller_entity = self._entities_by_id.get(seller_id)
     if seller_entity is not None:
       uncertain_negotiator.update_agent_from_listing(seller_entity, pair_payload)
-      seller_entity.observe(observation)
+      seller_entity.observe(seller_observation)
 
   def _bind_entities_for_pairs(
       self,
@@ -415,38 +429,32 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         memories[self._get_player_name(player_id)] = memory_text
     return memories
 
-  def _compress_entity_state_for_listing(self, player_id: str) -> dict[str, Any]:
-    """Builds a compact negotiation-to-listing return payload."""
-    compressed: dict[str, Any] = {
-        'id': player_id,
-        'name': self._get_player_name(player_id),
-    }
+  def _effective_reservation_distribution_for_listing(
+      self,
+      player_id: str,
+      component_name: str,
+  ) -> Any | None:
     entity = self._entities_by_id.get(player_id)
     if entity is None:
-      return compressed
-
-    if hasattr(entity, 'get_last_log'):
-      latest_log = entity.get_last_log()
-      if isinstance(latest_log, Mapping) and self._has_meaningful_log_value(latest_log):
-        compressed['last_log'] = dict(latest_log)
-
+      return None
     try:
-      entity_memory = entity.get_component(memory_component.DEFAULT_MEMORY_COMPONENT_KEY)
+      uncertainty_component = entity.get_component(component_name)
     except Exception:  # pylint: disable=broad-exception-caught
-      entity_memory = None
-    if (
-        entity_memory is not None
-        and hasattr(entity_memory, 'get_all_memories_as_text')
-    ):
-      memories = list(entity_memory.get_all_memories_as_text())
-      compressed['memory_count'] = len(memories)
-      if memories:
-        compressed['recent_memories'] = memories[-2:]
-    return compressed
+      return None
+    getter = getattr(
+        uncertainty_component,
+        'get_effective_reservation_distribution',
+        None,
+    )
+    if not callable(getter):
+      return None
+    return getter()
 
   def build_relisting_transfer_payloads(
       self,
       pair_records: Sequence[Mapping[str, Any]],
+      *,
+      week_number: int,
   ) -> list[dict[str, Any]]:
     """Builds negotiation-to-listing return payloads."""
     payloads: list[dict[str, Any]] = []
@@ -455,13 +463,52 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       seller_id = str(pair_record.get('seller_id', '')).strip()
       if not buyer_id or not seller_id:
         continue
-      payloads.append({
-          **dict(pair_record),
-          'negotiation_return_state': {
-              'buyer_state': self._compress_entity_state_for_listing(buyer_id),
-              'seller_state': self._compress_entity_state_for_listing(seller_id),
-          },
-      })
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      buyer_effective_reservation = (
+          self._effective_reservation_distribution_for_listing(
+              buyer_id,
+              'uncertain_buyer',
+          )
+      )
+      seller_effective_reservation = (
+          self._effective_reservation_distribution_for_listing(
+              seller_id,
+              'uncertain_seller',
+          )
+      )
+      if (
+          buyer_effective_reservation is None
+          or seller_effective_reservation is None
+      ):
+        logging.warning(
+            'Skipping negotiation-to-listing payload for %s because reservation state is unavailable.',
+            pair_key,
+        )
+        continue
+      payload = negotiation_schemas.NegotiationToListingPayload(
+          negotiation_history=negotiation_schemas.NegotiationHistoryRecord(
+              buyer_id=buyer_id,
+              seller_id=seller_id,
+              start_week=int(self._pair_start_weeks.get(pair_key, week_number)),
+              end_week=int(week_number),
+              offer_history=[
+                  negotiation_schemas.OfferHistory.model_validate(offer)
+                  for offer in self._offer_tracker.get_offer_history_for_pair(
+                      buyer_id,
+                      seller_id,
+                  )
+              ],
+          ),
+          buyer_state=negotiation_schemas.NegotiationBuyerHandOffPayload(
+              buyer_id=buyer_id,
+              effective_reservation=buyer_effective_reservation,
+          ),
+          seller_state=negotiation_schemas.NegotiationSellerHandOffPayload(
+              seller_id=seller_id,
+              effective_reservation=seller_effective_reservation,
+          ),
+      )
+      payloads.append(payload.model_dump(mode='json'))
     return payloads
 
   # Observation helpers
@@ -756,7 +803,17 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       for pair_event in pair_events:
         actor_id = str(pair_event['actor_id'])
         event = str(pair_event['event'])
-        self._offer_tracker.record_resolved_event(event, actor_id=actor_id)
+        actor_role = (
+            negotiation_schemas.RoleType.BUYER
+            if actor_id == buyer_id
+            else negotiation_schemas.RoleType.SELLER
+        )
+        self._offer_tracker.record_pair_event(
+            pair_key,
+            actor_role=actor_role,
+            event=event,
+            week_number=week_number,
+        )
         events.append(event)
 
     self._scheduler.advance_week(negotiated_pairs)
@@ -809,6 +866,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'participant_specs': self._participant_specs,
         'scheduler_state': self._scheduler.get_state(),
         'offer_state': self._offer_tracker.get_state(),
+        'pair_start_weeks': dict(self._pair_start_weeks),
         'action_prompt': self._action_prompt,
         'make_observation_component_key': self._make_observation_component_key,
         'enabled': int(self._enabled),
@@ -839,6 +897,11 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self._scheduler.set_state(state['scheduler_state'])
     if 'offer_state' in state:
       self._offer_tracker.set_state(state['offer_state'])
+    if 'pair_start_weeks' in state:
+      self._pair_start_weeks = {
+          str(key): int(value)
+          for key, value in state['pair_start_weeks'].items()
+      }
     if 'action_prompt' in state:
       self._action_prompt = str(state['action_prompt'])
     if 'make_observation_component_key' in state:
