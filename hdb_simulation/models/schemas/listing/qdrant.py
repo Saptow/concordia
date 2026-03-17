@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from typing import Any
+import uuid
 
 from pydantic import BaseModel
 from qdrant_client import models
@@ -49,6 +50,10 @@ class ListingRecord(BaseModel):
             'flat_metadata': self.flat_metadata(),
         }
 
+    def qdrant_point_id(self) -> str:
+        """Return a deterministic UUID string accepted by Qdrant."""
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, self.listing_id))
+
     def to_document(self) -> str:
         '''
         Render the listing record into a string for embedding and indexing.
@@ -70,7 +75,7 @@ class ListingRecord(BaseModel):
         embedding: Sequence[float],
     ) -> models.PointStruct:
         return models.PointStruct(
-            id=self.listing_id,
+            id=self.qdrant_point_id(),
             vector={DENSE_EMBEDDINGS_KEY: [float(value) for value in embedding]},
             payload=self.qdrant_payload(),
         )
