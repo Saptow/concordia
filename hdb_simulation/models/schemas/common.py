@@ -122,4 +122,25 @@ class BaseSeller(BaseModel):
     expectations: SellerExpectationRange
 
 
+class OfferHistory(BaseModel):
+    offer_price: int = Field(..., gt=0, description='The price proposed in this offer.')
+    offer_week: int = Field(..., ge=0, description='The week number when this offer was made.')
+    offer_turn: int = Field(..., ge=0, description='The turn number from the start of the negotiation when this offer was made.')
+    offerer_role: RoleType = Field(..., description='The role (buyer or seller) of the party that made this offer.')
+
+
+class NegotiationHistoryRecord(BaseModel):
+    buyer_id: str
+    seller_id: str
+    start_week: int = Field(..., ge=0, description='The week number when the negotiation started.')
+    end_week: Optional[int] = Field(default=None, ge=0, description='The week number when the negotiation ended. Null if still ongoing.')
+    offer_history: list[OfferHistory] = Field(default_factory=list)
+
+
+class NegotiationOutcome(StrEnum):
+    SUCCESS = 'SUCCESS'
+    CLOSED = 'CLOSED'
+    CLOSED_WITHOUT_SUCCESS = 'CLOSED_WITHOUT_SUCCESS'
+
+
 

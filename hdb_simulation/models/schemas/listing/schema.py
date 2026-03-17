@@ -1,24 +1,26 @@
+from __future__ import annotations
+
 """Listing-specific schemas for the HDB simulation."""
 
 from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
-from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from pydantic import BaseModel, Field
 
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.hdb_simulation.models.schemas.common import (
     BaseBuyer,
     BaseSeller,
+    NegotiationHistoryRecord,
     RoleType,
 )
 
 class PortalBuyer(BaseBuyer):
-    negotiation_history: list[negotiation_schemas.NegotiationHistoryRecord] = Field(
+    negotiation_history: list[NegotiationHistoryRecord] = Field(
         default_factory=list
     )
 
 
 class PortalSeller(BaseSeller):
-    negotiation_history: list[negotiation_schemas.NegotiationHistoryRecord] = Field(
+    negotiation_history: list[NegotiationHistoryRecord] = Field(
         default_factory=list
     )
 
