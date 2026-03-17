@@ -100,7 +100,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
 
         elif self._role==RoleType.SELLER:
-            current_position = uncertain_context._own_reservation
+            current_position = uncertain_context._beliefs['own_reservation'].get_expected_mean
             counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
 
         self._state = SimpleStrategyState(
@@ -487,7 +487,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             self._state.current_position= self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
             self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
         elif self._role==RoleType.SELLER:
-            self._state.current_position = self._uncertainty_context._own_reservation
+            self._state.current_position = self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
             self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
         
         # Compute negotiation state
