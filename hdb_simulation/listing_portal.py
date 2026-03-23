@@ -11,6 +11,7 @@ import numpy as np
 from typing import Any
 from absl import logging
 from qdrant_client import QdrantClient, models as qdrant_models
+
 from sentence_transformers import SentenceTransformer
 
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
@@ -61,6 +62,13 @@ class ListingPortalRetriever:
             if self._dense_embedder is None:
                 logging.exception("Attempted to embed text but no dense embedding model was provided.")
             return self._dense_embedder.encode(text)
+
+    def _rrf_ranker(self) -> qdrant_models.Rrf:
+        """Build an RRF ranker compatible with the installed qdrant-client version."""
+        model_fields = getattr(qdrant_models.Rrf, 'model_fields', {}) or {}
+        if 'weights' in model_fields:
+            return qdrant_models.Rrf(weights=self._rrf_weights)
+        return qdrant_models.Rrf()
 
     @staticmethod
     def _seller_filter(seller_id: str) -> qdrant_models.Filter:
@@ -118,7 +126,7 @@ class ListingPortalRetriever:
         )
 
     def deactivate_listing(self, seller_id: str) -> None:
-        """Marks a seller listing inactive in Qdrant without re-embedding."""
+        """Marks a seller listing inactive without re-embedding."""
         self._client.set_payload(
             collection_name=self._collection_name,
             payload={'active': False},
@@ -147,15 +155,17 @@ class ListingPortalRetriever:
                     ),
                     using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
                     limit=2 * limit,
+                    weight=self._rrf_weights[0],
                 ),
                 qdrant_models.Prefetch(
                     query=dense_query,
                     using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
                     limit=2 * limit,
+                    weight=self._rrf_weights[1],
                 ),
             ],
             query=qdrant_models.RrfQuery(
-                rrf=qdrant_models.Rrf(weights=self._rrf_weights)  # BM25 weighted 2x over dense
+                rrf=self._rrf_ranker()
             ),
             limit=max(10, 3 * limit),
             with_payload=True,
