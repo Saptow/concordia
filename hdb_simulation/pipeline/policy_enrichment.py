@@ -28,7 +28,11 @@ CLASSIFICATION_MAX_TOKENS = 900
 SUMMARY_MAX_TOKENS = 1_200
 PDF_EXTRACTION_MAX_TOKENS = 1_500
 PDF_RENDER_DPI = 180
-PDF_MAX_PAGES = 16
+DEFAULT_PDF_MAX_PAGES = 0
+HTML_EXTRACTION_INPUT_MAX_CHARS = 40_000
+TRUNCATION_MARKER_PATTERN = re.compile(
+    r"<!-- Extraction truncated after (?P<extracted>\d+) of (?P<total>\d+) pages\. -->"
+)
 
 
 class ClassificationResult(BaseModel):
@@ -85,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Recompute tags and summary even if a record already has values.",
     )
+    parser.add_argument(
+        "--pdf-max-pages",
+        type=int,
+        default=DEFAULT_PDF_MAX_PAGES,
+        help="Maximum PDF pages to extract. Use 0 or a negative value to extract all pages.",
+    )
     return parser.parse_args()
 
 
@@ -99,18 +109,59 @@ def initialise_model(args: argparse.Namespace) -> VLLMLanguageModel:
     )
 
 
-def resolve_local_path(record_path: str) -> Path | None:
-    candidate_paths = [Path(record_path)]
-    if "/page/" in record_path:
-        candidate_paths.append(Path(record_path.replace("/page/", "/raw_html/")))
-        candidate_paths.append(Path(record_path.replace("/page/", "/raw_pdf/")))
-    if "/raw_html/" in record_path or "/raw_pdf/" in record_path:
-        candidate_paths.append(
-            Path(record_path.replace("/raw_html/", "/page/").replace("/raw_pdf/", "/page/"))
-        )
+def resolve_repo_path(path: Path) -> Path:
+    return path if path.is_absolute() else REPO_ROOT / path
 
-    for path in candidate_paths:
-        resolved = path if path.is_absolute() else REPO_ROOT / path
+
+def canonical_page_path(record_path: str) -> Path:
+    path = Path(record_path)
+
+    if "/raw_html/" in record_path:
+        return Path(record_path.replace("/raw_html/", "/page/")).with_suffix(".extracted.md")
+    if "/raw_pdf/" in record_path:
+        return Path(record_path.replace("/raw_pdf/", "/page/")).with_suffix(".extracted.md")
+    if "/page/" in record_path:
+        if path.suffix.lower() in {".md", ".markdown", ".txt"}:
+            return path
+        return path.with_suffix(".extracted.md")
+    return path.with_suffix(".extracted.md")
+
+
+def canonical_page_record_path(record_path: str) -> str:
+    return canonical_page_path(record_path).as_posix()
+
+
+def source_candidates_for_page_path(page_path: Path) -> list[Path]:
+    candidates: list[Path] = []
+    page_path_str = page_path.as_posix()
+
+    if page_path.name.endswith(".extracted.md"):
+        base_name = page_path.name[: -len(".extracted.md")]
+        html_base = Path(page_path_str.replace("/page/", "/raw_html/")).with_name(base_name)
+        pdf_base = Path(page_path_str.replace("/page/", "/raw_pdf/")).with_name(base_name)
+        candidates.extend(
+            [
+                html_base.with_suffix(".html"),
+                html_base.with_suffix(".htm"),
+                pdf_base.with_suffix(".pdf"),
+            ]
+        )
+        return candidates
+
+    candidates.append(Path(page_path_str.replace("/page/", "/raw_html/")))
+    candidates.append(Path(page_path_str.replace("/page/", "/raw_pdf/")))
+    return candidates
+
+
+def resolve_source_path(record_path: str) -> Path | None:
+    path = Path(record_path)
+    candidate_paths = [path]
+
+    if "/page/" in record_path:
+        candidate_paths.extend(source_candidates_for_page_path(path))
+
+    for candidate in candidate_paths:
+        resolved = resolve_repo_path(candidate)
         if resolved.exists():
             return resolved
     return None
@@ -138,8 +189,120 @@ def extract_text_from_html(html: str) -> str:
     return clean_text(main.get_text("\n", strip=True))
 
 
-def pdf_markdown_cache_path(pdf_path: Path) -> Path:
-    return pdf_path.with_suffix(".extracted.md")
+def extracted_markdown_cache_path(local_path: Path) -> Path:
+    local_path_str = local_path.as_posix()
+    if "/raw_html/" in local_path_str:
+        return Path(local_path_str.replace("/raw_html/", "/page/")).with_suffix(".extracted.md")
+    if "/raw_pdf/" in local_path_str:
+        return Path(local_path_str.replace("/raw_pdf/", "/page/")).with_suffix(".extracted.md")
+    if local_path.suffix.lower() in {".md", ".markdown", ".txt"}:
+        return local_path
+    return local_path.with_suffix(".extracted.md")
+
+
+def truncate_for_prompt(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n<!-- Truncated for extraction prompt length. -->"
+
+
+def collect_html_fragments(node: Any, fragments: list[str]) -> None:
+    if isinstance(node, dict):
+        value = node.get("value")
+        if isinstance(value, str):
+            stripped = value.strip()
+            if any(
+                tag in stripped.lower()
+                for tag in ("<p", "<div", "<table", "<ul", "<ol", "<li", "<h1", "<h2", "<h3", "<br")
+            ):
+                fragments.append(stripped)
+        for child in node.values():
+            collect_html_fragments(child, fragments)
+        return
+
+    if isinstance(node, list):
+        for child in node:
+            collect_html_fragments(child, fragments)
+
+
+def extract_relevant_html_for_llm(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    sections: list[str] = []
+
+    if soup.title and soup.title.string:
+        sections.append(f"<title>{soup.title.string.strip()}</title>")
+
+    meta_description = soup.find("meta", attrs={"name": "description"})
+    if meta_description and meta_description.get("content"):
+        sections.append(
+            f'<meta name="description" content="{meta_description["content"].strip()}">'
+        )
+
+    next_data = soup.find("script", id="__NEXT_DATA__", attrs={"type": "application/json"})
+    if next_data and next_data.string:
+        try:
+            payload = json.loads(next_data.string)
+        except json.JSONDecodeError:
+            payload = None
+
+        if payload is not None:
+            route_fields = (
+                payload.get("props", {})
+                .get("pageProps", {})
+                .get("layoutData", {})
+                .get("sitecore", {})
+                .get("route", {})
+                .get("fields", {})
+            )
+            for key in ("pageTitle", "navigationTitle", "publishedDate", "metaDescription"):
+                value = route_fields.get(key, {}).get("value")
+                if isinstance(value, str) and value.strip():
+                    sections.append(f"<{key}>{value.strip()}</{key}>")
+
+            fragments: list[str] = []
+            collect_html_fragments(payload, fragments)
+            seen_fragments: set[str] = set()
+            for fragment in fragments:
+                normalised = fragment.strip()
+                if normalised and normalised not in seen_fragments:
+                    sections.append(normalised)
+                    seen_fragments.add(normalised)
+
+    if not sections:
+        for tag in soup(["script", "style", "noscript", "svg", "form", "footer", "header", "nav"]):
+            tag.decompose()
+        main = soup.find("main") or soup.find("article") or soup.body or soup
+        sections.append(str(main))
+
+    combined = "\n\n".join(section.strip() for section in sections if section and section.strip())
+    return truncate_for_prompt(combined, max_chars=HTML_EXTRACTION_INPUT_MAX_CHARS)
+
+
+def build_html_extraction_prompt(page: PolicyPage, html_fragment: str) -> str:
+    return f"""You are converting a Singapore HDB policy webpage from HTML into clean markdown.
+
+## Source
+- URL: `{page.source}`
+- Local path: `{page.path}`
+
+## Task
+Convert the relevant policy content from the HTML into markdown.
+
+## Rules
+- Preserve headings, numbered steps, bullet lists, tables, links, dates, thresholds, grant amounts, waiting periods, and eligibility rules.
+- Preserve the original reading order of the page.
+- Keep letter-style content such as salutations, sign-offs, and named signatories when present.
+- Exclude website chrome such as global navigation, breadcrumbs, menus, search UI, chatbot widgets, advisory banners, footers, and duplicate boilerplate.
+- Do not summarise, paraphrase, or invent missing text.
+- Do not include any instructions, notes, or reasoning in the output. Only return the markdown content.
+- If the HTML is malformed or a section is incomplete, keep the faithful content that is available.
+- Return markdown only. Do not wrap the answer in code fences.
+
+## HTML
+```html
+{html_fragment}
+```
+"""
 
 
 def render_pdf_to_images(
@@ -214,6 +377,17 @@ def normalise_markdown_response(text: str) -> str:
     return cleaned.strip()
 
 
+def cached_pdf_covers_request(markdown: str, *, max_pages: int) -> bool:
+    match = TRUNCATION_MARKER_PATTERN.search(markdown)
+    if match is None:
+        return True
+
+    extracted_pages = int(match.group("extracted"))
+    total_pages = int(match.group("total"))
+    target_pages = total_pages if max_pages <= 0 else min(total_pages, max_pages)
+    return extracted_pages >= target_pages
+
+
 def sample_pdf_markdown_with_vllm(
     model: VLLMLanguageModel,
     *,
@@ -249,22 +423,57 @@ def sample_pdf_markdown_with_vllm(
     return normalise_markdown_response(outputs[0].outputs[0].text)
 
 
-def extract_markdown_from_pdf(
+def sample_markdown_with_text_model(
+    model: VLLMLanguageModel,
+    *,
+    prompt: str,
+) -> str:
+    return normalise_markdown_response(model.sample_text(prompt))
+
+
+def extract_markdown_from_html(
     page: PolicyPage,
     model: VLLMLanguageModel,
 ) -> str:
-    local_path = resolve_local_path(page.path)
-    if local_path is None:
+    source_path = resolve_source_path(page.path)
+    if source_path is None:
         raise FileNotFoundError(f"Could not resolve local policy file for path: {page.path}")
 
-    cache_path = pdf_markdown_cache_path(local_path)
+    cache_path = resolve_repo_path(canonical_page_path(page.path))
     if cache_path.exists():
         return cache_path.read_text(encoding="utf-8")
 
+    html = source_path.read_text(encoding="utf-8")
+    html_fragment = extract_relevant_html_for_llm(html)
+    markdown = sample_markdown_with_text_model(
+        model,
+        prompt=build_html_extraction_prompt(page, html_fragment),
+    ).strip()
+
+    cache_path.write_text(markdown + "\n", encoding="utf-8")
+    return markdown
+
+
+def extract_markdown_from_pdf(
+    page: PolicyPage,
+    model: VLLMLanguageModel,
+    *,
+    max_pages: int,
+) -> str:
+    source_path = resolve_source_path(page.path)
+    if source_path is None:
+        raise FileNotFoundError(f"Could not resolve local policy file for path: {page.path}")
+
+    cache_path = resolve_repo_path(canonical_page_path(page.path))
+    if cache_path.exists():
+        cached_markdown = cache_path.read_text(encoding="utf-8")
+        if cached_pdf_covers_request(cached_markdown, max_pages=max_pages):
+            return cached_markdown
+
     images, total_pages = render_pdf_to_images(
-        local_path,
+        source_path,
         dpi=PDF_RENDER_DPI,
-        max_pages=PDF_MAX_PAGES,
+        max_pages=max_pages,
     )
 
     extracted_pages: list[str] = []
@@ -295,19 +504,25 @@ def extract_markdown_from_pdf(
 def load_policy_content(
     page: PolicyPage,
     model: VLLMLanguageModel,
+    *,
+    pdf_max_pages: int,
 ) -> str:
-    local_path = resolve_local_path(page.path)
-    if local_path is None:
+    page_markdown_path = resolve_repo_path(canonical_page_path(page.path))
+    if page_markdown_path.exists():
+        return clean_text(page_markdown_path.read_text(encoding="utf-8"))
+
+    source_path = resolve_source_path(page.path)
+    if source_path is None:
         raise FileNotFoundError(f"Could not resolve local policy file for path: {page.path}")
 
-    suffix = local_path.suffix.lower()
+    suffix = source_path.suffix.lower()
     if suffix in {".html", ".htm"}:
-        return extract_text_from_html(local_path.read_text(encoding="utf-8"))
+        return extract_markdown_from_html(page, model)
     if suffix in {".md", ".txt"}:
-        return clean_text(local_path.read_text(encoding="utf-8"))
+        return clean_text(source_path.read_text(encoding="utf-8"))
     if suffix == ".pdf":
-        return extract_markdown_from_pdf(page, model)
-    raise ValueError(f"Unsupported local file type for summarisation: {local_path.suffix}")
+        return extract_markdown_from_pdf(page, model, max_pages=pdf_max_pages)
+    raise ValueError(f"Unsupported local file type for summarisation: {source_path.suffix}")
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -514,8 +729,14 @@ def append_jsonl(records: list[BaseModel], output_path: Path) -> None:
 def enrich_page(
     page: PolicyPage,
     model: VLLMLanguageModel,
+    *,
+    pdf_max_pages: int,
 ) -> tuple[PolicyPage, ClassificationAuditRecord]:
-    article_text = truncate_text(load_policy_content(page, model), MAX_INPUT_CHARS)
+    canonical_path = canonical_page_record_path(page.path)
+    article_text = truncate_text(
+        load_policy_content(page, model, pdf_max_pages=pdf_max_pages),
+        MAX_INPUT_CHARS,
+    )
 
     classification = call_model_for_json(
         model,
@@ -531,13 +752,13 @@ def enrich_page(
     ).strip()
 
     updated_page = PolicyPage(
-        path=page.path,
+        path=canonical_path,
         source=page.source,
         summary=markdown_summary,
         tags=classification.tags,
     )
     audit_record = ClassificationAuditRecord(
-        path=page.path,
+        path=canonical_path,
         source=page.source,
         status="ok",
         tags=classification.tags,
@@ -571,11 +792,19 @@ def main() -> None:
 
     for index, page in enumerate(pages, start=1):
         print(f"[{index}/{len(pages)}] Processing {page.source}")
+        canonical_path = canonical_page_record_path(page.path)
         if not should_process(page, args.overwrite_existing):
-            enriched_pages.append(page)
+            enriched_pages.append(
+                PolicyPage(
+                    path=canonical_path,
+                    source=page.source,
+                    summary=page.summary,
+                    tags=page.tags,
+                )
+            )
             audit_records.append(
                 ClassificationAuditRecord(
-                    path=page.path,
+                    path=canonical_path,
                     source=page.source,
                     status="skipped_existing",
                     tags=page.tags,
@@ -585,13 +814,24 @@ def main() -> None:
             continue
 
         try:
-            enriched_page, audit_record = enrich_page(page, model)
+            enriched_page, audit_record = enrich_page(
+                page,
+                model,
+                pdf_max_pages=args.pdf_max_pages,
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"  failed: {exc}")
-            enriched_pages.append(page)
+            enriched_pages.append(
+                PolicyPage(
+                    path=canonical_path,
+                    source=page.source,
+                    summary=page.summary,
+                    tags=page.tags,
+                )
+            )
             audit_records.append(
                 ClassificationAuditRecord(
-                    path=page.path,
+                    path=canonical_path,
                     source=page.source,
                     status="error",
                     tags=page.tags,
