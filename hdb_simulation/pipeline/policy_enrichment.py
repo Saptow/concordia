@@ -419,6 +419,23 @@ def extract_json_object(raw_text: str) -> dict[str, Any]:
     raise json.JSONDecodeError("No JSON object found in model output.", text, 0)
 
 
+def decode_jsonl_line(raw_line: str) -> list[Any]:
+    decoder = json.JSONDecoder()
+    records: list[Any] = []
+    text = raw_line.strip()
+    index = 0
+
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        record, index = decoder.raw_decode(text, idx=index)
+        records.append(record)
+
+    return records
+
+
 def call_model_for_json(
     model: VLLMLanguageModel,
     prompt: str,
@@ -456,11 +473,17 @@ def load_policy_pages(input_path: Path) -> list[PolicyPage]:
             stripped = line.strip()
             if not stripped:
                 continue
+            record_number = 1
             try:
-                pages.append(PolicyPage.model_validate(json.loads(stripped)))
+                for record_number, record in enumerate(
+                    decode_jsonl_line(stripped),
+                    start=1,
+                ):
+                    pages.append(PolicyPage.model_validate(record))
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(
-                    f"Invalid PolicyPage record at line {line_number} in {input_path}: {exc}"
+                    "Invalid PolicyPage record "
+                    + f"at line {line_number}, record {record_number} in {input_path}: {exc}"
                 ) from exc
     return pages
 
