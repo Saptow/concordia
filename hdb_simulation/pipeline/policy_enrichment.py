@@ -100,10 +100,20 @@ def initialise_model(args: argparse.Namespace) -> VLLMLanguageModel:
 
 
 def resolve_local_path(record_path: str) -> Path | None:
-    path = Path(record_path)
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    return path if path.exists() else None
+    candidate_paths = [Path(record_path)]
+    if "/page/" in record_path:
+        candidate_paths.append(Path(record_path.replace("/page/", "/raw_html/")))
+        candidate_paths.append(Path(record_path.replace("/page/", "/raw_pdf/")))
+    if "/raw_html/" in record_path or "/raw_pdf/" in record_path:
+        candidate_paths.append(
+            Path(record_path.replace("/raw_html/", "/page/").replace("/raw_pdf/", "/page/"))
+        )
+
+    for path in candidate_paths:
+        resolved = path if path.is_absolute() else REPO_ROOT / path
+        if resolved.exists():
+            return resolved
+    return None
 
 
 def clean_text(text: str) -> str:
@@ -396,6 +406,7 @@ Write markdown with exactly these sections:
 - Include thresholds, grant amounts, eligibility conditions, dates, waiting periods, and procedural steps when stated.
 - Do not include any information that is not explicitly supported by the extracted content.
 - Do not include any text before or after the markdown summary.
+- Do not include ANY internal reasoning steps or notes, or instructions in the output. Only the markdown summary should be returned.
 """
 
 
@@ -490,6 +501,12 @@ def load_policy_pages(input_path: Path) -> list[PolicyPage]:
 
 def dump_jsonl(records: list[BaseModel], output_path: Path) -> None:
     with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record.model_dump(mode="json"), ensure_ascii=False) + "\n")
+
+
+def append_jsonl(records: list[BaseModel], output_path: Path) -> None:
+    with output_path.open("a", encoding="utf-8", newline="\n") as handle:
         for record in records:
             handle.write(json.dumps(record.model_dump(mode="json"), ensure_ascii=False) + "\n")
 
@@ -593,9 +610,7 @@ def main() -> None:
     temp_output_path.replace(output_path)
 
     if audit_path is not None:
-        temp_audit_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
-        dump_jsonl(audit_records, temp_audit_path)
-        temp_audit_path.replace(audit_path)
+        append_jsonl(audit_records, audit_path)
 
     print(f"Wrote {len(enriched_pages)} policy records to {output_path}")
     if audit_path is not None:
