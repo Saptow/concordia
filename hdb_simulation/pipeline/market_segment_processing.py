@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from absl import logging
 from pydantic import BaseModel, Field
 
 from configs import SegmentConfig
@@ -208,11 +209,18 @@ def _load_nemotron_pool(nemotron_dir: Path) -> pd.DataFrame:
     if not parquet_files:
         raise FileNotFoundError(f"No parquet files found in {nemotron_dir}.")
 
+    logging.info(
+        "Loading Nemotron donor pool from %s parquet file(s) under %s.",
+        len(parquet_files),
+        nemotron_dir,
+    )
     donors = pd.concat(
         [pd.read_parquet(path) for path in parquet_files],
         ignore_index=True,
     )
-    return donors.fillna("")
+    donors = donors.fillna("")
+    logging.info("Loaded %s Nemotron donor rows.", len(donors))
+    return donors
 
 
 def _sample_nemotron_donor(
@@ -1153,6 +1161,11 @@ def build_transaction_conditioned_segment(
     model: VLLMLanguageModel | None = None,
 ) -> dict[str, Any]:
     """Run the end-to-end preprocessing pipeline for one town-year market segment."""
+    logging.info(
+        "Building transaction-conditioned market segment for town=%s year=%s.",
+        config.town,
+        config.year,
+    )
     rng = random.Random(config.random_seed)
 
     distribution_tables = {
@@ -1163,30 +1176,59 @@ def build_transaction_conditioned_segment(
     }
     age_prior = _load_buyer_age_prior(config.age_prior_path, config.town)
     income_prior = pd.read_csv(config.income_prior_path).fillna("")
+    logging.info(
+        "Loaded demographic priors and distribution tables from configured CSV inputs."
+    )
     donors = _load_nemotron_pool(config.nemotron_dir)
     if config.survey_archetypes_path is None:
         archetypes = DEFAULT_BUYER_ARCHETYPES
+        logging.info(
+            "Using default buyer archetypes because no survey archetypes path was provided."
+        )
     else:
         archetypes = json.loads(config.survey_archetypes_path.read_text(encoding="utf-8"))
         if not isinstance(archetypes, list) or not archetypes:
             raise ValueError("Buyer archetype config must be a non-empty JSON list.")
+        logging.info(
+            "Loaded %s buyer archetype entries from %s.",
+            len(archetypes),
+            config.survey_archetypes_path,
+        )
 
     if config.seller_archetypes_path is None:
         seller_archetypes = DEFAULT_SELLER_ARCHETYPES
+        logging.info(
+            "Using default seller archetypes because no seller archetypes path was provided."
+        )
     else:
         seller_archetypes = json.loads(
             config.seller_archetypes_path.read_text(encoding="utf-8")
         )
         if not isinstance(seller_archetypes, list) or not seller_archetypes:
             raise ValueError("Seller archetype config must be a non-empty JSON list.")
+        logging.info(
+            "Loaded %s seller archetype entries from %s.",
+            len(seller_archetypes),
+            config.seller_archetypes_path,
+        )
 
     town_transactions = _load_town_transactions(config)
     transactions = _load_transactions(config)
+    logging.info(
+        "Loaded %s town transactions and %s total transaction rows.",
+        len(town_transactions),
+        len(transactions),
+    )
     window_start = pd.Timestamp(transactions["Date"].min())
     hedonic_training_flats = _build_hedonic_training_flats(
         town_transactions,
         town=config.town,
         window_start=window_start,
+    )
+    logging.info(
+        "Prepared %s hedonic training flats using transaction window starting at %s.",
+        len(hedonic_training_flats),
+        window_start,
     )
     flats = _build_flat_universe(transactions, town_transactions, config)
     sellers = _build_sellers(
@@ -1210,6 +1252,9 @@ def build_transaction_conditioned_segment(
     )
     retained_buyers = _retain_feasible_buyers(broad_buyers, flats, archetypes)
     if model is not None:
+        logging.info(
+            "Populating seller motivations and buyer preferences with the configured model."
+        )
         _populate_seller_motivations(sellers, model=model)
         _populate_buyer_preferences(
             retained_buyers,
@@ -1217,6 +1262,18 @@ def build_transaction_conditioned_segment(
             model=model,
             rng=rng,
         )
+    else:
+        logging.info(
+            "Skipping model-based enrichment because no language model was provided."
+        )
+
+    logging.info(
+        "Built market segment with %s flats, %s sellers, %s broad buyers, and %s retained buyers.",
+        len(flats),
+        len(sellers),
+        len(broad_buyers),
+        len(retained_buyers),
+    )
 
     return {
         "flats": flats,
@@ -1228,6 +1285,7 @@ def build_transaction_conditioned_segment(
 
 def save_segment_outputs(bundle: dict[str, Any], output_dir: Path) -> dict[str, str]:
     """Persist the generated segment artifacts and return a small path manifest."""
+    logging.info("Saving generated market segment outputs to %s.", output_dir)
     flats_path = output_dir / "flat_units.jsonl"
     sellers_path = output_dir / "sellers.jsonl"
     buyers_broad_path = output_dir / "buyers_broad.jsonl"
@@ -1246,4 +1304,5 @@ def save_segment_outputs(bundle: dict[str, Any], output_dir: Path) -> dict[str, 
         "buyers_retained_path": str(buyers_retained_path),
     }
     _write_json(manifest_path, manifest)
+    logging.info("Saved market segment manifest to %s.", manifest_path)
     return manifest
