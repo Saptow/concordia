@@ -49,20 +49,14 @@ from collections.abc import Collection, Sequence
 import threading
 from typing import Any, Mapping, override
 
+from configs import VLLMConfig
 from concordia.language_model import language_model
 from concordia.utils import measurements as measurements_lib
 from vllm import LLM
 from vllm import SamplingParams
 from vllm.config.structured_outputs import StructuredOutputsConfig
-from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
-
-_DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
-_DEFAULT_TENSOR_PARALLEL_SIZE = 1
-_DEFAULT_ENABLE_PREFIX_CACHING = False
-_DEFAULT_MAX_LORA_RANK = 16
-_DEFAULT_STRUCTURED_OUTPUTS_BACKEND = 'xgrammar'
-_DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK = False
+from vllm.sampling_params import StructuredOutputsParams
 
 
 class VLLMLanguageModel(language_model.LanguageModel):
@@ -72,20 +66,16 @@ class VLLMLanguageModel(language_model.LanguageModel):
       self,
       model_name: str,
       *,
-      tensor_parallel_size: int = _DEFAULT_TENSOR_PARALLEL_SIZE,
-      gpu_memory_utilization: float = _DEFAULT_GPU_MEMORY_UTILIZATION,
+      tensor_parallel_size: int = VLLMConfig.DEFAULT_TENSOR_PARALLEL_SIZE,
+      gpu_memory_utilization: float = VLLMConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
       enable_lora: bool = False,
       max_model_len: int | None = None,
       measurements: measurements_lib.Measurements | None = None,
       channel: str = language_model.DEFAULT_STATS_CHANNEL,
-      enable_prefix_caching: bool = _DEFAULT_ENABLE_PREFIX_CACHING,
-      max_lora_rank: int = _DEFAULT_MAX_LORA_RANK,
-      structured_outputs_backend: str | None = (
-          _DEFAULT_STRUCTURED_OUTPUTS_BACKEND
-      ),
-      structured_outputs_disable_fallback: bool = (
-          _DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK
-      ),
+      enable_prefix_caching: bool = VLLMConfig.DEFAULT_ENABLE_PREFIX_CACHING,
+      max_lora_rank: int = VLLMConfig.DEFAULT_MAX_LORA_RANK,
+      structured_outputs_backend: str | None = VLLMConfig.DEFAULT_STRUCTURED_OUTPUTS_BACKEND,
+      structured_outputs_disable_fallback: bool = VLLMConfig.DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK,
       **kwargs: Any,
   ):
     """Initialize the vLLM language model.
@@ -198,6 +188,62 @@ class VLLMLanguageModel(language_model.LanguageModel):
       self._measurements.publish_datum(
           self._channel,
           {'raw_text_length': len(generated_text)},
+      )
+
+    return generated_text
+
+  def chat(
+      self,
+      messages: Sequence[Mapping[str, Any]],
+      *,
+      max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K,
+      timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
+      seed: int | None = None,
+      lora_request: LoRARequest | None = None,
+      tools: Sequence[Mapping[str, Any]] | None = None,
+      tool_choice: Any = None,
+  ) -> str:
+    """Run vLLM chat completion, optionally with tool definitions."""
+    del timeout  # vLLM chat does not consume timeout via SamplingParams
+
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        seed=seed,
+        stop=list(terminators) if terminators else None,
+    )
+
+    chat_kwargs: dict[str, Any] = {
+        'messages': list(messages),
+        'sampling_params': sampling_params,
+    }
+    if lora_request is not None:
+        chat_kwargs['lora_request'] = lora_request
+    if tools is not None:
+        chat_kwargs['tools'] = list(tools)
+    if tool_choice is None and tools is not None:
+        chat_kwargs['tool_choice'] = 'required'
+    elif tool_choice is not None:
+        chat_kwargs['tool_choice'] = tool_choice
+
+    with self._lock:
+      outputs = self._llm.chat(**chat_kwargs)
+
+    generated_text = outputs[0].outputs[0].text
+
+    if self._measurements is not None:
+      self._measurements.publish_datum(
+          self._channel,
+          {
+              'chat_text_length': len(generated_text),
+              'chat_with_tools': bool(tools),
+          },
       )
 
     return generated_text
@@ -375,20 +421,16 @@ class VLLMLora(language_model.LanguageModel):
       *,
       lora_path: str | None = None,
       vllm_language_model: VLLMLanguageModel | None = None,
-      tensor_parallel_size: int = _DEFAULT_TENSOR_PARALLEL_SIZE,
-      gpu_memory_utilization: float = _DEFAULT_GPU_MEMORY_UTILIZATION,
+      tensor_parallel_size: int = VLLMConfig.DEFAULT_TENSOR_PARALLEL_SIZE,
+      gpu_memory_utilization: float = VLLMConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
       enable_lora: bool = False,
       max_model_len: int | None = None,
       measurements: measurements_lib.Measurements | None = None,
       channel: str = language_model.DEFAULT_STATS_CHANNEL,
-      enable_prefix_caching: bool = _DEFAULT_ENABLE_PREFIX_CACHING,
-      max_lora_rank: int = _DEFAULT_MAX_LORA_RANK,
-      structured_outputs_backend: str | None = (
-          _DEFAULT_STRUCTURED_OUTPUTS_BACKEND
-      ),
-      structured_outputs_disable_fallback: bool = (
-          _DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK
-      ),
+      enable_prefix_caching: bool = VLLMConfig.DEFAULT_ENABLE_PREFIX_CACHING,
+      max_lora_rank: int = VLLMConfig.DEFAULT_MAX_LORA_RANK,
+      structured_outputs_backend: str | None = VLLMConfig.DEFAULT_STRUCTURED_OUTPUTS_BACKEND,
+      structured_outputs_disable_fallback: bool = VLLMConfig.DEFAULT_STRUCTURED_OUTPUTS_DISABLE_FALLBACK,
       **kwargs: Any,
   ):
     """Initialize the vLLM language model with LoRA.
@@ -471,6 +513,35 @@ class VLLMLora(language_model.LanguageModel):
         timeout=timeout,
         seed=seed,
         lora_request=self._lora_request,
+    )
+
+  def chat(
+      self,
+      messages: Sequence[Mapping[str, Any]],
+      *,
+      max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K,
+      timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
+      seed: int | None = None,
+      tools: Sequence[Mapping[str, Any]] | None = None,
+      tool_choice: Any = None,
+  ) -> str:
+    """Run vLLM chat completion with the configured LoRA adapter."""
+    return self._vllm_model.chat(
+        messages,
+        max_tokens=max_tokens,
+        terminators=terminators,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        timeout=timeout,
+        seed=seed,
+        lora_request=self._lora_request,
+        tools=tools,
+        tool_choice=tool_choice,
     )
 
   @override

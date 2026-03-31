@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import dataclasses
 import json
 
+from configs import NegotiationComponentConfig
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
@@ -21,6 +22,7 @@ from concordia.typing import prefab as prefab_lib
 # Import our negotiation components
 from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
+from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
 DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
     f'HDB RESALE ETHICAL CONSTRAINTS: \n'
@@ -155,6 +157,21 @@ class Entity(prefab_lib.Prefab):
             ethical_constraints=ethics,
             pre_act_label='# NEGOTIATION INSTRUCTIONS',
             verbose=True,
+        )
+        policy_tool_prompt = hdb_policy_tool_prompt.HDBPolicyToolPrompt(
+            model=model,
+            observation_component_key=(
+                NegotiationComponentConfig.OBSERVATION_COMPONENT_KEY
+            ),
+            memory_component_key=agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
+            num_memories_to_retrieve=ACTION_REASONING_MEMORY_WINDOW,
+            policy_jsonl_filename=str(
+                negotiation_config.get(
+                    'policy_jsonl_filename',
+                    'hdb_resale_policy_2022_and_before.jsonl',
+                )
+            ),
+            pre_act_label='# POLICY SEARCH TOOL',
         )
 
         # Setup uncertainty context if specified (should only be one of buyer/seller)
@@ -298,6 +315,7 @@ class Entity(prefab_lib.Prefab):
             )
         action_components = [
             instructions.name,
+            policy_tool_prompt.name,
             strategy_key
         ]
         
@@ -317,15 +335,20 @@ class Entity(prefab_lib.Prefab):
         # TODO: look into more refined strategy integration on later stage
         # Assemble all components
         components_of_agent = {
-            'observation_to_memory': observation_to_memory,
-            'observation': observation,
+            NegotiationComponentConfig.OBSERVATION_TO_MEMORY_COMPONENT_KEY: (
+                observation_to_memory
+            ),
+            NegotiationComponentConfig.OBSERVATION_COMPONENT_KEY: observation,
             agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY: memory,
             instructions.name: instructions,
+            NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY: policy_tool_prompt,
             uncertain_key: uncertain_context,
             strategy_key: strategy,
             'situation_perception': question_about_situation,
             'self_perception': question_about_self,
-            'action_decisions': question_about_action,
+            NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY: (
+                question_about_action
+            ),
         }
 
         # Add any extra components
@@ -335,15 +358,16 @@ class Entity(prefab_lib.Prefab):
 
         # Define component order for context building
         component_order = [
-            'observation_to_memory',
-            'observation',
+            NegotiationComponentConfig.OBSERVATION_TO_MEMORY_COMPONENT_KEY,
+            NegotiationComponentConfig.OBSERVATION_COMPONENT_KEY,
             agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
             instructions.name,
+            NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY,
             uncertain_key,
             strategy_key,
             'situation_perception',
             'self_perception',
-            'action_decisions',
+            NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY,
         ]
 
         # Add extra component names to order
@@ -357,7 +381,9 @@ class Entity(prefab_lib.Prefab):
         act_component = hdb_acting_component.HDBStructuredActComponent(
             model=model,
             role=role,
-            structured_component_key='action_decisions',
+            structured_component_key=(
+                NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY
+            ),
             component_order=component_order,
         )
         # Create the agent

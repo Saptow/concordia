@@ -19,3 +19,35 @@ class FullPolicyPage(PolicyPage):
 # This is the main schema for the policy page directory, which contains a list of policy pages.
 class PolicyPageDirectory(BaseModel):
     policy_pages: list[PolicyPage] = Field(..., description="A list of policy pages in the directory.")
+
+
+class RetrievedFullPolicyPages(BaseModel):
+    policy_pages: list[FullPolicyPage] = Field(
+        default_factory=list,
+        description="List of retrieved full policy pages with content.",
+    )
+
+
+class RelevantPolicyPathSelection(BaseModel):
+    relevant_paths: list[str] = Field(
+        default_factory=list,
+        description="Exact policy paths from the directory that are relevant to the current negotiation context.",
+    )
+    retrieval_decision: str = Field(
+        ...,
+        description="Short explanation of whether relevant policies were found in the directory.",
+    )
+
+
+class PolicyAnnouncement(BaseModel):
+    """Single scheduled policy announcement loaded from `policy.yaml`."""
+
+    policy_type: str = Field(min_length=1)
+    policy_text: str = Field(min_length=1)
+    week_to_announce_policy: int = Field(ge=1)
+
+
+class PolicyAnnouncementConfig(BaseModel):
+    """Top-level YAML config for scheduled policy announcements."""
+
+    policies: list[PolicyAnnouncement] = Field(default_factory=list)

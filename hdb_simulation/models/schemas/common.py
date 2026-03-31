@@ -1,7 +1,7 @@
 """Shared reusable schemas for the HDB simulation."""
 
 from enum import StrEnum
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,23 @@ class FlatType(StrEnum):
     FIVE_ROOM = '5-Room'
     EXECUTIVE = 'Executive'
 
+
+class AmenityType(StrEnum):
+    MRT = "MRT"
+    SCHOOL = "Primary School"
+    HAWKER = "Hawker Centre"
+    MALL = "Shopping Mall"
+
+class Amenity(BaseModel):
+    name: str
+    type: AmenityType
+    radius: Literal['Within 1km', 'Within 2km']
+
+class PriceTrend(BaseModel):
+    transactions_6m: int
+    min_price_6m: float
+    max_price_6m: float
+
 class Flat(BaseModel):
     flat_type: FlatType
     address: str
@@ -73,7 +90,9 @@ class Flat(BaseModel):
     ethnic_eligibility: str
     spr_eligibility: str
     floor_area_sqm: float
-    nearby_amenities: Optional[List[str]] = None
+    nearby_amenities: Optional[List[Amenity]] = None
+    past_price_trends: Optional[PriceTrend] = None
+    
 
     def to_compact_description(self) -> str:
         details = [str(self.flat_type), f'in {self.town}']
@@ -85,6 +104,8 @@ class Flat(BaseModel):
         details.append(f'remaining lease {self.remaining_lease:g} years')
         return ' '.join(details)
 
+
+    
 class BuyerBudgetRange(BaseModel):
     min_price: float = Field(ge=0.0)
     max_price: float = Field(ge=0.0)

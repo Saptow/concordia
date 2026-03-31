@@ -187,7 +187,18 @@ class HDBSimulationEngine(engine_lib.Engine):
       logging.error('HDBSimulationEngine.run_loop called with no game masters.')
       return
 
-    game_master = game_masters[0]
+    initializer_gms, coordinator_gm = self._select_runtime_game_master(game_masters)
+    if coordinator_gm is None:
+      logging.error(
+          'HDBSimulationEngine could not find a coordinator GM with weekly_coordinator.'
+      )
+      return
+    self._run_initializers(
+        initializer_gms=initializer_gms,
+        coordinator_gm=coordinator_gm,
+    )
+
+    game_master = coordinator_gm
     steps = 0
     # if premise: # Game master has no generative elements 
     #   game_master.observe(f'{EVENT_TAG} {premise}')
@@ -199,6 +210,7 @@ class HDBSimulationEngine(engine_lib.Engine):
 
       summary, active_negotiation_player_ids, listing_player_ids = self._run_week(
           game_master,
+          entities=entities,
           verbose=verbose,
       )
       self._deliver_pending_observations(
@@ -247,6 +259,116 @@ class HDBSimulationEngine(engine_lib.Engine):
         'weekly_coordinator',
         type_=hdb_coordinator_helper.WeeklyCoordinator,
     )
+
+  @staticmethod
+  def _get_policy_layer_component(game_master: entity_lib.Entity) -> Any | None:
+    try:
+      return game_master.get_component('policy_layer')
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+
+  @staticmethod
+  def _get_initializer_component(game_master: entity_lib.Entity) -> Any | None:
+    try:
+      return game_master.get_component('market_initializer')
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+
+  def _select_runtime_game_master(
+      self,
+      game_masters: Sequence[entity_lib.Entity],
+  ) -> tuple[list[entity_lib.Entity], entity_lib.Entity | None]:
+    initializer_gms: list[entity_lib.Entity] = []
+    coordinator_gm: entity_lib.Entity | None = None
+
+    for game_master in game_masters:
+      initializer_component = self._get_initializer_component(game_master)
+      if initializer_component is not None:
+        initializer_gms.append(game_master)
+        continue
+      try:
+        self._get_coordinator(game_master)
+      except Exception:  # pylint: disable=broad-exception-caught
+        continue
+      coordinator_gm = game_master
+      break
+
+    return initializer_gms, coordinator_gm
+
+  def _run_initializers(
+      self,
+      *,
+      initializer_gms: Sequence[entity_lib.Entity],
+      coordinator_gm: entity_lib.Entity,
+  ) -> None:
+    for initializer_gm in initializer_gms:
+      initializer_component = self._get_initializer_component(initializer_gm)
+      if initializer_component is None:
+        continue
+      if getattr(initializer_component, 'is_initialized', lambda: False)():
+        continue
+      initialize = getattr(initializer_component, 'initialize', None)
+      if not callable(initialize):
+        logging.warning(
+            'Initializer GM %s does not expose an initialize(...) method.',
+            initializer_gm.name,
+        )
+        continue
+      initialize(coordinator_gm)
+
+  def _deliver_policy_announcements(
+      self,
+      *,
+      game_master: entity_lib.Entity,
+      entities: Sequence[entity_lib.Entity],
+      week_number: int,
+      active_player_ids: Sequence[str],
+      verbose: bool,
+  ) -> None:
+    policy_layer = self._get_policy_layer_component(game_master)
+    if policy_layer is None or not getattr(policy_layer, 'is_enabled', lambda: False)():
+      return
+
+    normalized_player_ids = [
+        str(player_id).strip() for player_id in active_player_ids if str(player_id).strip()
+    ]
+    if not normalized_player_ids:
+      return
+
+    observations_by_player_id = policy_layer.announce_policies_for_week(
+        week_number=int(week_number),
+        active_player_ids=normalized_player_ids,
+    )
+    if not observations_by_player_id:
+      return
+
+    coordinator = self._get_coordinator(game_master)
+    entity_by_id = {
+        str(entity._hdb_player_id): entity
+        for entity in entities
+        if getattr(entity, '_hdb_player_id', '')
+    }
+    for player_id, observations in observations_by_player_id.items():
+      entity = entity_by_id.get(player_id)
+      if entity is None:
+        logging.warning(
+            'No registered entity found for policy announcement recipient %s (%s).',
+            coordinator.get_player_name(player_id),
+            player_id,
+        )
+        continue
+      for observation in observations:
+        if verbose:
+          print(
+              termcolor.colored(
+                  (
+                      f'Entity {entity.name} observed policy announcement: '
+                      f'{observation}'
+                  ),
+                  _PRINT_COLOR,
+              )
+          )
+        entity.observe(observation)
 
 # 
   def _deliver_pending_observations(
@@ -304,6 +426,7 @@ class HDBSimulationEngine(engine_lib.Engine):
       self,
       game_master: entity_lib.Entity,
       *,
+      entities: Sequence[entity_lib.Entity],
       verbose: bool,
   ) -> tuple[dict[str, Any], list[str], list[str]]:
     coordinator = self._get_coordinator(game_master)
@@ -316,6 +439,16 @@ class HDBSimulationEngine(engine_lib.Engine):
             for pair in week_context['open_negotiation_pairs']
             for player_id in pair
         }
+    )
+    active_player_ids = sorted(
+        set(active_negotiation_player_ids) | set(week_context['listing_player_ids'])
+    )
+    self._deliver_policy_announcements(
+        game_master=game_master,
+        entities=entities,
+        week_number=int(week_context['week_number']),
+        active_player_ids=active_player_ids,
+        verbose=verbose,
     )
 
     tasks: dict[str, Callable[[], Any]] = {}

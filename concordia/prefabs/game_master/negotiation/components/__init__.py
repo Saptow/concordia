@@ -13,6 +13,7 @@ from . import hdb_negotiation_helpers
 from . import negotiation_modules
 from . import negotiation_state
 from . import negotiation_validation
+from . import policy_layer
 
 __all__ = [
     'negotiation_state',
@@ -28,4 +29,5 @@ __all__ = [
     'hdb_negotiation_helpers',
     'hdb_listing',
     'hdb_negotiation',
+    'policy_layer',
 ]

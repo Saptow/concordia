@@ -4,16 +4,17 @@ from collections.abc import Sequence
 from typing import Any
 import uuid
 
+from configs import QdrantConfig
 from pydantic import BaseModel
 from qdrant_client import models
 
 from concordia.hdb_simulation.models.schemas.common import Flat
 
 # Constants for Qdrant vector database
-DENSE_EMBEDDINGS_KEY = 'dense_vector'
-SPARSE_EMBEDDINGS_KEY = 'sparse_vector'
-DEFAULT_COLLECTION_NAME = 'hdb_listing_portal'
-DEFAULT_DB_PATH = './concordia/hdb_simulation/.qdrant/listing_portal' # Assume root of working directory
+DENSE_EMBEDDINGS_KEY = QdrantConfig.DENSE_EMBEDDINGS_KEY
+SPARSE_EMBEDDINGS_KEY = QdrantConfig.SPARSE_EMBEDDINGS_KEY
+DEFAULT_COLLECTION_NAME = QdrantConfig.DEFAULT_COLLECTION_NAME
+DEFAULT_DB_PATH = QdrantConfig.DEFAULT_DB_PATH
 
 
 class ListingRecord(BaseModel):

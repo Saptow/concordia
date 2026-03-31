@@ -4,6 +4,7 @@
 from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
+from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.entity.negotiation.components import negotiation_strategy
 
 # Advanced modules
@@ -23,6 +24,7 @@ __all__ = [
     'negotiation_memory',
     'negotiation_instructions',
     'hdb_negotiation_instructions',
+    'hdb_policy_tool_prompt',
     'negotiation_strategy',
     'cultural_adaptation',
     'temporal_strategy',

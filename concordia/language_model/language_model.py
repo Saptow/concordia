@@ -19,12 +19,14 @@ import abc
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
-DEFAULT_TEMPERATURE = 0.5
-DEFAULT_TOP_P = 0.95
-DEFAULT_TOP_K = 64
-DEFAULT_TERMINATORS = ()
-DEFAULT_TIMEOUT_SECONDS = 60
-DEFAULT_MAX_TOKENS = 5000
+from configs import LanguageModelConfig
+
+DEFAULT_TEMPERATURE = LanguageModelConfig.DEFAULT_TEMPERATURE
+DEFAULT_TOP_P = LanguageModelConfig.DEFAULT_TOP_P
+DEFAULT_TOP_K = LanguageModelConfig.DEFAULT_TOP_K
+DEFAULT_TERMINATORS = LanguageModelConfig.DEFAULT_TERMINATORS
+DEFAULT_TIMEOUT_SECONDS = LanguageModelConfig.DEFAULT_TIMEOUT_SECONDS
+DEFAULT_MAX_TOKENS = LanguageModelConfig.DEFAULT_MAX_TOKENS
 
 DEFAULT_STATS_CHANNEL = 'language_model_stats'
 

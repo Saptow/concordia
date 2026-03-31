@@ -648,7 +648,7 @@ def extract_json_object(raw_text: str) -> dict[str, Any]:
 def decode_jsonl_line(raw_line: str) -> list[Any]:
     decoder = json.JSONDecoder()
     records: list[Any] = []
-    text = raw_line.strip()
+    text = raw_line.lstrip("\ufeff").strip()
     index = 0
 
     while index < len(text):
@@ -694,9 +694,9 @@ def call_model_for_json(
 
 def load_policy_pages(input_path: Path) -> list[PolicyPage]:
     pages: list[PolicyPage] = []
-    with input_path.open("r", encoding="utf-8") as handle:
+    with input_path.open("r", encoding="utf-8-sig") as handle:
         for line_number, line in enumerate(handle, start=1):
-            stripped = line.strip()
+            stripped = line.lstrip("\ufeff").strip()
             if not stripped:
                 continue
             record_number = 1
@@ -731,6 +731,7 @@ def enrich_page(
     model: VLLMLanguageModel,
     *,
     pdf_max_pages: int,
+    overwrite_existing: bool,
 ) -> tuple[PolicyPage, ClassificationAuditRecord]:
     canonical_path = canonical_page_record_path(page.path)
     article_text = truncate_text(
@@ -738,16 +739,23 @@ def enrich_page(
         MAX_INPUT_CHARS,
     )
 
-    classification = call_model_for_json(
-        model,
-        build_classification_prompt(page, article_text),
-        ClassificationResult,
-        max_tokens=CLASSIFICATION_MAX_TOKENS,
-    )
-    classification = ClassificationResult.model_validate(classification)
+    should_classify = overwrite_existing or not page.tags
+    if should_classify:
+        classification = call_model_for_json(
+            model,
+            build_classification_prompt(page, article_text),
+            ClassificationResult,
+            max_tokens=CLASSIFICATION_MAX_TOKENS,
+        )
+        classification = ClassificationResult.model_validate(classification)
+        tags = classification.tags
+        reasoning_steps = classification.reasoning_steps
+    else:
+        tags = page.tags
+        reasoning_steps = []
 
     markdown_summary = model.sample_text(
-        build_summary_prompt(page, article_text, classification.tags),
+        build_summary_prompt(page, article_text, tags),
         max_tokens=SUMMARY_MAX_TOKENS,
     ).strip()
 
@@ -755,14 +763,14 @@ def enrich_page(
         path=canonical_path,
         source=page.source,
         summary=markdown_summary,
-        tags=classification.tags,
+        tags=tags,
     )
     audit_record = ClassificationAuditRecord(
         path=canonical_path,
         source=page.source,
         status="ok",
-        tags=classification.tags,
-        reasoning_steps=classification.reasoning_steps,
+        tags=tags,
+        reasoning_steps=reasoning_steps,
         text_characters=len(article_text),
     )
     return updated_page, audit_record
@@ -771,7 +779,7 @@ def enrich_page(
 def should_process(page: PolicyPage, overwrite_existing: bool) -> bool:
     if overwrite_existing:
         return True
-    return not page.summary.strip() and not page.tags
+    return not page.summary.strip() or not page.tags
 
 
 def main() -> None:
@@ -818,6 +826,7 @@ def main() -> None:
                 page,
                 model,
                 pdf_max_pages=args.pdf_max_pages,
+                overwrite_existing=args.overwrite_existing,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  failed: {exc}")

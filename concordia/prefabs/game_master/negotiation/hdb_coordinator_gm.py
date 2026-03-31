@@ -12,6 +12,7 @@ from concordia.language_model import language_model
 from concordia.prefabs.game_master.negotiation.components import hdb_coordinator_helper
 from concordia.prefabs.game_master.negotiation.components import hdb_listing
 from concordia.prefabs.game_master.negotiation.components import hdb_negotiation
+from concordia.prefabs.game_master.negotiation.components import policy_layer
 from concordia.typing import prefab as prefab_lib
 
 
@@ -49,6 +50,10 @@ class GameMaster(prefab_lib.Prefab):
            },
           'extra_components': {},
           'extra_components_index': {},
+          'policy_layer': {
+              'enabled': False,
+              'policy_yaml_path': '',
+          },
       }
   )
   entities: Sequence[entity_agent_with_logging.EntityAgentWithLogging] = ()
@@ -77,6 +82,7 @@ class GameMaster(prefab_lib.Prefab):
     player_ids = self.params.get('player_ids') or None
     listing_params = dict(self.params.get('listing', {}))
     negotiation_params = dict(self.params.get('negotiation', {}))
+    policy_layer_params = dict(self.params.get('policy_layer', {}))
 
     make_observation_key = (
         gm_components.make_observation.DEFAULT_MAKE_OBSERVATION_COMPONENT_KEY
@@ -124,8 +130,15 @@ class GameMaster(prefab_lib.Prefab):
         negotiation_component_key=negotiation_module_key,
     )
 
+    policy_layer_key = 'policy_layer'
+    gm_policy_layer = policy_layer.PolicyLayerComponent(
+        policy_yaml_path=str(policy_layer_params.get('policy_yaml_path', '')),
+        enabled=bool(policy_layer_params.get('enabled', False)),
+    )
+
     components_of_game_master = {
         make_observation_key: make_observation,
+        policy_layer_key: gm_policy_layer,
         listing_module_key: listing_module,
         negotiation_module_key: negotiation_module,
         coordinator_state_key: coordinator_state,

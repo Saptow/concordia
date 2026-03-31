@@ -2,7 +2,7 @@
 financial_feasibility.py
 ------------------------
 Estimates financial capacity parameters for synthetic HDB resale buyers.
-
+(Note that this is only for 2023 for now. Plug in 2025 year and update CPF schedules to extend to 2025+ when available.)
 Interpretation
 --------------
 Outputs are deterministic affordability proxies based on:
