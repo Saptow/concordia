@@ -276,6 +276,7 @@ def index_market_segment_flats(
     seller_data_path: str | Path | None = None,
     collection_name: str = QdrantConfig.DEFAULT_COLLECTION_NAME,
     db_path: str = QdrantConfig.DEFAULT_DB_PATH,
+    persist_db_path: str | None = None,
     listed_week: int = 0,
     active: bool = False,
 ) -> list[qdrant_schemas.ListingRecord]:
@@ -327,7 +328,13 @@ def index_market_segment_flats(
       [record.listing_summary for record in records],
       show_progress_bar=False,
   )
-  client = client or QdrantClient(location=db_path)
+  points = [
+      record.to_qdrant_point(
+          dense_vector.tolist() if hasattr(dense_vector, 'tolist') else dense_vector
+      )
+      for record, dense_vector in zip(records, dense_vectors, strict=True)
+  ]
+  client = client or listing_portal_lib.make_qdrant_client(db_path)
   ensure_listing_collection(
       client=client,
       dense_embedder=dense_embedder,
@@ -335,11 +342,20 @@ def index_market_segment_flats(
   )
   client.upsert(
       collection_name=collection_name,
-      points=[
-          record.to_qdrant_point(
-              dense_vector.tolist() if hasattr(dense_vector, 'tolist') else dense_vector
-          )
-          for record, dense_vector in zip(records, dense_vectors, strict=True)
-      ],
+      points=points,
   )
+  persist_target = str(persist_db_path or '').strip()
+  if persist_target and persist_target != str(db_path).strip():
+      persistent_client = listing_portal_lib.make_qdrant_client(persist_target)
+      if persistent_client.collection_exists(collection_name):
+          persistent_client.delete_collection(collection_name)
+      ensure_listing_collection(
+          client=persistent_client,
+          dense_embedder=dense_embedder,
+          collection_name=collection_name,
+      )
+      persistent_client.upsert(
+          collection_name=collection_name,
+          points=points,
+      )
   return records

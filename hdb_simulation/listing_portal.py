@@ -20,6 +20,13 @@ from concordia.hdb_simulation.models.schemas.common import Flat
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
 
 
+def make_qdrant_client(db_path: str) -> QdrantClient:
+    target = str(db_path).strip() or qdrant_schemas.DEFAULT_DB_PATH
+    if target == ':memory:':
+        return QdrantClient(location=':memory:')
+    return QdrantClient(path=target)
+
+
 @dataclasses.dataclass
 class SearchAndRequestResult:
     results: list[listing_schemas.PortalSearchResult]
@@ -45,10 +52,7 @@ class ListingPortalRetriever:
         db_path: str = qdrant_schemas.DEFAULT_DB_PATH,
     ):
         if client is None:
-            # Initialise Qdrant client
-            client = QdrantClient(
-                location=db_path,
-            )
+            client = make_qdrant_client(db_path)
         
         self._dense_embedder=dense_embedding_model
         self._collection_name = collection_name
