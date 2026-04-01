@@ -39,6 +39,7 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 
 
 DEFAULT_LLM_RETRIES = 3
+MAX_REACHABLE_MARKET_SAMPLE_FLATS = 50
 
 
 FLAT_TYPE_LABELS = {
@@ -475,6 +476,179 @@ Think step by step privately. Do not reveal your reasoning.
 """
 
 
+def _compact_flat_for_preference_summary(flat: dict[str, Any]) -> dict[str, Any]:
+    amenities = flat.get("amenities", {})
+    past_price_trends = flat.get("past_price_trends", {})
+    return {
+        "flat_id": flat["flat_id"],
+        "town": flat["town"],
+        "flat_type": flat["flat_type"],
+        "observed_resale_price": round(float(flat["observed_resale_price"]), 2),
+        "floor_area_sqm": round(float(flat["floor_area_sqm"]), 2),
+        "remaining_lease_years": round(float(flat["remaining_lease_years"]), 2),
+        "amenity_counts": {
+            "mrt": int(amenities.get("mrt", {}).get("count", 0)),
+            "primary_schools": int(amenities.get("primary_schools", {}).get("count", 0)),
+            "malls": int(amenities.get("malls", {}).get("count", 0)),
+            "hawker_centres": int(amenities.get("hawker_centres", {}).get("count", 0)),
+        },
+        "past_price_trends": {
+            "transactions_6m": int(past_price_trends.get("transactions_6m", 0)),
+            "min_price_6m": round(float(past_price_trends.get("min_price_6m", 0.0)), 2),
+            "max_price_6m": round(float(past_price_trends.get("max_price_6m", 0.0)), 2),
+        },
+    }
+
+
+def _sample_flats_uniformly(
+    flats: list[dict[str, Any]],
+    *,
+    cap: int = MAX_REACHABLE_MARKET_SAMPLE_FLATS,
+) -> list[dict[str, Any]]:
+    if cap <= 0 or not flats:
+        return []
+    if len(flats) <= cap:
+        return list(flats)
+
+    step = (len(flats) - 1) / float(cap - 1) if cap > 1 else 0.0
+    sampled_indices: list[int] = []
+    seen_indices: set[int] = set()
+    for position in range(cap):
+        candidate_index = int(round(position * step)) if cap > 1 else 0
+        if candidate_index in seen_indices:
+            continue
+        sampled_indices.append(candidate_index)
+        seen_indices.add(candidate_index)
+
+    if len(sampled_indices) < cap:
+        for candidate_index in range(len(flats)):
+            if candidate_index in seen_indices:
+                continue
+            sampled_indices.append(candidate_index)
+            seen_indices.add(candidate_index)
+            if len(sampled_indices) >= cap:
+                break
+
+    sampled_indices.sort()
+    return [flats[index] for index in sampled_indices]
+
+
+def _build_market_bucket_summary(
+    flats: list[dict[str, Any]],
+    *,
+    bucket_key: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for flat in flats:
+        key = str(flat.get(bucket_key, "")).strip()
+        grouped.setdefault(key, []).append(flat)
+
+    summaries: list[dict[str, Any]] = []
+    for key in sorted(grouped):
+        bucket_flats = sorted(
+            grouped[key],
+            key=lambda flat: (
+                float(flat["observed_resale_price"]),
+                float(flat["floor_area_sqm"]),
+                str(flat["flat_id"]),
+            ),
+        )
+        prices = [float(flat["observed_resale_price"]) for flat in bucket_flats]
+        floor_areas = [float(flat["floor_area_sqm"]) for flat in bucket_flats]
+        lease_years = [float(flat["remaining_lease_years"]) for flat in bucket_flats]
+        amenity_counts = {
+            "mrt": [int(flat.get("amenities", {}).get("mrt", {}).get("count", 0)) for flat in bucket_flats],
+            "primary_schools": [
+                int(flat.get("amenities", {}).get("primary_schools", {}).get("count", 0))
+                for flat in bucket_flats
+            ],
+            "malls": [int(flat.get("amenities", {}).get("malls", {}).get("count", 0)) for flat in bucket_flats],
+            "hawker_centres": [
+                int(flat.get("amenities", {}).get("hawker_centres", {}).get("count", 0))
+                for flat in bucket_flats
+            ],
+        }
+        summaries.append(
+            {
+                bucket_key: key,
+                "reachable_flats": len(bucket_flats),
+                "price_range": {
+                    "min": round(min(prices), 2),
+                    "max": round(max(prices), 2),
+                },
+                "floor_area_sqm_range": {
+                    "min": round(min(floor_areas), 2),
+                    "max": round(max(floor_areas), 2),
+                },
+                "remaining_lease_years_range": {
+                    "min": round(min(lease_years), 2),
+                    "max": round(max(lease_years), 2),
+                },
+                "amenity_profile": {
+                    amenity_name: {
+                        "flats_with_access": sum(1 for count in counts if count > 0),
+                        "max_count": max(counts, default=0),
+                    }
+                    for amenity_name, counts in amenity_counts.items()
+                },
+                "representative_flats": [
+                    _compact_flat_for_preference_summary(flat)
+                    for flat in _sample_flats_uniformly(bucket_flats)
+                ],
+            }
+        )
+    return summaries
+
+
+def _build_reachable_market_summary(
+    reachable_flats: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not reachable_flats:
+        return {
+            "total_reachable_flats": 0,
+            "reachable_towns": [],
+            "reachable_flat_types": [],
+            "overall_price_range": None,
+            "town_summaries": [],
+            "flat_type_summaries": [],
+            "global_representative_flats": [],
+        }
+
+    sorted_flats = sorted(
+        reachable_flats,
+        key=lambda flat: (
+            str(flat.get("town", "")),
+            str(flat.get("flat_type", "")),
+            float(flat.get("observed_resale_price", 0.0)),
+            str(flat.get("flat_id", "")),
+        ),
+    )
+    prices = [float(flat["observed_resale_price"]) for flat in sorted_flats]
+    return {
+        "total_reachable_flats": len(sorted_flats),
+        "reachable_towns": sorted(
+            {str(flat.get("town", "")).strip() for flat in sorted_flats if str(flat.get("town", "")).strip()}
+        ),
+        "reachable_flat_types": sorted(
+            {
+                str(flat.get("flat_type", "")).strip()
+                for flat in sorted_flats
+                if str(flat.get("flat_type", "")).strip()
+            }
+        ),
+        "overall_price_range": {
+            "min": round(min(prices), 2),
+            "max": round(max(prices), 2),
+        },
+        "town_summaries": _build_market_bucket_summary(sorted_flats, bucket_key="town"),
+        "flat_type_summaries": _build_market_bucket_summary(sorted_flats, bucket_key="flat_type"),
+        "global_representative_flats": [
+            _compact_flat_for_preference_summary(flat)
+            for flat in _sample_flats_uniformly(sorted_flats)
+        ],
+    }
+
+
 def _build_preference_classification_input(
     buyer: dict[str, Any],
     reachable_flats: list[dict[str, Any]],
@@ -493,21 +667,8 @@ def _build_preference_classification_input(
             "general_persona": buyer["general_persona"],
         },
         "financials": buyer["financials"],
-        "reachable_market": [
-            {
-                "flat_id": flat["flat_id"],
-                "flat_type": flat["flat_type"],
-                "town": flat["town"],
-                "observed_resale_price": flat["observed_resale_price"],
-                "floor_area_sqm": flat["floor_area_sqm"],
-                "remaining_lease_years": flat["remaining_lease_years"],
-                "amenities": flat["amenities"],
-                "past_price_trends": flat["past_price_trends"],
-            }
-            for flat in reachable_flats
-        ],
+        "reachable_market_summary": _build_reachable_market_summary(reachable_flats),
         "archetypes": archetypes,
-        "target_schema": BuyerPreferenceProfile.model_json_schema(),
     }
 
 
@@ -518,8 +679,8 @@ You are inferring buyer preference profiles for an HDB resale simulation.
 
 ## Task
 
-Read the buyer metadata, reachable market, and archetypes. Infer the buyer's
-most likely preference profile.
+Read the buyer metadata, the hierarchical reachable-market summary, and the
+archetypes. Infer the buyer's most likely preference profile.
 
 ## Input
 
@@ -532,16 +693,22 @@ most likely preference profile.
 Think step by step privately. Do not reveal your reasoning.
 
 1. Review the buyer's profile and financial context.
-2. Inspect the reachable market and identify which towns and flat types are actually feasible.
-3. Compare the buyer against the provided preference archetypes.
-4. Infer the most plausible flat-type and town preferences, constrained by the reachable market.
-5. Write a concise `features` summary describing the buyer's likely housing priorities.
-6. Return only the final JSON object.
+2. Inspect the reachable-market summary from overall market level, then town
+   level, then flat-type level.
+3. Use the representative flats only as concrete examples within those summary
+   buckets, not as the full market.
+4. Compare the buyer against the provided preference archetypes.
+5. Infer the most plausible flat-type and town preferences, constrained by the
+   reachable market summary.
+6. Write a concise `features` summary describing the buyer's likely housing
+   priorities.
+7. Return only the final JSON object.
 
 ## Rules
 
-- Use only towns and flat types supported by the reachable market.
+- Use only towns and flat types supported by the reachable market summary.
 - Do not invent unreachable towns or flat types.
+- Prefer market patterns that appear consistently across the summary buckets.
 - Keep `features` concise but specific.
 - Return JSON only. Do not wrap the answer in markdown fences.
 """
@@ -1226,7 +1393,7 @@ def build_transaction_conditioned_segment(
         window_start=window_start,
     )
     logging.info(
-        "Prepared %s hedonic training flats using transaction window starting at %s.",
+        "Prepared %s hedonic training flats using transaction window ending at %s.",
         len(hedonic_training_flats),
         window_start,
     )

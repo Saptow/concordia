@@ -121,7 +121,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         return pages
 
     # Policy records point to extracted markdown pages using a few historical
-    # path conventions, so we normalize those variants before reading content.
+    # path conventions, so normalize those variants before reading content.
     def _resolve_local_path(self, record_path: str) -> Path | None:
         path = Path(record_path)
         candidate_paths: list[Path] = []
