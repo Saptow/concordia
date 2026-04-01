@@ -182,6 +182,7 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_buyer'
             uncertain_context = uncertain_buyer.UncertainBuyer(
                 model=model,
+                agent_description=description,
                 own_confidence=negotiation_config.get('own_confidence', 0.5),
                 counterpart_confidence=negotiation_config.get(
                     'counterpart_confidence',
@@ -212,6 +213,7 @@ class Entity(prefab_lib.Prefab):
             uncertain_key = 'uncertain_seller'
             uncertain_context = uncertain_seller.UncertainSeller(
                 model=model,
+                agent_description=description,
                 own_confidence=negotiation_config.get('own_confidence', 1.0),
                 counterpart_confidence=negotiation_config.get(
                     'counterpart_confidence',

@@ -23,7 +23,7 @@ def build_market_profiles(
     *,
     town: str,
 ) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
-  """Build listing/negotiation-ready profiles from a market-segment bundle."""
+  """Build listing/negotiation profiles from a market-segment bundle."""
   buyer_profiles: dict[str, dict[str, object]] = {}
   for buyer in bundle.get('buyers_retained', ()):
     buyer_id = str(buyer['buyer_id'])
@@ -96,10 +96,10 @@ def build_entity_params(
             'own_confidence': 0.75,
             'counterpart_confidence': 0.5,
             'own_reservation_': payload['budget']['max_price'],
-            'own_reservation_std': 100,
+            'own_reservation_std': 1000,
             'cp_reservation_': payload['budget']['max_price'] * 0.95,
             'lambda_': 1.0,
-            'a': 7.0,
+            'a': 5.0,
             'b': 100,
             'reservation_value': str(payload['budget']['max_price']),
             'flat_listing': '{}',
@@ -127,10 +127,10 @@ def build_entity_params(
             'own_confidence': 1.0,
             'counterpart_confidence': 0.5,
             'own_reservation_': payload['expectations']['min_price'],
-            'own_reservation_std': 100,
+            'own_reservation_std': 1000,
             'cp_reservation_': payload['expectations']['max_price'] * 0.95,
             'lambda_': 1.0,
-            'a': 7.0,
+            'a': 5.0,
             'b': 100,
             'reservation_value': str(payload['expectations']['min_price']),
             'flat_listing': json.dumps(payload['flat'], ensure_ascii=False),
@@ -321,6 +321,18 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
       )
       active_seller_ids.append(seller_id)
     return active_seller_ids
+
+  def _make_pre_act_value(self) -> str:
+    return json.dumps(
+        {
+            'town': self._town,
+            'next_game_master_name': self._next_game_master_name,
+            'week_number': self._week_number,
+            'initialized': self._initialized,
+            'summary': dataclasses.asdict(self._summary),
+        },
+        ensure_ascii=False,
+    )
 
   def initialize(self, coordinator: entity_component.EntityWithComponents) -> None:
     """Prime the coordinator's market modules exactly once."""

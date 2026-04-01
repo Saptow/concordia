@@ -7,37 +7,11 @@ from typing import Any, Dict, List, Optional
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
-from pydantic import BaseModel, Field, ValidationError
-
-class UpdateOwnBeliefInfoMetadata(BaseModel):
-    '''Metadata for belief info updates during negotiations.'''
-    estimate: float = Field(ge=0.0)
-    confidence: float = Field(ge=0.0, le=1.0)
-
-class UpdateOwnBeliefInfo(BaseModel):
-    '''Information to update belief during negotiations.'''
-    reservation_info: Optional[UpdateOwnBeliefInfoMetadata] = Field(None, description="Information about own reservation value")
-
-class UpdateOpposingBeliefInfoMetadata(BaseModel):
-    '''Metadata for belief info updates during negotiations.'''
-    estimate: float = Field(ge=0.0, description="Estimate of the counterpart's reservation value.")
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence level in the estimate of the counterpart's reservation value.")
-
-class UpdateOpposingBeliefTrustMetadata(BaseModel):
-    '''Metadata for trust updates during negotiations.'''
-    trust_level: float = Field(
-        ge=-1.0,
-        le=1.0,
-        description='Signed trust signal in the counterpart based on the new information (-1 distrust, 0 neutral, 1 trust)',
-    )
-
-class UpdateOpposingBeliefInfo(BaseModel):
-    '''Information to update belief during negotiations.'''
-    budget_info: Optional[UpdateOpposingBeliefInfoMetadata] = None
-    trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
+from pydantic import ValidationError
 
 class UncertainBuyer(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
@@ -47,6 +21,7 @@ class UncertainBuyer(
     def __init__(
         self,
         model: Any,
+        agent_description: str = '',
         own_confidence: float = 0.7,
         counterpart_confidence: float = 0.7,
         risk_tolerance: float = 0.8,
@@ -72,6 +47,7 @@ class UncertainBuyer(
         """
         super().__init__(pre_act_label='uncertain_buyer')
         self._model = model
+        self._agent_description = str(agent_description)
         self._risk_tolerance = max(0.0, min(1.0, risk_tolerance))
         self._preferences = preferences or {}
         self._flat_listing = dict(flat_listing) if flat_listing else {}
@@ -199,7 +175,17 @@ class UncertainBuyer(
         )
         if listing_price > 0.0:
             self._beliefs['counterpart_reservation'].mu = listing_price
+        self._beliefs['counterpart_reservation'].a = max(
+            5.0,
+            float(len(buyer_state.negotiation_history)),
+        )
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
+        priors = self._calibrate_initial_pairing_priors(listing_payload)
+        if priors is not None:
+            self._beliefs['own_reservation'].confidence = priors.own_confidence
+            self._beliefs['counterpart_reservation'].confidence = (
+                priors.counterpart_confidence
+            )
 
     def get_effective_reservation_distribution(
         self,
@@ -223,6 +209,87 @@ class UncertainBuyer(
             mean=max(0.0, own_reservation_),
             std=max(0.0, own_reservation_std),
             confidence=max(0.0, min(1.0, own_confidence)),
+        )
+
+    def _calibrate_initial_pairing_priors(
+        self,
+        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+    ) -> Optional[negotiation_schemas.InitialBuyerPairingPriors]:
+        listing_record = listing_payload.listing_record
+        buyer_state = listing_payload.buyer_state
+        observation_count = len(buyer_state.latest_search_results)
+        if str(buyer_state.latest_market_feedback).strip():
+            observation_count += 1
+
+        prompt = (
+            "# Role\n"
+            "You are calibrating initial uncertainty priors for a buyer who has "
+            "just been paired to a real HDB resale listing.\n\n"
+            "# Task\n"
+            "Estimate two confidence scores between 0 and 1.\n"
+            "- own_confidence: how confident the buyer is in their own reservation "
+            "value, based on the buyer persona and the number of observations seen so far.\n"
+            "- counterpart_confidence: how confident the buyer is in their initial "
+            "estimate of the seller's reservation value, based on the buyer persona "
+            "and how similar the paired listing is to the buyer's preferences.\n\n"
+            "# Input\n"
+            "## Buyer Description / Persona\n"
+            f"{self._agent_description}\n\n"
+            "## Buyer Preferences\n"
+            f"{self._preferences}\n\n"
+            "## Paired Listing\n"
+            f"{listing_record.model_dump(mode='json')}\n\n"
+            "## Listing-Stage Signals Seen So Far\n"
+            f"- observation_count: {observation_count}\n"
+            f"- latest_market_feedback: {buyer_state.latest_market_feedback}\n"
+            f"- latest_search_results: {len(buyer_state.latest_search_results)}\n\n"
+            "# Rubric\n"
+            "- own_confidence rubric:\n"
+            "  * 0.20-0.40: unsure, highly flexible, little evidence, weak valuation discipline.\n"
+            "  * 0.45-0.65: moderately grounded persona, some evidence, but still adaptive.\n"
+            "  * 0.70-0.90: decisive, valuation-driven, or experienced persona with meaningful observations.\n"
+            "- counterpart_confidence rubric:\n"
+            "  * 0.20-0.40: weak preference fit, ambiguous listing, little basis to infer seller threshold.\n"
+            "  * 0.45-0.65: partial fit or mixed evidence about likely seller reservation.\n"
+            "  * 0.70-0.90: strong listing-preference fit and buyer persona suggests confident market judgment.\n\n"
+            "# Few-Shot Examples\n"
+            "Example 1:\n"
+            "- Buyer persona: analytical, budget-disciplined, compares transactions carefully.\n"
+            "- Observation count: 5\n"
+            "- Listing fit: strong match on town and flat type.\n"
+            '- Output: {"own_confidence": 0.82, "counterpart_confidence": 0.76}\n\n'
+            "Example 2:\n"
+            "- Buyer persona: uncertain first-time buyer, still figuring out trade-offs.\n"
+            "- Observation count: 0\n"
+            "- Listing fit: only partial match, several preferences unclear.\n"
+            '- Output: {"own_confidence": 0.38, "counterpart_confidence": 0.31}\n\n'
+            "# Rules\n"
+            "- Return JSON only.\n"
+            "- Keep both values within [0, 1].\n"
+            "- Higher own_confidence should correspond to more decisive/valuation-driven personas "
+            "and more observations.\n"
+            "- Higher counterpart_confidence should correspond to stronger listing-preference fit "
+            "and a persona that seems confident in judging market value.\n"
+            "- Use the examples as anchors, not as fixed templates.\n"
+        )
+
+        try:
+            response = self._model.sample_text(
+                prompt,
+                json_schema=negotiation_schemas.InitialBuyerPairingPriors.model_json_schema(),
+                max_tokens=180,
+            )
+            priors = negotiation_schemas.InitialBuyerPairingPriors.model_validate_json(response)
+        except ValidationError:
+            return None
+        except Exception:
+            return None
+        return negotiation_schemas.InitialBuyerPairingPriors(
+            own_confidence=max(0.0, min(1.0, priors.own_confidence)),
+            counterpart_confidence=max(
+                0.0,
+                min(1.0, priors.counterpart_confidence),
+            ),
         )
 
     def _build_belief_summary_for_strategy(self) -> str:
@@ -282,11 +349,14 @@ class UncertainBuyer(
             "- Match the provided schema exactly.\n"
         )
 
-        response = self._model.sample_text(prompt, json_schema=UpdateOwnBeliefInfo.model_json_schema())
+        response = self._model.sample_text(
+            prompt,
+            json_schema=negotiation_schemas.UpdateOwnBeliefInfo.model_json_schema(),
+        )
 
         # Ignore malformed model output so one bad response does not crash the turn.
         try:
-            info_update = UpdateOwnBeliefInfo.model_validate_json(response)
+            info_update = negotiation_schemas.UpdateOwnBeliefInfo.model_validate_json(response)
         except ValidationError:
             return 'Own reservation unchanged: model output was invalid.'
         if info_update.reservation_info:
@@ -353,11 +423,14 @@ class UncertainBuyer(
             "- Match the provided schema exactly.\n"
         )
 
-        response = self._model.sample_text(prompt, json_schema=UpdateOpposingBeliefInfo.model_json_schema())
+        response = self._model.sample_text(
+            prompt,
+            json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
+        )
 
         # Ignore malformed model output so one bad response does not crash the turn.
         try:
-            info_update = UpdateOpposingBeliefInfo.model_validate_json(response)
+            info_update = negotiation_schemas.UpdateOpposingBeliefInfo.model_validate_json(response)
         except ValidationError:
             return 'Counterpart reservation unchanged: model output was invalid.'
         if info_update.budget_info:

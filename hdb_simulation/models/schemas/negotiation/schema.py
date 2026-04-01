@@ -43,7 +43,7 @@ Example schema for negotiation_config is:
 - b: int = Field(..., ge=0, description='Represents prior scale for uncertainty in the seller\'s estimate of the buyer\'s reservation price. Higher b means higher uncertainty.')
 '''
 
-
+# Negotiation Hand-off Schemas (for structured outputs of buyer/seller state at the end of negotiation for hand-off to listing agent)
 class NegotiationBuyerHandOffPayload(BaseModel):
     buyer_id: str
     effective_reservation: NormalDistribution
@@ -58,6 +58,60 @@ class NegotiationToListingPayload(BaseModel):
     negotiation_history: NegotiationHistoryRecord
     buyer_state: NegotiationBuyerHandOffPayload
     seller_state: NegotiationSellerHandOffPayload
+
+# Belief Update Schemas (for structured outputs of buyer belief updates during negotiations)
+class UpdateOwnBeliefInfoMetadata(BaseModel):
+    """Metadata for buyer self-belief updates during negotiations."""
+    estimate: float = Field(ge=0.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class UpdateOwnBeliefInfo(BaseModel):
+    """Information used to update the buyer's own reservation belief."""
+    reservation_info: Optional[UpdateOwnBeliefInfoMetadata] = Field(
+        None,
+        description='Information about own reservation value',
+    )
+
+
+class UpdateOpposingBeliefInfoMetadata(BaseModel):
+    """Metadata for counterpart-belief updates during negotiations."""
+    estimate: float = Field(
+        ge=0.0,
+        description="Estimate of the counterpart's reservation value.",
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence level in the estimate of the counterpart's reservation "
+            'value.'
+        ),
+    )
+
+
+class UpdateOpposingBeliefTrustMetadata(BaseModel):
+    """Metadata for trust updates toward the counterpart."""
+    trust_level: float = Field(
+        ge=-1.0,
+        le=1.0,
+        description=(
+            'Signed trust signal in the counterpart based on the new information '
+            '(-1 distrust, 0 neutral, 1 trust)'
+        ),
+    )
+
+
+class UpdateOpposingBeliefInfo(BaseModel):
+    """Information used to update beliefs about the counterpart."""
+    budget_info: Optional[UpdateOpposingBeliefInfoMetadata] = None
+    trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
+
+
+class InitialBuyerPairingPriors(BaseModel):
+    """Initial belief priors to set once a buyer is paired to a real listing."""
+    own_confidence: float = Field(ge=0.0, le=1.0)
+    counterpart_confidence: float = Field(ge=0.0, le=1.0)
 
 
 # Action Schemas
