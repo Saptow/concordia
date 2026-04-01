@@ -40,6 +40,7 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 
 DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
+MAX_BUYER_POOL_REGEN_ATTEMPTS = 5
 
 
 FLAT_TYPE_LABELS = {
@@ -1372,6 +1373,59 @@ def _retain_feasible_buyers(
     return retained
 
 
+def _build_buyer_pools_with_regeneration(
+    flats: list[dict[str, Any]],
+    hedonic_training_flats: list[dict[str, Any]],
+    donors: pd.DataFrame,
+    archetypes: list[dict[str, Any]],
+    *,
+    config: SegmentConfig,
+    rng: random.Random,
+    age_prior: pd.DataFrame,
+    income_prior: pd.DataFrame,
+    distribution_tables: dict[str, pd.DataFrame],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Regenerate broad buyers until retained buyers cover sellers or retries are exhausted."""
+    target_retained_count = len(flats)
+    best_broad_buyers: list[dict[str, Any]] = []
+    best_retained_buyers: list[dict[str, Any]] = []
+
+    for attempt in range(1, MAX_BUYER_POOL_REGEN_ATTEMPTS + 1):
+        broad_buyers = _build_broad_buyers(
+            flats,
+            hedonic_training_flats,
+            donors,
+            config=config,
+            rng=rng,
+            age_prior=age_prior,
+            income_prior=income_prior,
+            distribution_tables=distribution_tables,
+        )
+        retained_buyers = _retain_feasible_buyers(broad_buyers, flats, archetypes)
+        logging.info(
+            "Buyer-pool attempt %s/%s retained %s feasible buyers for %s sellers.",
+            attempt,
+            MAX_BUYER_POOL_REGEN_ATTEMPTS,
+            len(retained_buyers),
+            target_retained_count,
+        )
+
+        if len(retained_buyers) > len(best_retained_buyers):
+            best_broad_buyers = broad_buyers
+            best_retained_buyers = retained_buyers
+
+        if len(retained_buyers) >= target_retained_count:
+            return broad_buyers, retained_buyers
+
+    logging.warning(
+        "Retained buyer pool remained below seller count after %s attempts; using best attempt with %s retained buyers for %s sellers.",
+        MAX_BUYER_POOL_REGEN_ATTEMPTS,
+        len(best_retained_buyers),
+        target_retained_count,
+    )
+    return best_broad_buyers, best_retained_buyers
+
+
 def build_transaction_conditioned_segment(
     config: SegmentConfig,
     model: VLLMLanguageModel | None = None,
@@ -1466,17 +1520,17 @@ def build_transaction_conditioned_segment(
         config=config,
         rng=rng,
     )
-    broad_buyers = _build_broad_buyers(
+    broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
         flats,
         hedonic_training_flats,
         donors,
+        archetypes,
         config=config,
         rng=rng,
         age_prior=age_prior,
         income_prior=income_prior,
         distribution_tables=distribution_tables,
     )
-    retained_buyers = _retain_feasible_buyers(broad_buyers, flats, archetypes)
     if model is not None:
         logging.info(
             "Populating seller motivations and buyer preferences with the configured model."
