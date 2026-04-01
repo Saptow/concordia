@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
-from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
@@ -169,7 +168,7 @@ class UncertainSeller(
 
     def apply_listing_handoff(
         self,
-        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         listing_price = uncertain_helper.coerce_positive_float(
@@ -225,7 +224,7 @@ class UncertainSeller(
 
     def _calibrate_initial_pairing_priors(
         self,
-        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> Optional[InitialSellerPairingPriors]:
         prompt = (
             "# Role\n"

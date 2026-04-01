@@ -4,6 +4,13 @@ from collections.abc import Sequence
 from typing import Annotated, Literal, Union, Any, Optional
 
 from concordia.concordia.prefabs.entity.negotiation.components.uncertain_helper import NormalDistribution
+from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
+from concordia.hdb_simulation.models.schemas.listing.schema import (
+    NegotiationMatch,
+    PortalBuyer,
+    PortalSearchResult,
+    PortalSeller,
+)
 from pydantic import Field, RootModel, BaseModel 
 
 from concordia.hdb_simulation.models.schemas.common import (
@@ -58,6 +65,52 @@ class NegotiationToListingPayload(BaseModel):
     negotiation_history: NegotiationHistoryRecord
     buyer_state: NegotiationBuyerHandOffPayload
     seller_state: NegotiationSellerHandOffPayload
+
+
+class BuyerMarketBeliefState(BaseModel):
+    buyer_id: str
+    base_reservation_price: float = Field(ge=0.0)
+    effective_reservation: NormalDistribution
+    latest_market_feedback: str = 'No market feedback yet.'
+    feedback_history: list[str] = Field(default_factory=list)
+    latest_observed_min_price: float | None = Field(default=None, ge=0.0)
+    latest_observed_avg_price: float | None = Field(default=None, ge=0.0)
+    latest_observed_max_price: float | None = Field(default=None, ge=0.0)
+
+
+class SellerMarketBeliefState(BaseModel):
+    seller_id: str
+    base_reservation_price: float = Field(ge=0.0)
+    effective_reservation: NormalDistribution
+
+
+class ListingBuyerState(PortalBuyer):
+    effective_reservation: NormalDistribution
+    latest_search_results: list[PortalSearchResult] = Field(default_factory=list)
+    latest_market_feedback: str = 'No market feedback yet.'
+
+
+class ListingSellerState(PortalSeller):
+    effective_reservation: NormalDistribution
+    listed: bool
+    current_listing_id: str | None = None
+    current_listing_price: float | None = None
+    open_requests: int = Field(ge=0)
+
+
+class ListingPortalSnapshot(BaseModel):
+    week_number: int = Field(ge=0)
+    buyers: list[ListingBuyerState] = Field(default_factory=list)
+    sellers: list[ListingSellerState] = Field(default_factory=list)
+    matched_pairs: list[NegotiationMatch] = Field(default_factory=list)
+
+
+class ListingNegotiationTransferPayload(BaseModel):
+    match_id: str
+    week_matched: int = Field(ge=1)
+    listing_record: ListingRecord
+    buyer_state: ListingBuyerState
+    seller_state: ListingSellerState
 
 # Belief Update Schemas (for structured outputs of buyer belief updates during negotiations)
 class UpdateOwnBeliefInfoMetadata(BaseModel):

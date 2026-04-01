@@ -16,6 +16,7 @@ from sentence_transformers import SentenceTransformer
 
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
 
 @dataclasses.dataclass
@@ -65,7 +66,7 @@ class ListingPortalRetriever:
             return qdrant_models.Rrf(weights=self._rrf_weights)
         return qdrant_models.Rrf()
 
-    def upsert_listing(self, record: listing_schemas.ListingRecord) -> None:
+    def upsert_listing(self, record: qdrant_schemas.ListingRecord) -> None:
         """Insert or replace a seller listing in the portal index."""
         document = record.to_document()
         embedding = self._embed_dense_text(document)
@@ -74,7 +75,7 @@ class ListingPortalRetriever:
             points=[record.to_qdrant_point(embedding)],
         )
 
-    def update_listing_payload(self, record: listing_schemas.ListingRecord) -> None:
+    def update_listing_payload(self, record: qdrant_schemas.ListingRecord) -> None:
         """Updates stored payload fields without recomputing embeddings."""
         self._client.set_payload(
             collection_name=self._collection_name,
@@ -85,7 +86,7 @@ class ListingPortalRetriever:
     def get_listing_record(
         self,
         seller_id: str,
-    ) -> listing_schemas.ListingRecord | None:
+    ) -> qdrant_schemas.ListingRecord | None:
         """Fetches a seller listing record directly from Qdrant payload."""
         points, _ = self._client.scroll(
             collection_name=self._collection_name,
@@ -97,7 +98,7 @@ class ListingPortalRetriever:
         if not points:
             return None
         payload = points[0].payload or {}
-        return listing_schemas.ListingRecord.from_qdrant_payload(payload)
+        return qdrant_schemas.ListingRecord.from_qdrant_payload(payload)
 
     def deactivate_listing(self, seller_id: str) -> None:
         """Marks a seller listing inactive without re-embedding."""
@@ -151,7 +152,7 @@ class ListingPortalRetriever:
             payload = point.payload or {}
             if not bool(payload.get('active', False)):
                 continue
-            record = listing_schemas.ListingRecord.from_qdrant_payload(payload)
+            record = qdrant_schemas.ListingRecord.from_qdrant_payload(payload)
             listing_price = float(record.listing_price)
             if max_budget is not None and listing_price > float(max_budget):
                 continue
@@ -192,8 +193,8 @@ class ListingPortal:
 
         self.requests_by_seller: dict[str, list[listing_schemas.NegotiationRequest]] = {}
         self.search_results_by_buyer: dict[str, list[listing_schemas.PortalSearchResult]] = {}
-        self.private_buyer_market_states: dict[str, listing_schemas.BuyerMarketBeliefState] = {}
-        self.private_seller_market_states: dict[str, listing_schemas.SellerMarketBeliefState] = {}
+        self.private_buyer_market_states: dict[str, negotiation_schemas.BuyerMarketBeliefState] = {}
+        self.private_seller_market_states: dict[str, negotiation_schemas.SellerMarketBeliefState] = {}
         self.market_feedback_by_buyer: dict[str, str] = {}
         self.matched_pairs: list[listing_schemas.NegotiationMatch] = []
         # Closed participants are temporarily inactive in the portal workflow.
@@ -232,7 +233,7 @@ class ListingPortal:
     def get_listing_record(
         self,
         seller_id: str,
-    ) -> listing_schemas.ListingRecord | None:
+    ) -> qdrant_schemas.ListingRecord | None:
         return self.retriever.get_listing_record(seller_id)
 
     # Buyer-side helpers and actions.
@@ -271,11 +272,11 @@ class ListingPortal:
     def _buyer_market_state(
         self,
         buyer: listing_schemas.PortalBuyer,
-    ) -> listing_schemas.BuyerMarketBeliefState:
+    ) -> negotiation_schemas.BuyerMarketBeliefState:
         state = self.private_buyer_market_states.get(buyer.id)
         if state is None:
             base_reservation_price = float(buyer.budget.max_price)
-            state = listing_schemas.BuyerMarketBeliefState(
+            state = negotiation_schemas.BuyerMarketBeliefState(
                 buyer_id=buyer.id,
                 base_reservation_price=base_reservation_price,
                 effective_reservation=uncertain_helper.NormalDistribution(
@@ -291,11 +292,11 @@ class ListingPortal:
     def _seller_market_state(
         self,
         seller: listing_schemas.PortalSeller,
-    ) -> listing_schemas.SellerMarketBeliefState:
+    ) -> negotiation_schemas.SellerMarketBeliefState:
         state = self.private_seller_market_states.get(seller.id)
         if state is None:
             base_reservation_price = float(seller.expectations.min_price)
-            state = listing_schemas.SellerMarketBeliefState(
+            state = negotiation_schemas.SellerMarketBeliefState(
                 seller_id=seller.id,
                 base_reservation_price=base_reservation_price,
                 effective_reservation=uncertain_helper.NormalDistribution(
@@ -374,7 +375,7 @@ class ListingPortal:
         buyer: listing_schemas.PortalBuyer,
         results: Sequence[listing_schemas.PortalSearchResult],
         feedback: str,
-    ) -> listing_schemas.BuyerMarketBeliefState:
+    ) -> negotiation_schemas.BuyerMarketBeliefState:
         state = self._buyer_market_state(buyer)
         state.latest_market_feedback = feedback
         if not state.feedback_history or state.feedback_history[-1] != feedback:
@@ -586,13 +587,13 @@ class ListingPortal:
             ).items()
         }
         restored.private_buyer_market_states = {
-            buyer_id: listing_schemas.BuyerMarketBeliefState.model_validate(payload)
+            buyer_id: negotiation_schemas.BuyerMarketBeliefState.model_validate(payload)
             for buyer_id, payload in dict(
                 state.get('private_buyer_market_states', {})
             ).items()
         }
         restored.private_seller_market_states = {
-            seller_id: listing_schemas.SellerMarketBeliefState.model_validate(payload)
+            seller_id: negotiation_schemas.SellerMarketBeliefState.model_validate(payload)
             for seller_id, payload in dict(
                 state.get('private_seller_market_states', {})
             ).items()

@@ -5,12 +5,10 @@ from __future__ import annotations
 from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
 from pydantic import BaseModel, Field
 
-from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.hdb_simulation.models.schemas.common import (
     BaseBuyer,
     BaseSeller,
     NegotiationHistoryRecord,
-    RoleType,
 )
 
 class PortalBuyer(BaseBuyer):
@@ -27,23 +25,6 @@ class PortalSeller(BaseSeller):
 
 class PortalSearchResult(ListingRecord):
     score: float = Field(ge=0.0)
-    
-
-class BuyerMarketBeliefState(BaseModel):
-    buyer_id: str
-    base_reservation_price: float = Field(ge=0.0)
-    effective_reservation: uncertain_helper.NormalDistribution
-    latest_market_feedback: str = 'No market feedback yet.'
-    feedback_history: list[str] = Field(default_factory=list)
-    latest_observed_min_price: float | None = Field(default=None, ge=0.0)
-    latest_observed_avg_price: float | None = Field(default=None, ge=0.0)
-    latest_observed_max_price: float | None = Field(default=None, ge=0.0)
-
-
-class SellerMarketBeliefState(BaseModel):
-    seller_id: str
-    base_reservation_price: float = Field(ge=0.0)
-    effective_reservation: uncertain_helper.NormalDistribution
 
 
 class ListingSchedulerSnapshot(BaseModel):
@@ -53,26 +34,6 @@ class ListingSchedulerSnapshot(BaseModel):
     closed_player_count: int = Field(ge=0)
     open_player_count: int = Field(ge=0)
     max_rounds: int = Field(ge=0)
-
-
-class ListingBuyerState(PortalBuyer):
-    effective_reservation: uncertain_helper.NormalDistribution
-    latest_search_results: list[PortalSearchResult] = Field(default_factory=list)
-    latest_market_feedback: str = 'No market feedback yet.'
-
-class ListingSellerState(PortalSeller):
-    effective_reservation: uncertain_helper.NormalDistribution
-    listed: bool
-    current_listing_id: str | None = None
-    current_listing_price: float | None = None
-    open_requests: int = Field(ge=0)
-
-
-class ListingPortalSnapshot(BaseModel):
-    week_number: int = Field(ge=0)
-    buyers: list[ListingBuyerState] = Field(default_factory=list)
-    sellers: list[ListingSellerState] = Field(default_factory=list)
-    matched_pairs: list['NegotiationMatch'] = Field(default_factory=list)
 
 
 class NegotiationRequest(BaseModel):
@@ -95,14 +56,6 @@ class NegotiationMatch(BaseModel):
     listing_id: str
     week_matched: int = Field(ge=1)
 
-
-class ListingNegotiationTransferPayload(BaseModel):
-    match_id: str
-    week_matched: int = Field(ge=1)
-    listing_record: ListingRecord
-    buyer_state: ListingBuyerState
-    seller_state: ListingSellerState
-
 class ListingWeeklyBatchOutcome(BaseModel):
     week_number: int = Field(ge=1)
     active_player_names: list[str] = Field(default_factory=list)
@@ -111,6 +64,3 @@ class ListingWeeklyBatchOutcome(BaseModel):
     sellers_reviewed: list[str] = Field(default_factory=list)
     matched_pairs: list[NegotiationMatch] = Field(default_factory=list)
     closed_player_names: list[str] = Field(default_factory=list)
-
-
-ListingPortalSnapshot.model_rebuild()

@@ -9,7 +9,6 @@ from absl import logging
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
-from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation import uncertain_negotiator
 from concordia.prefabs.game_master.negotiation.components import (
@@ -231,14 +230,14 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
   def _parse_listing_transfer_payload(
       self,
-      pair_payload: Mapping[str, Any] | listing_schemas.ListingNegotiationTransferPayload,
-  ) -> listing_schemas.ListingNegotiationTransferPayload | None:
-    if isinstance(pair_payload, listing_schemas.ListingNegotiationTransferPayload):
+      pair_payload: Mapping[str, Any] | negotiation_schemas.ListingNegotiationTransferPayload,
+  ) -> negotiation_schemas.ListingNegotiationTransferPayload | None:
+    if isinstance(pair_payload, negotiation_schemas.ListingNegotiationTransferPayload):
       return pair_payload
     if not isinstance(pair_payload, Mapping):
       return None
     try:
-      return listing_schemas.ListingNegotiationTransferPayload.model_validate(
+      return negotiation_schemas.ListingNegotiationTransferPayload.model_validate(
           pair_payload
       )
     except ValidationError as error:
@@ -247,7 +246,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
   def _apply_listing_transfer_payload(
       self,
-      pair_payload: listing_schemas.ListingNegotiationTransferPayload,
+      pair_payload: negotiation_schemas.ListingNegotiationTransferPayload,
       *,
       buyer_id: str,
       seller_id: str,
@@ -282,7 +281,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
   def _bind_entities_for_pairs(
       self,
       new_negotiation_pairs: Sequence[
-          Mapping[str, Any] | listing_schemas.ListingNegotiationTransferPayload
+          Mapping[str, Any] | negotiation_schemas.ListingNegotiationTransferPayload
       ],
   ) -> list[tuple[str, str]]:
     """Binds both participants for each valid negotiation pair."""

@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
-from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
@@ -153,7 +152,7 @@ class UncertainBuyer(
 
     def apply_listing_handoff(
         self,
-        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
         buyer_state = listing_payload.buyer_state
 
@@ -213,7 +212,7 @@ class UncertainBuyer(
 
     def _calibrate_initial_pairing_priors(
         self,
-        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> Optional[negotiation_schemas.InitialBuyerPairingPriors]:
         listing_record = listing_payload.listing_record
         buyer_state = listing_payload.buyer_state

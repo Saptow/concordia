@@ -322,7 +322,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             match.match_id,
         )
         continue
-      payload = listing_schemas.ListingNegotiationTransferPayload(
+      payload = negotiation_schemas.ListingNegotiationTransferPayload(
           match_id=match.match_id,
           week_matched=match.week_matched,
           listing_record=listing_record,
@@ -448,12 +448,12 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._last_outcome = outcome
     return outcome
 
-  def _buyer_state(self, player_id: str) -> listing_schemas.ListingBuyerState:
+  def _buyer_state(self, player_id: str) -> negotiation_schemas.ListingBuyerState:
     """Builds a runtime listing snapshot for one buyer."""
     buyer = self._buyers[player_id]
     portal = self._ensure_portal()
     market_state = portal._buyer_market_state(buyer)
-    return listing_schemas.ListingBuyerState(
+    return negotiation_schemas.ListingBuyerState(
         id=player_id,
         name=buyer.name,
         role=buyer.role,
@@ -471,14 +471,14 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         ),
     )
 
-  def _seller_state(self, player_id: str) -> listing_schemas.ListingSellerState:
+  def _seller_state(self, player_id: str) -> negotiation_schemas.ListingSellerState:
     """Builds a runtime listing snapshot for one seller."""
     seller = self._sellers[player_id]
     portal = self._ensure_portal()
     market_state = portal._seller_market_state(seller)
     listing_id = portal.listing_id_for_seller(player_id)
     listing = portal.get_listing_record(player_id)
-    return listing_schemas.ListingSellerState(
+    return negotiation_schemas.ListingSellerState(
         id=player_id,
         name=seller.name,
         role=seller.role,
@@ -498,12 +498,12 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
   def _make_pre_act_value(self) -> str:
     """Returns a compact JSON snapshot for GM inspection and logging."""
     if self._portal is None:
-      snapshot = listing_schemas.ListingPortalSnapshot(
+      snapshot = negotiation_schemas.ListingPortalSnapshot(
           week_number=max(1, self._last_run_week or 1),
       )
       return snapshot.model_dump_json()
 
-    snapshot = listing_schemas.ListingPortalSnapshot(
+    snapshot = negotiation_schemas.ListingPortalSnapshot(
         week_number=max(1, self._last_run_week or 1),
         buyers=[
             self._buyer_state(buyer_id)

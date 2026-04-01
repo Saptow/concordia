@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
-from concordia.hdb_simulation.models.schemas import listing as listing_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.prefabs.entity.negotiation.components.uncertain_buyer import UncertainBuyer
 from concordia.prefabs.entity.negotiation.components.uncertain_seller import UncertainSeller
@@ -165,7 +165,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
     def apply_listing_handoff(
         self,
-        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
         participant_state = (
             listing_payload.buyer_state

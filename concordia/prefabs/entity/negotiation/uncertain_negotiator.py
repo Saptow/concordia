@@ -10,7 +10,6 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
 from concordia.hdb_simulation.models.schemas import common as common_schemas
-from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import (
     uncertain_buyer,
@@ -406,7 +405,7 @@ class Entity(prefab_lib.Prefab):
 
 def update_agent_from_listing(
     agent: entity_agent_with_logging.EntityAgentWithLogging,
-    listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+    listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
 ) -> None:
     for component_name in (
         'NegotiationInstructions',

@@ -6,7 +6,7 @@ from typing import Optional, Any
 
 from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation.models.schemas import common as common_schemas
-from concordia.hdb_simulation.models.schemas import listing as listing_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.typing import entity_component
 
@@ -168,7 +168,7 @@ class HDBNegotiationInstructions(action_spec_ignored.ActionSpecIgnored):
 
     def apply_listing_handoff(
         self,
-        listing_payload: listing_schemas.ListingNegotiationTransferPayload,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         self._base_instructions = self._generate_base_instructions()
