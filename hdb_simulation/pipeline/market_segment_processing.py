@@ -39,7 +39,7 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 
 
 DEFAULT_LLM_RETRIES = 3
-MAX_REACHABLE_MARKET_SAMPLE_FLATS = 50
+MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 
 
 FLAT_TYPE_LABELS = {
