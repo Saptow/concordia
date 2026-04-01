@@ -533,6 +533,35 @@ def _sample_flats_uniformly(
     return [flats[index] for index in sampled_indices]
 
 
+def _sample_indices_uniformly(total_count: int, cap: int) -> list[int]:
+    if cap <= 0 or total_count <= 0:
+        return []
+    if total_count <= cap:
+        return list(range(total_count))
+
+    step = (total_count - 1) / float(cap - 1) if cap > 1 else 0.0
+    sampled_indices: list[int] = []
+    seen_indices: set[int] = set()
+    for position in range(cap):
+        candidate_index = int(round(position * step)) if cap > 1 else 0
+        if candidate_index in seen_indices:
+            continue
+        sampled_indices.append(candidate_index)
+        seen_indices.add(candidate_index)
+
+    if len(sampled_indices) < cap:
+        for candidate_index in range(total_count):
+            if candidate_index in seen_indices:
+                continue
+            sampled_indices.append(candidate_index)
+            seen_indices.add(candidate_index)
+            if len(sampled_indices) >= cap:
+                break
+
+    sampled_indices.sort()
+    return sampled_indices
+
+
 def _build_market_bucket_summary(
     flats: list[dict[str, Any]],
     *,
@@ -738,6 +767,26 @@ def _load_transactions(config: SegmentConfig) -> pd.DataFrame:
             f"No successful resale rows found for town={config.town!r} year={config.year}."
         )
     return filtered.reset_index(drop=True)
+
+
+def _restrain_transactions(
+    transactions: pd.DataFrame,
+    *,
+    restrained_seller_count: int | None,
+) -> pd.DataFrame:
+    """Uniformly downsample transactions when a seller cap is configured."""
+    if restrained_seller_count is None:
+        return transactions.reset_index(drop=True)
+    if restrained_seller_count <= 0:
+        raise ValueError("restrained_seller_count must be positive when provided.")
+    if len(transactions) <= restrained_seller_count:
+        return transactions.reset_index(drop=True)
+
+    selected_indices = _sample_indices_uniformly(
+        total_count=len(transactions),
+        cap=restrained_seller_count,
+    )
+    return transactions.iloc[selected_indices].copy().reset_index(drop=True)
 
 
 def _build_hedonic_training_flats(
@@ -1397,6 +1446,16 @@ def build_transaction_conditioned_segment(
         len(hedonic_training_flats),
         window_start,
     )
+    transactions = _restrain_transactions(
+        transactions,
+        restrained_seller_count=config.restrained_seller_count,
+    )
+    if config.restrained_seller_count is not None:
+        logging.info(
+            "Restrained seller pool to %s transaction(s); buyer pool multiplier remains %s.",
+            len(transactions),
+            config.buyer_pool_multiplier,
+        )
     flats = _build_flat_universe(transactions, town_transactions, config)
     sellers = _build_sellers(
         flats,
