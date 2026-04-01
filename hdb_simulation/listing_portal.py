@@ -16,16 +16,7 @@ from sentence_transformers import SentenceTransformer
 
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
-from concordia.hdb_simulation.models.schemas.common import Flat
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
-
-
-def make_qdrant_client(db_path: str) -> QdrantClient:
-    target = str(db_path).strip() or qdrant_schemas.DEFAULT_DB_PATH
-    if target == ':memory:':
-        return QdrantClient(location=':memory:')
-    return QdrantClient(path=target)
-
 
 @dataclasses.dataclass
 class SearchAndRequestResult:
@@ -52,7 +43,7 @@ class ListingPortalRetriever:
         db_path: str = qdrant_schemas.DEFAULT_DB_PATH,
     ):
         if client is None:
-            client = make_qdrant_client(db_path)
+            client = qdrant_schemas.make_qdrant_client(db_path)
         
         self._dense_embedder=dense_embedding_model
         self._collection_name = collection_name
@@ -74,17 +65,6 @@ class ListingPortalRetriever:
             return qdrant_models.Rrf(weights=self._rrf_weights)
         return qdrant_models.Rrf()
 
-    @staticmethod
-    def _seller_filter(seller_id: str) -> qdrant_models.Filter:
-        return qdrant_models.Filter(
-            must=[
-                qdrant_models.FieldCondition(
-                    key='seller_id',
-                    match=qdrant_models.MatchValue(value=seller_id),
-                ),
-            ],
-        )
-
     def upsert_listing(self, record: listing_schemas.ListingRecord) -> None:
         """Insert or replace a seller listing in the portal index."""
         document = record.to_document()
@@ -99,7 +79,7 @@ class ListingPortalRetriever:
         self._client.set_payload(
             collection_name=self._collection_name,
             payload=record.qdrant_payload(),
-            points=self._seller_filter(record.seller_id),
+            points=qdrant_schemas.seller_filter(record.seller_id),
         )
 
     def get_listing_record(
@@ -109,7 +89,7 @@ class ListingPortalRetriever:
         """Fetches a seller listing record directly from Qdrant payload."""
         points, _ = self._client.scroll(
             collection_name=self._collection_name,
-            scroll_filter=self._seller_filter(seller_id),
+            scroll_filter=qdrant_schemas.seller_filter(seller_id),
             with_payload=True,
             with_vectors=False,
             limit=1,
@@ -117,24 +97,14 @@ class ListingPortalRetriever:
         if not points:
             return None
         payload = points[0].payload or {}
-        flat_metadata = dict(payload.get('flat_metadata', {}))
-        return listing_schemas.ListingRecord(
-            listing_id=str(payload['listing_id']),
-            seller_id=str(payload['seller_id']),
-            seller_name=str(payload['seller_name']),
-            listing_price=float(payload['listing_price']),
-            listing_summary=str(payload['listing_summary']),
-            flat=Flat.model_validate(flat_metadata),
-            listed_week=int(payload['listed_week']),
-            active=bool(payload.get('active', False)),
-        )
+        return listing_schemas.ListingRecord.from_qdrant_payload(payload)
 
     def deactivate_listing(self, seller_id: str) -> None:
         """Marks a seller listing inactive without re-embedding."""
         self._client.set_payload(
             collection_name=self._collection_name,
             payload={'active': False},
-            points=self._seller_filter(seller_id),
+            points=qdrant_schemas.seller_filter(seller_id),
         )
 
     def search(
@@ -181,17 +151,7 @@ class ListingPortalRetriever:
             payload = point.payload or {}
             if not bool(payload.get('active', False)):
                 continue
-            flat_metadata = dict(payload.get('flat_metadata', {}))
-            record = listing_schemas.ListingRecord(
-                listing_id=str(payload['listing_id']),
-                seller_id=str(payload['seller_id']),
-                seller_name=str(payload['seller_name']),
-                listing_price=float(payload['listing_price']),
-                listing_summary=str(payload['listing_summary']),
-                flat=Flat.model_validate(flat_metadata),
-                listed_week=int(payload['listed_week']),
-                active=bool(payload.get('active', False)),
-            )
+            record = listing_schemas.ListingRecord.from_qdrant_payload(payload)
             listing_price = float(record.listing_price)
             if max_budget is not None and listing_price > float(max_budget):
                 continue
@@ -243,7 +203,7 @@ class ListingPortal:
 
     @staticmethod
     def listing_id_for_seller(seller_id: str) -> str:
-        return f'listing::{seller_id}'
+        return qdrant_schemas.listing_id_for_seller(seller_id)
 
     @staticmethod
     def _request_id(buyer_id: str, listing_id: str, week: int) -> str:

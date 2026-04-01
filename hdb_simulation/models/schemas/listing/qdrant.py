@@ -6,7 +6,7 @@ import uuid
 
 from configs import QdrantConfig
 from pydantic import BaseModel
-from qdrant_client import models
+from qdrant_client import QdrantClient, models
 
 from concordia.hdb_simulation.models.schemas.common import Flat
 
@@ -15,6 +15,28 @@ DENSE_EMBEDDINGS_KEY = QdrantConfig.DENSE_EMBEDDINGS_KEY
 SPARSE_EMBEDDINGS_KEY = QdrantConfig.SPARSE_EMBEDDINGS_KEY
 DEFAULT_COLLECTION_NAME = QdrantConfig.DEFAULT_COLLECTION_NAME
 DEFAULT_DB_PATH = QdrantConfig.DEFAULT_DB_PATH
+
+# Shared Qdrant helper functions and schemas for listing indexing and search
+def make_qdrant_client(db_path: str) -> QdrantClient:
+    target = str(db_path).strip() or DEFAULT_DB_PATH
+    if target == ':memory:':
+        return QdrantClient(location=':memory:')
+    return QdrantClient(path=target)
+
+
+def listing_id_for_seller(seller_id: str) -> str:
+    return f'listing::{seller_id}'
+
+
+def seller_filter(seller_id: str) -> models.Filter:
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key='seller_id',
+                match=models.MatchValue(value=seller_id),
+            ),
+        ],
+    )
 
 
 class ListingRecord(BaseModel):
@@ -39,7 +61,6 @@ class ListingRecord(BaseModel):
         return metadata
 
     def qdrant_payload(self) -> dict[str, Any]:
-      
         return {
             'listing_id': self.listing_id,
             'seller_id': self.seller_id,
@@ -55,14 +76,32 @@ class ListingRecord(BaseModel):
         """Return a deterministic UUID string accepted by Qdrant."""
         return str(uuid.uuid5(uuid.NAMESPACE_URL, self.listing_id))
 
+    @classmethod
+    def from_qdrant_payload(cls, payload: dict[str, Any]) -> "ListingRecord":
+        flat_metadata = dict(payload.get('flat_metadata', {}))
+        return cls(
+            listing_id=str(payload['listing_id']),
+            seller_id=str(payload['seller_id']),
+            seller_name=str(payload['seller_name']),
+            listing_price=float(payload['listing_price']),
+            listing_summary=str(payload['listing_summary']),
+            flat=Flat.model_validate(flat_metadata),
+            listed_week=int(payload['listed_week']),
+            active=bool(payload.get('active', False)),
+        )
+
     def to_document(self) -> str:
-        '''
+        """
         Render the listing record into a string for embedding and indexing.
-        '''   
-        lines=[] # no need to include prices
+        """
+        lines = []  # no need to include prices
         for key, value in self.flat_metadata().items():
             if isinstance(value, list):
-                rendered = ', '.join(str(item) for item in value) if value else 'None listed'
+                rendered = (
+                    ', '.join(str(item) for item in value)
+                    if value
+                    else 'None listed'
+                )
             elif value is None:
                 rendered = 'None'
             else:

@@ -6,7 +6,6 @@ from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
 from configs import QdrantConfig
-from concordia.hdb_simulation import listing_portal as listing_portal_lib
 from concordia.hdb_simulation.models.schemas.common import (
     Amenity,
     AmenityType,
@@ -216,7 +215,7 @@ def build_listing_record(
   )
 
   return qdrant_schemas.ListingRecord(
-      listing_id=listing_portal_lib.ListingPortal.listing_id_for_seller(seller_id),
+      listing_id=qdrant_schemas.listing_id_for_seller(seller_id),
       seller_id=seller_id,
       seller_name=seller_name,
       listing_price=listing_price,
@@ -334,7 +333,7 @@ def index_market_segment_flats(
       )
       for record, dense_vector in zip(records, dense_vectors, strict=True)
   ]
-  client = client or listing_portal_lib.make_qdrant_client(db_path)
+  client = client or qdrant_schemas.make_qdrant_client(db_path)
   ensure_listing_collection(
       client=client,
       dense_embedder=dense_embedder,
@@ -346,7 +345,7 @@ def index_market_segment_flats(
   )
   persist_target = str(persist_db_path or '').strip()
   if persist_target and persist_target != str(db_path).strip():
-      persistent_client = listing_portal_lib.make_qdrant_client(persist_target)
+      persistent_client = qdrant_schemas.make_qdrant_client(persist_target)
       if persistent_client.collection_exists(collection_name):
           persistent_client.delete_collection(collection_name)
       ensure_listing_collection(
