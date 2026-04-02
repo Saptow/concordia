@@ -130,13 +130,11 @@ class ListingPortalRetriever:
                     ),
                     using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
                     limit=2 * limit,
-                    weight=self._rrf_weights[0],
                 ),
                 qdrant_models.Prefetch(
                     query=dense_query,
                     using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
                     limit=2 * limit,
-                    weight=self._rrf_weights[1],
                 ),
             ],
             query=qdrant_models.RrfQuery(

@@ -140,7 +140,7 @@ class NegotiationScheduler:
       negotiation_pairs: Sequence[Sequence[str]] | None,
   ) -> list[PairIds]:
     """Builds the initial pair queue, defaulting to adjacent buyer/seller ids."""
-    if negotiation_pairs:
+    if negotiation_pairs is not None:
       pairs: list[PairIds] = []
       for pair in negotiation_pairs:
         parsed_pair = self._parse_pair(pair)
@@ -148,7 +148,7 @@ class NegotiationScheduler:
           logging.warning('Skipping invalid negotiation pair %s', pair)
           continue
         pairs.append(parsed_pair)
-      if not pairs:
+      if negotiation_pairs and not pairs:
         logging.warning('No valid explicit negotiation pairs were provided.')
       return pairs
 

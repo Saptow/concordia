@@ -238,6 +238,15 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return pair_payload
     if not isinstance(pair_payload, Mapping):
       return None
+    transfer_payload_keys = {
+        'match_id',
+        'week_matched',
+        'listing_record',
+        'buyer_state',
+        'seller_state',
+    }
+    if not transfer_payload_keys.issubset(pair_payload.keys()):
+      return None
     try:
       return negotiation_schemas.ListingNegotiationTransferPayload.model_validate(
           pair_payload
