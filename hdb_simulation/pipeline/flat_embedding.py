@@ -7,6 +7,7 @@ from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
 from configs import QdrantConfig
+from concordia.hdb_simulation.name_utils import resolve_profile_name
 from concordia.hdb_simulation.models.schemas.common import (
     Amenity,
     AmenityType,
@@ -160,11 +161,7 @@ def build_listing_record(
   seller_id = str(
       seller_record.get('seller_id') or f"seller::{flat_payload['flat_id']}"
   ).strip()
-  seller_name = str(
-      seller_record.get('seller_name')
-      or seller_record.get('name')
-      or seller_id
-  ).strip() or seller_id
+  seller_name = resolve_profile_name(seller_record, fallback_name=seller_id)
   extension_of_stay = bool(
       (seller_record.get('flat') or {}).get('extension_of_stay', False)
   )

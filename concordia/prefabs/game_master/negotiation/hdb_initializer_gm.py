@@ -13,6 +13,7 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.components import game_master as gm_components
 from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
+from concordia.hdb_simulation.name_utils import resolve_profile_name
 from concordia.language_model import language_model
 from concordia.typing import entity_component
 from concordia.typing import prefab as prefab_lib
@@ -27,7 +28,10 @@ def build_market_profiles(
   buyer_profiles: dict[str, dict[str, object]] = {}
   for buyer in bundle.get('buyers_retained', ()):
     buyer_id = str(buyer['buyer_id'])
-    buyer_name = f"{town} Buyer {buyer_id.rsplit('_', 1)[-1]}"
+    buyer_name = resolve_profile_name(
+        buyer,
+        fallback_name=f"{town} Buyer {buyer_id.rsplit('_', 1)[-1]}",
+    )
     description_parts = [
         (
             f"{buyer['age']}-year-old {buyer['occupation_category']} looking "
@@ -50,7 +54,10 @@ def build_market_profiles(
   seller_profiles: dict[str, dict[str, object]] = {}
   for seller in bundle.get('sellers', ()):
     seller_id = str(seller['seller_id'])
-    seller_name = f"{town} Seller {seller_id.rsplit('_', 1)[-1]}"
+    seller_name = resolve_profile_name(
+        seller,
+        fallback_name=f"{town} Seller {seller_id.rsplit('_', 1)[-1]}",
+    )
     flat = seller['flat']
     motivation_summary = str(
         seller.get('seller_motivations', {}).get('motivation_summary', '')

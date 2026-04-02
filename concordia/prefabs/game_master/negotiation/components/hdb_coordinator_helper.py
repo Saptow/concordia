@@ -128,6 +128,14 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     for raw_pair in new_negotiation_pairs:
       buyer_id = str(raw_pair.get('buyer_id', '')).strip()
       seller_id = str(raw_pair.get('seller_id', '')).strip()
+      if not buyer_id:
+        buyer_state = raw_pair.get('buyer_state', {})
+        if isinstance(buyer_state, Mapping):
+          buyer_id = str(buyer_state.get('id', '')).strip()
+      if not seller_id:
+        seller_state = raw_pair.get('seller_state', {})
+        if isinstance(seller_state, Mapping):
+          seller_id = str(seller_state.get('id', '')).strip()
       if not buyer_id or not seller_id:
         logging.warning('Skipping malformed negotiation transfer pair: %s', raw_pair)
         continue
