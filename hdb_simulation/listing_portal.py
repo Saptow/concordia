@@ -10,6 +10,7 @@ import re
 import numpy as np
 from typing import Any
 from absl import logging
+from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models as qdrant_models
 
 from sentence_transformers import SentenceTransformer
@@ -40,13 +41,15 @@ class ListingPortalRetriever:
         self,
         client: QdrantClient | None = None,
         dense_embedding_model: SentenceTransformer | None = None,
+        sparse_embedding_model: SparseTextEmbedding | None = None,
         collection_name: str = qdrant_schemas.DEFAULT_COLLECTION_NAME,
         db_path: str = qdrant_schemas.DEFAULT_DB_PATH,
     ):
         if client is None:
             client = qdrant_schemas.make_qdrant_client(db_path)
         
-        self._dense_embedder=dense_embedding_model
+        self._dense_embedder = dense_embedding_model
+        self._sparse_embedder = sparse_embedding_model
         self._collection_name = collection_name
         self._client = client
         self._rrf_weights = [1.0, 1.5]  # Relative Weights for BM25 and dense retrieval in RRF scoring
@@ -55,9 +58,18 @@ class ListingPortalRetriever:
             logging.exception(f"Qdrant collection '{collection_name}' does not exist. Please create it before using the retriever.")
 
     def _embed_dense_text(self, text: str) -> np.ndarray:
-            if self._dense_embedder is None:
-                logging.exception("Attempted to embed text but no dense embedding model was provided.")
-            return self._dense_embedder.encode(text)
+        if self._dense_embedder is None:
+            logging.exception("Attempted to embed text but no dense embedding model was provided.")
+        return self._dense_embedder.encode(text)
+
+    def _embed_sparse_text(self, text: str) -> Any | None:
+        if self._sparse_embedder is None:
+            return None
+        embeddings = list(self._sparse_embedder.embed([text]))
+        if not embeddings:
+            logging.warning('Sparse embedder returned no embedding for query text.')
+            return None
+        return embeddings[0]
 
     def _rrf_ranker(self) -> qdrant_models.Rrf:
         """Build an RRF ranker compatible with the installed qdrant-client version."""
@@ -70,9 +82,10 @@ class ListingPortalRetriever:
         """Insert or replace a seller listing in the portal index."""
         document = record.to_document()
         embedding = self._embed_dense_text(document)
+        sparse_embedding = self._embed_sparse_text(document)
         self._client.upsert(
             collection_name=self._collection_name,
-            points=[record.to_qdrant_point(embedding)],
+            points=[record.to_qdrant_point(embedding, sparse_embedding=sparse_embedding)],
         )
 
     def update_listing_payload(self, record: qdrant_schemas.ListingRecord) -> None:
@@ -119,31 +132,38 @@ class ListingPortalRetriever:
         Search active listings using Qdrant vector retrieval plus local BM25.
         This method assumes that vector indices for both sparse and dense embeddings are implemented already.
         """
-        dense_query=self._embed_dense_text(query)
-        results = self._client.query_points(
-            collection_name=self._collection_name,
-            prefetch=[
-                qdrant_models.Prefetch(
-                    query=qdrant_models.Document(
-                        text=query,
-                        model="Qdrant/bm25",
+        dense_query = self._embed_dense_text(query)
+        sparse_query = self._embed_sparse_text(query)
+        search_limit = max(10, 3 * limit)
+        if sparse_query is None:
+            results = self._client.query_points(
+                collection_name=self._collection_name,
+                query=dense_query,
+                using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                limit=search_limit,
+                with_payload=True,
+            )
+        else:
+            results = self._client.query_points(
+                collection_name=self._collection_name,
+                prefetch=[
+                    qdrant_models.Prefetch(
+                        query=qdrant_schemas.sparse_embedding_to_vector(sparse_query),
+                        using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
+                        limit=2 * limit,
                     ),
-                    using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
-                    limit=2 * limit,
+                    qdrant_models.Prefetch(
+                        query=dense_query,
+                        using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                        limit=2 * limit,
+                    ),
+                ],
+                query=qdrant_models.RrfQuery(
+                    rrf=self._rrf_ranker()
                 ),
-                qdrant_models.Prefetch(
-                    query=dense_query,
-                    using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
-                    limit=2 * limit,
-                ),
-            ],
-            query=qdrant_models.RrfQuery(
-                rrf=self._rrf_ranker()
-            ),
-            limit=max(10, 3 * limit),
-            with_payload=True,
-        )
-
+                limit=search_limit,
+                with_payload=True,
+            )
 
         filtered_results: list[listing_schemas.PortalSearchResult] = []
         for point in results.points:

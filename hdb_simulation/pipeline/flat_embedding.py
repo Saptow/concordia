@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
@@ -271,6 +272,7 @@ def index_market_segment_flats(
     flat_data_path: str | Path | None = None,
     manifest_path: str | Path | None = None,
     dense_embedder: SentenceTransformer,
+    sparse_embedder: SparseTextEmbedding | None = None,
     client: QdrantClient | None = None,
     seller_data_path: str | Path | None = None,
     collection_name: str = QdrantConfig.DEFAULT_COLLECTION_NAME,
@@ -323,15 +325,24 @@ def index_market_segment_flats(
       for flat_row in flat_rows
   ]
 
-  dense_vectors = dense_embedder.encode(
-      [record.listing_summary for record in records],
-      show_progress_bar=False,
+  documents = [record.to_document() for record in records]
+  dense_vectors = dense_embedder.encode(documents, show_progress_bar=False)
+  sparse_vectors = (
+      list(sparse_embedder.embed(documents))
+      if sparse_embedder is not None
+      else [None] * len(records)
   )
   points = [
       record.to_qdrant_point(
-          dense_vector.tolist() if hasattr(dense_vector, 'tolist') else dense_vector
+          dense_vector.tolist() if hasattr(dense_vector, 'tolist') else dense_vector,
+          sparse_embedding=sparse_vector,
       )
-      for record, dense_vector in zip(records, dense_vectors, strict=True)
+      for record, dense_vector, sparse_vector in zip(
+          records,
+          dense_vectors,
+          sparse_vectors,
+          strict=True,
+      )
   ]
   client = client or qdrant_schemas.make_qdrant_client(db_path)
   ensure_listing_collection(

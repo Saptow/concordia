@@ -197,6 +197,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       seller_profiles: Mapping[str, Mapping[str, Any]] | str = (),
       client: Any | None = None,
       dense_embedding_model: Any | None = None,
+      sparse_embedding_model: Any | None = None,
       collection_name: str | None = None,
       db_path: str | None = None,
       random_seed: int = 0,
@@ -208,6 +209,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._enabled = bool(enabled)
     self._client = client
     self._dense_embedding_model = dense_embedding_model
+    self._sparse_embedding_model = sparse_embedding_model
     self._collection_name = str(collection_name).strip() or qdrant_schemas.DEFAULT_COLLECTION_NAME
     self._db_path = str(db_path).strip() or qdrant_schemas.DEFAULT_DB_PATH
     self._random_seed = random_seed
@@ -251,10 +253,15 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     """Lazily constructs or restores the backing `ListingPortal` instance."""
     if self._portal is None:
       retriever = None
-      if self._client is not None or self._dense_embedding_model is not None:
+      if (
+          self._client is not None
+          or self._dense_embedding_model is not None
+          or self._sparse_embedding_model is not None
+      ):
         retriever = listing_portal_lib.ListingPortalRetriever(
             client=self._client,
             dense_embedding_model=self._dense_embedding_model,
+            sparse_embedding_model=self._sparse_embedding_model,
             collection_name=(
                 self._collection_name
                 or listing_portal_lib.qdrant_schemas.DEFAULT_COLLECTION_NAME

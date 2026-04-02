@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 from absl import logging
+from fastembed import SparseTextEmbedding
 from sentence_transformers import SentenceTransformer
 
 from configs import DenseEmbedderConfig
 from configs import LLMConfig
+from configs import SparseEmbedderConfig
 from concordia.concordia.contrib.language_models.vllm.vllm_model import (
     VLLMLanguageModel,
 )
@@ -45,4 +48,31 @@ def initialise_dense_embedding_model() -> SentenceTransformer:
         local_files_only=DenseEmbedderConfig.LOCAL_FILES_ONLY,
     )
     logging.info('Dense embedder initialised.')
+    return model
+
+
+def _resolve_hf_hub_cache() -> str | None:
+    cache_dir = os.environ.get('HF_HUB_CACHE')
+    if cache_dir:
+        return cache_dir
+    hf_home = os.environ.get('HF_HOME')
+    if hf_home:
+        return os.path.join(hf_home, 'hub')
+    return None
+
+
+def initialise_sparse_embedding_model() -> SparseTextEmbedding:
+    """Initialise the sparse BM25 embedder used by the listing portal."""
+    cache_dir = _resolve_hf_hub_cache()
+    model_kwargs = {
+        'model_name': SparseEmbedderConfig.MODEL_NAME,
+        'local_files_only': SparseEmbedderConfig.LOCAL_FILES_ONLY,
+    }
+    if cache_dir:
+        model_kwargs['cache_dir'] = cache_dir
+        logging.info('Initialising sparse embedder from %s.', cache_dir)
+    else:
+        logging.info('Initialising sparse embedder without explicit HF_HUB_CACHE.')
+    model = SparseTextEmbedding(**model_kwargs)
+    logging.info('Sparse embedder initialised.')
     return model

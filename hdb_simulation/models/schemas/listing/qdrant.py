@@ -39,6 +39,13 @@ def seller_filter(seller_id: str) -> models.Filter:
     )
 
 
+def sparse_embedding_to_vector(sparse_embedding: Any) -> models.SparseVector:
+    return models.SparseVector(
+        indices=[int(index) for index in sparse_embedding.indices],
+        values=[float(value) for value in sparse_embedding.values],
+    )
+
+
 class ListingRecord(BaseModel):
     """Canonical listing metadata record stored in the portal index."""
 
@@ -113,10 +120,18 @@ class ListingRecord(BaseModel):
     def to_qdrant_point(
         self,
         embedding: Sequence[float],
+        sparse_embedding: Any | None = None,
     ) -> models.PointStruct:
+        vectors: dict[str, Any] = {
+            DENSE_EMBEDDINGS_KEY: [float(value) for value in embedding],
+        }
+        if sparse_embedding is not None:
+            vectors[SPARSE_EMBEDDINGS_KEY] = sparse_embedding_to_vector(
+                sparse_embedding
+            )
         return models.PointStruct(
             id=self.qdrant_point_id(),
-            vector={DENSE_EMBEDDINGS_KEY: [float(value) for value in embedding]},
+            vector=vectors,
             payload=self.qdrant_payload(),
         )
 
