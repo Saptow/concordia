@@ -1578,10 +1578,10 @@ def save_segment_outputs(bundle: dict[str, Any], output_dir: Path) -> dict[str, 
     _write_jsonl(buyers_retained_path, bundle["buyers_retained"])
 
     manifest = {
-        "flat_units_path": str(flats_path),
-        "sellers_path": str(sellers_path),
-        "buyers_broad_path": str(buyers_broad_path),
-        "buyers_retained_path": str(buyers_retained_path),
+        "flat_units_path": flats_path.name,
+        "sellers_path": sellers_path.name,
+        "buyers_broad_path": buyers_broad_path.name,
+        "buyers_retained_path": buyers_retained_path.name,
     }
     _write_json(manifest_path, manifest)
     logging.info("Saved market segment manifest to %s.", manifest_path)
