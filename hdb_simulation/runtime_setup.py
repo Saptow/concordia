@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import sys
 
 from absl import logging
@@ -61,6 +62,32 @@ def _resolve_hf_hub_cache() -> str | None:
     return None
 
 
+def _resolve_fastembed_bm25_path(hf_hub_cache: str | None) -> str | None:
+    if not hf_hub_cache:
+        return None
+    repo_dir = Path(hf_hub_cache) / 'models--Qdrant--bm25'
+    if not repo_dir.exists():
+        return None
+
+    ref_main = repo_dir / 'refs' / 'main'
+    if ref_main.exists():
+        snapshot_name = ref_main.read_text(encoding='utf-8').strip()
+        if snapshot_name:
+            snapshot_dir = repo_dir / 'snapshots' / snapshot_name
+            if snapshot_dir.exists():
+                return str(snapshot_dir)
+
+    snapshots_dir = repo_dir / 'snapshots'
+    if not snapshots_dir.exists():
+        return None
+    candidates = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+    if not candidates:
+        return None
+    # Prefer the newest snapshot when refs/main is unavailable.
+    latest_snapshot = max(candidates, key=lambda path: path.stat().st_mtime)
+    return str(latest_snapshot)
+
+
 def initialise_sparse_embedding_model() -> SparseTextEmbedding:
     """Initialise the sparse BM25 embedder used by the listing portal."""
     cache_dir = _resolve_hf_hub_cache()
@@ -70,9 +97,21 @@ def initialise_sparse_embedding_model() -> SparseTextEmbedding:
     }
     if cache_dir:
         model_kwargs['cache_dir'] = cache_dir
-        logging.info('Initialising sparse embedder from %s.', cache_dir)
+        logging.info('Initialising sparse embedder from cache root %s.', cache_dir)
     else:
         logging.info('Initialising sparse embedder without explicit HF_HUB_CACHE.')
+    specific_model_path = _resolve_fastembed_bm25_path(cache_dir)
+    if specific_model_path:
+        model_kwargs['specific_model_path'] = specific_model_path
+        logging.info(
+            'Using local BM25 snapshot at %s for offline sparse retrieval.',
+            specific_model_path,
+        )
+    else:
+        logging.warning(
+            'Could not resolve a local BM25 snapshot under HF_HUB_CACHE. '
+            'FastEmbed will rely on its cache_dir behavior.'
+        )
     model = SparseTextEmbedding(**model_kwargs)
     logging.info('Sparse embedder initialised.')
     return model
