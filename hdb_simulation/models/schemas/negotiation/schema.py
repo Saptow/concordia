@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 from typing import Annotated, Literal, Union, Any, Optional
 
-from concordia.concordia.prefabs.entity.negotiation.components.uncertain_helper import NormalDistribution
 from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
 from concordia.hdb_simulation.models.schemas.listing.schema import (
     NegotiationMatch,
@@ -19,6 +18,7 @@ from concordia.hdb_simulation.models.schemas.common import (
     BaseSeller,
     NegotiationHistoryRecord,
     NegotiationOutcome,
+    NormalDistribution,
     OfferHistory,
     RoleType,
     VerbalExplanationFields,

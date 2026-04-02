@@ -10,7 +10,9 @@ from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
-from concordia.prefabs.entity.negotiation import uncertain_negotiator
+from concordia.prefabs.entity.negotiation.uncertain_negotiator import (
+    update_agent_from_listing,
+)
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
 )
@@ -271,11 +273,11 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     )
     buyer_entity = self._entities_by_id.get(buyer_id)
     if buyer_entity is not None:
-      uncertain_negotiator.update_agent_from_listing(buyer_entity, pair_payload)
+      update_agent_from_listing(buyer_entity, pair_payload)
       buyer_entity.observe(buyer_observation)
     seller_entity = self._entities_by_id.get(seller_id)
     if seller_entity is not None:
-      uncertain_negotiator.update_agent_from_listing(seller_entity, pair_payload)
+      update_agent_from_listing(seller_entity, pair_payload)
       seller_entity.observe(seller_observation)
 
   def _bind_entities_for_pairs(

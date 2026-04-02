@@ -9,8 +9,8 @@ from concordia.associative_memory import basic_associative_memory
 from concordia.language_model import language_model
 from concordia.typing import prefab as prefab_lib
 
-# Import base negotiator and advanced components
-from concordia.prefabs.entity.negotiation import base_negotiator
+# Import sibling modules directly to avoid package-root import cycles.
+from . import base_negotiator
 from concordia.prefabs.entity.negotiation.components import cultural_adaptation
 from concordia.prefabs.entity.negotiation.components import temporal_strategy
 from concordia.prefabs.entity.negotiation.components import swarm_intelligence

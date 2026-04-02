@@ -1,5 +1,8 @@
 """Shared reusable schemas for the HDB simulation."""
 
+import copy
+import dataclasses
+import math
 from enum import StrEnum
 from typing import List, Literal, Optional
 
@@ -114,6 +117,61 @@ class BuyerBudgetRange(BaseModel):
 class SellerExpectationRange(BaseModel):
     min_price: float = Field(ge=0.0)
     max_price: float = Field(ge=0.0)
+
+
+@dataclasses.dataclass
+class NormalDistribution:
+    """Normal belief used for an agent's own reservation estimate."""
+
+    name: str
+    mean: float
+    std: float
+    confidence: float
+    evidence_count: int = 0
+    last_updated: Optional[str] = None
+
+    @property
+    def get_expected_mean(self) -> float:
+        return self.mean
+
+    @property
+    def get_expected_variance(self) -> float:
+        return self.std ** 2
+
+    def sample(self, n: int = 1) -> float | list[float]:
+        import numpy as np
+
+        samples = np.random.normal(self.mean, self.std, n)
+        return samples[0] if n == 1 else samples.tolist()
+
+    def model_copy(self, *, deep: bool = False) -> 'NormalDistribution':
+        if deep:
+            return copy.deepcopy(self)
+        return copy.copy(self)
+
+    def update_with_evidence(self, observation: float, reliability: float = 1.0) -> None:
+        reliability = max(0.0, min(1.0, reliability))
+        observation = max(0.0, observation)
+        prior_precision = 1 / (self.std ** 2)
+        evidence_precision = reliability / (self.std ** 2)
+        total_precision = prior_precision + evidence_precision
+        new_mean = (
+            (prior_precision * self.mean + evidence_precision * observation)
+            / total_precision
+        )
+        new_std = 1 / math.sqrt(total_precision)
+
+        self.evidence_count += 1
+        self.confidence = min(0.95, self.confidence + 0.05 * reliability)
+        self.mean = max(0.0, new_mean)
+        self.std = new_std
+
+    def get_confidence_interval(self, level: float = 0.95) -> tuple[float, float]:
+        z_score = 1.96 if level == 0.95 else 2.58
+        margin = z_score * self.std
+        lower = max(0.0, self.mean - margin)
+        upper = max(lower, self.mean + margin)
+        return (lower, upper)
 
 
 class BuyerPreferenceProfile(BaseModel):

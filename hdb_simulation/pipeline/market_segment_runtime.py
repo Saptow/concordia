@@ -8,7 +8,7 @@ from typing import Any
 
 from absl import logging
 
-from configs import SegmentConfig
+from configs import REPO_ROOT, SegmentConfig
 from concordia.concordia.contrib.language_models.vllm.vllm_model import (
     VLLMLanguageModel,
 )
@@ -22,6 +22,25 @@ def read_jsonl_records(path: str | Path) -> list[dict[str, object]]:
         for line in file_path.read_text(encoding='utf-8').splitlines()
         if line.strip()
     ]
+
+
+def _resolve_manifest_artifact_path(
+    manifest_file: Path,
+    raw_path: str | Path,
+) -> str:
+    candidate = Path(str(raw_path))
+    if candidate.is_absolute():
+        return str(candidate.resolve())
+
+    manifest_relative = (manifest_file.parent / candidate).resolve()
+    if manifest_relative.exists():
+        return str(manifest_relative)
+
+    repo_relative = (REPO_ROOT / candidate).resolve()
+    if repo_relative.exists():
+        return str(repo_relative)
+
+    return str(manifest_relative)
 
 
 def load_bundle_from_manifest(
@@ -46,9 +65,7 @@ def load_bundle_from_manifest(
         )
 
     resolved_manifest = {
-        key: str((manifest_file.parent / str(manifest[key])).resolve())
-        if not Path(str(manifest[key])).is_absolute()
-        else str(Path(str(manifest[key])).resolve())
+        key: _resolve_manifest_artifact_path(manifest_file, manifest[key])
         for key in required_keys
     }
     optional_path_keys = ('qdrant_db_path',)
@@ -56,10 +73,9 @@ def load_bundle_from_manifest(
         raw_value = str(manifest.get(key, '')).strip()
         if not raw_value:
             continue
-        resolved_manifest[key] = (
-            str((manifest_file.parent / raw_value).resolve())
-            if not Path(raw_value).is_absolute()
-            else str(Path(raw_value).resolve())
+        resolved_manifest[key] = _resolve_manifest_artifact_path(
+            manifest_file,
+            raw_value,
         )
     optional_scalar_keys = ('qdrant_collection_name',)
     for key in optional_scalar_keys:

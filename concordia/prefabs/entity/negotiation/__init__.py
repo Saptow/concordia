@@ -1,6 +1,40 @@
-"""Negotiation prefab package with lazy module loading."""
+"""Negotiation agent prefabs and components for Concordia.
 
-from importlib import import_module
+This module provides pre-built negotiation agents with modular cognitive
+enhancements.
+
+Quick Start:
+    from concordia.prefabs.entity import negotiation
+
+    # Build a basic negotiator
+    agent = negotiation.build_agent(model, memory, name='Alice')
+
+    # Build an advanced negotiator with modules
+    agent = negotiation.build_advanced_agent(
+        model, memory,
+        name='Bob',
+        modules=['theory_of_mind', 'cultural_adaptation'],
+    )
+
+    # Or use enum values for type safety
+    from concordia.prefabs.entity.negotiation import ModuleType
+    agent = negotiation.build_advanced_agent(
+        model, memory,
+        modules=[ModuleType.THEORY_OF_MIND, ModuleType.CULTURAL_ADAPTATION],
+    )
+
+Available Modules:
+    - theory_of_mind: Opponent modeling, emotional intelligence
+    - cultural_adaptation: Cultural awareness, communication adaptation
+    - temporal_strategy: Multi-horizon planning, deadline handling
+    - swarm_intelligence: Collective decision-making via sub-agents
+    - uncertainty_aware: Probabilistic reasoning under uncertainty
+    - strategy_evolution: Meta-learning across negotiations
+"""
+
+from . import base_negotiator
+from . import advanced_negotiator
+from . import uncertain_negotiator
 
 from concordia.prefabs.entity.negotiation.constants import (
     DEFAULT_MODULE_CONFIGS,
@@ -20,25 +54,34 @@ from concordia.prefabs.entity.negotiation.config import (
     TheoryOfMindConfig,
 )
 
-_NEGOTIATOR_MODULES = {
-    'base_negotiator': '.base_negotiator',
-    'advanced_negotiator': '.advanced_negotiator',
-    'uncertain_negotiator': '.uncertain_negotiator',
-}
+# Convenience aliases for common operations
+build_agent = base_negotiator.build_agent
+build_advanced_agent = advanced_negotiator.build_agent
+build_custom_agent = uncertain_negotiator.build_agent
+
+# Prefab dataclasses for Entity pattern
+BaseNegotiator = base_negotiator.Entity
+AdvancedNegotiator = advanced_negotiator.Entity
+CustomNegotiator = uncertain_negotiator.Entity
 
 __all__ = [
+    # Modules
     'base_negotiator',
     'advanced_negotiator',
     'uncertain_negotiator',
+    # Builder functions
     'build_agent',
     'build_advanced_agent',
     'build_custom_agent',
+    # Prefab classes
     'BaseNegotiator',
     'AdvancedNegotiator',
     'CustomNegotiator',
+    # Constants
     'ModuleType',
     'MODULE_COMPONENT_NAMES',
     'DEFAULT_MODULE_CONFIGS',
+    # Configuration
     'StrategyConfig',
     'OutcomeConfig',
     'AlgorithmConfig',
@@ -50,21 +93,3 @@ __all__ = [
     'RelationshipConfig',
     'ParsingConfig',
 ]
-
-
-def __getattr__(name: str):
-    if name in _NEGOTIATOR_MODULES:
-        return import_module(_NEGOTIATOR_MODULES[name], __name__)
-    if name == 'build_agent':
-        return import_module('.base_negotiator', __name__).build_agent
-    if name == 'build_advanced_agent':
-        return import_module('.advanced_negotiator', __name__).build_agent
-    if name == 'build_custom_agent':
-        return import_module('.uncertain_negotiator', __name__).build_agent
-    if name == 'BaseNegotiator':
-        return import_module('.base_negotiator', __name__).Entity
-    if name == 'AdvancedNegotiator':
-        return import_module('.advanced_negotiator', __name__).Entity
-    if name == 'CustomNegotiator':
-        return import_module('.uncertain_negotiator', __name__).Entity
-    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
