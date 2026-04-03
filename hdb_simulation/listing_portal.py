@@ -458,37 +458,70 @@ class ListingPortal:
             result = results_by_listing_id.get(listing_id)
             if result is None:
                 continue
-            seller_id = result.seller_id
-            listing = self.retriever.get_listing_record(seller_id)
-            if listing is None or not listing.active:
-                continue
-            if seller_id in self.closed_sellers:
-                continue
-            if self.has_buyer_negotiated_with_seller(buyer_id, seller_id):
-                continue
-            existing_requests = self.requests_by_seller.setdefault(seller_id, [])
-            already_requested = any(
-                request.buyer_id == buyer_id
-                and request.buyer_id not in self.closed_buyers
-                for request in existing_requests
-            )
-            if already_requested:
-                continue
-            request = listing_schemas.NegotiationRequest(
-                request_id=self._request_id(buyer_id, listing_id, week),
-                buyer_id=buyer_id,
-                buyer_name=buyer.name,
+            self.submit_negotiation_request(
+                buyer,
+                seller_id=result.seller_id,
+                week=week,
                 listing_id=listing_id,
-                seller_id=seller_id,
-                week_submitted=week,
-                message='',
-                market_valuation_notes='',
             )
-            existing_requests.append(request)
         return SearchAndRequestResult(
             results=list(results),
             market_feedback=feedback,
         )
+
+    def submit_negotiation_request(
+        self,
+        buyer: listing_schemas.PortalBuyer,
+        *,
+        seller_id: str,
+        week: int,
+        listing_id: str | None = None,
+        message: str = '',
+        market_valuation_notes: str = '',
+    ) -> listing_schemas.NegotiationRequest | None:
+        """Creates one validated negotiation request for a specific seller."""
+        buyer_id = str(buyer.id).strip()
+        normalized_seller_id = str(seller_id).strip()
+        if not buyer_id or not normalized_seller_id:
+            return None
+        if buyer_id in self.closed_buyers or normalized_seller_id in self.closed_sellers:
+            return None
+        if self.has_buyer_negotiated_with_seller(buyer_id, normalized_seller_id):
+            return None
+
+        listing = self.retriever.get_listing_record(normalized_seller_id)
+        if listing is None or not listing.active:
+            return None
+        if float(listing.listing_price) > float(buyer.budget.max_price):
+            return None
+
+        effective_listing_id = (
+            str(listing_id).strip() if listing_id is not None else listing.listing_id
+        )
+        if effective_listing_id != listing.listing_id:
+            return None
+
+        existing_requests = self.requests_by_seller.setdefault(normalized_seller_id, [])
+        already_requested = any(
+            request.buyer_id == buyer_id
+            and request.buyer_id not in self.closed_buyers
+            for request in existing_requests
+        )
+        if already_requested:
+            return None
+
+        request = listing_schemas.NegotiationRequest(
+            request_id=self._request_id(buyer_id, effective_listing_id, week),
+            buyer_id=buyer_id,
+            buyer_name=buyer.name,
+            listing_id=effective_listing_id,
+            seller_id=normalized_seller_id,
+            week_submitted=week,
+            message=message,
+            market_valuation_notes=market_valuation_notes,
+        )
+        existing_requests.append(request)
+        return request
 
     # Seller-side actions.
     def list_flat(

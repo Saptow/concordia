@@ -290,7 +290,25 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
           continue
         portal.search_and_request(buyer, week=self._week_number)
         open_requests = portal.requests_by_seller.get(seller_id, ())
-        if not any(request.buyer_id == buyer_id for request in open_requests):
+        request_seeded = any(request.buyer_id == buyer_id for request in open_requests)
+        if not request_seeded:
+          seeded_request = portal.submit_negotiation_request(
+              buyer,
+              seller_id=seller_id,
+              week=self._week_number,
+              market_valuation_notes=(
+                  'Seeded directly by the market initializer because retrieval '
+                  'did not surface the seller listing during week-1 bootstrap.'
+              ),
+          )
+          request_seeded = seeded_request is not None
+          if request_seeded:
+            logging.info(
+                'Seeded initial negotiation request directly for buyer %s and seller %s.',
+                buyer_id,
+                seller_id,
+            )
+        if not request_seeded:
           continue
         matched = portal.review_requests_and_start_negotiation(
             seller,
