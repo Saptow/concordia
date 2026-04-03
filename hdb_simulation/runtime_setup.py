@@ -36,7 +36,9 @@ def initialise_model() -> VLLMLanguageModel:
         max_model_len=LLMConfig.MAX_MODEL_LEN,
         max_num_seqs=LLMConfig.MAX_NUM_SEQS,
         limit_mm_per_prompt=LLMConfig.LIMIT_MM_PER_PROMPT,
-        tensor_parallel_size=LLMConfig.TENSOR_PARALLEL_SIZE
+        tensor_parallel_size=LLMConfig.TENSOR_PARALLEL_SIZE,
+        disable_custom_all_reduce=LLMConfig.DISABLE_CUSTOM_ALL_REDUCE,
+        enforce_eager=True,  # Ensure eager execution for better compatibility with custom kernels.
     )
     logging.info('Model initialised successfully.')
     return model
