@@ -45,7 +45,7 @@ MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
 MIN_FLATS_FOR_QUANTILE_SUPPORT_CHECK = 10
-FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE = 0.75
+FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE = 0.9
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
@@ -1323,12 +1323,7 @@ def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
 
 
 def _sample_income_band(
-    income_prior: pd.DataFrame,
-    age_band: str,
-    *,
-    current_age: int,
-    min_effective_ceiling: float | None = None,
-    rng: random.Random,
+    income_prior: pd.DataFrame, age_band: str, rng: random.Random
 ) -> str:
     def _income_band_allowed(value: object) -> bool:
         band = INCOME_BANDS.get(str(value).strip())
@@ -1349,18 +1344,6 @@ def _sample_income_band(
             & (income_prior["income_band"].map(_normalize_text) != "total")
         ].copy()
     subset = subset[subset["income_band"].map(_income_band_allowed)]
-    if min_effective_ceiling is not None:
-        subset = subset[
-            subset["income_band"].map(
-                lambda value: (
-                    compute_buyer_financials(
-                        current_age=current_age,
-                        monthly_income=resolve_income_band_upper(str(value).strip()),
-                    ).effective_ceiling
-                    >= float(min_effective_ceiling)
-                )
-            )
-        ]
     subset["count"] = subset["count"].astype(float)
     subset = subset[subset["count"] > 0]
     if subset.empty:
@@ -1383,20 +1366,6 @@ def _sample_overall_distribution(
     subset["count"] = subset["count"].astype(float)
     subset = subset[subset["count"] > 0]
     return str(_weighted_choice(subset, value_column, "count", rng))
-
-
-def _compute_market_affordability_threshold(flats: list[dict[str, Any]]) -> float:
-    """Summarise the sampled market's overall affordability structure with one price threshold."""
-    if not flats:
-        return 0.0
-    prices = [
-        float(flat.get("observed_resale_price", 0.0))
-        for flat in flats
-        if float(flat.get("observed_resale_price", 0.0)) > 0.0
-    ]
-    if not prices:
-        return 0.0
-    return float(np.quantile(prices, FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE))
 
 
 def _build_buyer_budget(
@@ -1478,11 +1447,6 @@ def _build_broad_buyers(
     """Generate broad buyers conditioned on affordability for the sampled flats."""
     broad_count = max(len(flats), math.ceil(len(flats) * config.buyer_pool_multiplier))
     buyers: list[dict[str, Any]] = []
-    market_affordability_threshold = _compute_market_affordability_threshold(flats)
-    logging.info(
-        "Conditioning broad buyer generation on sampled-market affordability threshold %.2f.",
-        market_affordability_threshold,
-    )
     max_attempts = max(
         broad_count,
         broad_count * MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR,
@@ -1493,17 +1457,8 @@ def _build_broad_buyers(
         attempts += 1
         index = len(buyers) + 1
         age_band = str(_weighted_choice(age_prior, "age_group", "population", rng))
+        income_band = _sample_income_band(income_prior, age_band, rng)
         age = _sample_age_from_band(age_band, rng)
-        try:
-            income_band = _sample_income_band(
-                income_prior,
-                age_band,
-                current_age=age,
-                min_effective_ceiling=market_affordability_threshold,
-                rng=rng,
-            )
-        except ValueError:
-            continue
 
         donor = _sample_nemotron_donor(
             donors,
