@@ -7,8 +7,67 @@ from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
 )
 from concordia.prefabs.game_master.negotiation import hdb_initializer_gm
-from concordia.hdb_simulation.models.buyer_data import BUYER_DATA
-from concordia.hdb_simulation.models.seller_data import SELLER_DATA
+
+
+def _buyer_profile(
+    *,
+    name: str = 'Buyer 1',
+    min_price: float = 450000.0,
+    max_price: float = 650000.0,
+) -> dict[str, object]:
+  return {
+      'name': name,
+      'description': 'Test buyer profile.',
+      'preferences': {
+          'preferences': [
+              {
+                  'category': 'flat_type',
+                  'description': '3-Room',
+                  'strength': 1.0,
+              },
+              {
+                  'category': 'town',
+                  'description': 'Choa Chu Kang',
+                  'strength': 0.8,
+              },
+          ],
+      },
+      'budget': {
+          'min_price': min_price,
+          'max_price': max_price,
+      },
+  }
+
+
+def _seller_profile(
+    *,
+    name: str = 'Seller 1',
+    flat_type: str = '3-Room',
+    town: str = 'Choa Chu Kang',
+    min_price: float = 500000.0,
+    max_price: float = 530000.0,
+) -> dict[str, object]:
+  return {
+      'name': name,
+      'description': 'Test seller profile.',
+      'flat': {
+          'flat_type': flat_type,
+          'address': 'Blk 123 Test Avenue Singapore 680123',
+          'description': 'Test flat.',
+          'town': town,
+          'storey_range': '05 to 08',
+          'remaining_lease': 78.0,
+          'contra': False,
+          'extension_of_stay': False,
+          'ethnic_eligibility': 'No quota limit',
+          'spr_eligibility': 'True',
+          'floor_area_sqm': 68.0,
+      },
+      'expectations': {
+          'min_price': min_price,
+          'max_price': max_price,
+      },
+  }
 
 
 class _FakeListingModule:
@@ -110,8 +169,8 @@ class BuildMarketProfilesTest(unittest.TestCase):
             'name': 'Seller 999',
             'age': 55,
             'occupation_category': 'Retired',
-            'flat': copy.deepcopy(SELLER_DATA['seller_001']['flat']),
-            'expectations': copy.deepcopy(SELLER_DATA['seller_001']['expectations']),
+            'flat': copy.deepcopy(_seller_profile()['flat']),
+            'expectations': copy.deepcopy(_seller_profile()['expectations']),
             'seller_motivations': {'motivation_summary': 'Downsizing.'},
             'initial_market_state': 'not_yet_listed',
             'initialization_order': 7,
@@ -136,9 +195,14 @@ class BuildMarketProfilesTest(unittest.TestCase):
 class ListingReleaseTest(unittest.TestCase):
 
   def _build_listing_module(self) -> hdb_listing.ListingModule:
-    buyer_profile = copy.deepcopy(BUYER_DATA['buyer_001'])
-    seller_one = copy.deepcopy(SELLER_DATA['seller_001'])
-    seller_two = copy.deepcopy(SELLER_DATA['seller_002'])
+    buyer_profile = _buyer_profile(name='Buyer 1')
+    seller_one = _seller_profile(name='Seller 1')
+    seller_two = _seller_profile(
+        name='Seller 2',
+        flat_type='4-Room',
+        min_price=620000.0,
+        max_price=660000.0,
+    )
     seller_one['initial_market_state'] = 'listed'
     seller_one['initialization_order'] = 1
     seller_two['initial_market_state'] = 'not_yet_listed'
