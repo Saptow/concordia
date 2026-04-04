@@ -42,6 +42,7 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
+MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
@@ -566,6 +567,44 @@ def _sample_indices_uniformly(total_count: int, cap: int) -> list[int]:
     return sampled_indices
 
 
+def _allocate_stratified_counts(
+    stratum_sizes: dict[str, int],
+    cap: int,
+) -> dict[str, int]:
+    """Allocate a fixed sample size proportionally across strata."""
+    total_count = sum(max(0, int(size)) for size in stratum_sizes.values())
+    if cap <= 0 or total_count <= 0:
+        return {stratum: 0 for stratum in stratum_sizes}
+
+    capped_total = min(cap, total_count)
+    allocated: dict[str, int] = {}
+    remainders: list[tuple[float, str]] = []
+    for stratum, size in stratum_sizes.items():
+        normalized_size = max(0, int(size))
+        exact_share = (normalized_size / total_count) * capped_total
+        floor_share = min(normalized_size, int(math.floor(exact_share)))
+        allocated[stratum] = floor_share
+        remainders.append((exact_share - floor_share, stratum))
+
+    remaining = capped_total - sum(allocated.values())
+    remainders.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+    while remaining > 0:
+        progressed = False
+        for _, stratum in remainders:
+            capacity_left = max(0, int(stratum_sizes[stratum])) - allocated[stratum]
+            if capacity_left <= 0:
+                continue
+            allocated[stratum] += 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            break
+
+    return allocated
+
+
 def _build_market_bucket_summary(
     flats: list[dict[str, Any]],
     *,
@@ -786,7 +825,7 @@ def _restrain_transactions(
     restrained_seller_count: int | None,
     rng: random.Random | None = None,
 ) -> pd.DataFrame:
-    """Uniformly downsample transactions when a seller cap is configured."""
+    """Downsample transactions while preserving the observed flat-type mix."""
     if restrained_seller_count is None:
         return transactions.reset_index(drop=True)
     if restrained_seller_count <= 0:
@@ -794,15 +833,60 @@ def _restrain_transactions(
     if len(transactions) <= restrained_seller_count:
         return transactions.reset_index(drop=True)
 
-    if rng is None:
-        selected_indices = _sample_indices_uniformly(
-            total_count=len(transactions),
-            cap=restrained_seller_count,
-        )
-    else:
-        selected_indices = sorted(
-            rng.sample(range(len(transactions)), k=restrained_seller_count)
-        )
+    flat_type_series = (
+        transactions["flat_type_label"]
+        .fillna("unknown")
+        .astype(str)
+        .str.strip()
+        .replace("", "unknown")
+    )
+    stratum_sizes = {
+        str(flat_type): int(count)
+        for flat_type, count in flat_type_series.value_counts(sort=False).items()
+    }
+    allocated_counts = _allocate_stratified_counts(
+        stratum_sizes,
+        restrained_seller_count,
+    )
+
+    selected_indices: list[int] = []
+    for flat_type, sample_count in sorted(allocated_counts.items()):
+        if sample_count <= 0:
+            continue
+        stratum_indices = flat_type_series[flat_type_series == flat_type].index.tolist()
+        if sample_count >= len(stratum_indices):
+            selected_indices.extend(stratum_indices)
+            continue
+        if rng is None:
+            relative_indices = _sample_indices_uniformly(
+                total_count=len(stratum_indices),
+                cap=sample_count,
+            )
+            selected_indices.extend(
+                stratum_indices[index] for index in relative_indices
+            )
+        else:
+            selected_indices.extend(rng.sample(stratum_indices, k=sample_count))
+
+    selected_indices = sorted(set(selected_indices))
+    if len(selected_indices) < restrained_seller_count:
+        selected_set = set(selected_indices)
+        remaining_indices = [
+            index for index in transactions.index.tolist() if index not in selected_set
+        ]
+        deficit = restrained_seller_count - len(selected_indices)
+        if rng is None:
+            relative_indices = _sample_indices_uniformly(
+                total_count=len(remaining_indices),
+                cap=deficit,
+            )
+            selected_indices.extend(
+                remaining_indices[index] for index in relative_indices
+            )
+        else:
+            selected_indices.extend(rng.sample(remaining_indices, k=deficit))
+        selected_indices = sorted(selected_indices)
+
     return transactions.iloc[selected_indices].copy().reset_index(drop=True)
 
 
@@ -1249,10 +1333,43 @@ def _build_buyer_budget(
     ).model_dump()
 
 
+def _annotate_buyer_market_feasibility(
+    buyer: dict[str, Any],
+    flats: list[dict[str, Any]],
+    archetypes: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Annotate buyer feasibility against the sampled flat market."""
+    flat_index = {flat["flat_id"]: flat for flat in flats}
+    effective_ceiling = float(buyer["financials"]["effective_ceiling"])
+    feasible_flat_ids = [
+        flat["flat_id"]
+        for flat in flats
+        if float(flat["observed_resale_price"]) <= effective_ceiling
+    ]
+    buyer["feasible_flat_ids"] = feasible_flat_ids
+    if not feasible_flat_ids:
+        buyer["retained"] = False
+        return False
+
+    if archetypes is not None:
+        reachable_flats = [flat_index[flat_id] for flat_id in feasible_flat_ids]
+        buyer["preferences"] = {"preferences": []}
+        buyer["preference_classification_input"] = (
+            _build_preference_classification_input(
+                buyer,
+                reachable_flats,
+                archetypes,
+            )
+        )
+        buyer["retained"] = True
+    return True
+
+
 def _build_broad_buyers(
     flats: list[dict[str, Any]],
     hedonic_training_flats: list[dict[str, Any]],
     donors: pd.DataFrame,
+    archetypes: list[dict[str, Any]],
     *,
     config: SegmentConfig,
     rng: random.Random,
@@ -1260,11 +1377,18 @@ def _build_broad_buyers(
     income_prior: pd.DataFrame,
     distribution_tables: dict[str, pd.DataFrame],
 ) -> list[dict[str, Any]]:
-    """Generate the broad buyer pool before feasibility filtering."""
+    """Generate broad buyers conditioned on affordability for the sampled flats."""
     broad_count = max(len(flats), math.ceil(len(flats) * config.buyer_pool_multiplier))
     buyers: list[dict[str, Any]] = []
+    max_attempts = max(
+        broad_count,
+        broad_count * MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR,
+    )
+    attempts = 0
 
-    for index in range(1, broad_count + 1):
+    while len(buyers) < broad_count and attempts < max_attempts:
+        attempts += 1
+        index = len(buyers) + 1
         age_band = str(_weighted_choice(age_prior, "age_group", "population", rng))
         income_band = _sample_income_band(income_prior, age_band, rng)
         age = _sample_age_from_band(age_band, rng)
@@ -1331,7 +1455,21 @@ def _build_broad_buyers(
             hedonic_training_flats,
             rng=rng,
         )
+        if not _annotate_buyer_market_feasibility(
+            buyer_record,
+            flats,
+            archetypes,
+        ):
+            continue
         buyers.append(buyer_record)
+
+    if len(buyers) < broad_count:
+        logging.warning(
+            "Conditioned broad buyer generation only produced %s buyer(s) after %s attempts; broad target=%s.",
+            len(buyers),
+            attempts,
+            broad_count,
+        )
 
     return buyers
 
@@ -1387,28 +1525,15 @@ def _retain_feasible_buyers(
     archetypes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Keep only buyers who can financially reach at least one flat in the seller pool."""
-    flat_index = {flat["flat_id"]: flat for flat in flats}
     retained: list[dict[str, Any]] = []
 
     for buyer in buyers:
-        effective_ceiling = float(buyer["financials"]["effective_ceiling"])
-        feasible_flat_ids = [
-            flat["flat_id"]
-            for flat in flats
-            if float(flat["observed_resale_price"]) <= effective_ceiling
-        ]
-        buyer["feasible_flat_ids"] = feasible_flat_ids
-        if not feasible_flat_ids:
-            continue
-
-        reachable_flats = [flat_index[flat_id] for flat_id in feasible_flat_ids]
-        buyer["preferences"] = {"preferences": []}
-        buyer["preference_classification_input"] = _build_preference_classification_input(
+        if not _annotate_buyer_market_feasibility(
             buyer,
-            reachable_flats,
+            flats,
             archetypes,
-        )
-        buyer["retained"] = True
+        ):
+            continue
         retained.append(buyer)
 
     return retained
@@ -1763,6 +1888,7 @@ def _build_buyer_pools_with_regeneration(
             flats,
             hedonic_training_flats,
             donors,
+            archetypes,
             config=config,
             rng=rng,
             age_prior=age_prior,
@@ -1855,6 +1981,15 @@ def _build_buyer_pools_with_regeneration(
             and seedable
             and all_sellers_covered
         ):
+            logging.info(
+                "Accepted oversampled buyer pool %s/%s for seller market sample: retained buyers=%s target=%s matched negotiating sellers=%s uncovered sellers=%s.",
+                broad_attempt,
+                MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
+                len(retained_buyers),
+                target_retained_buyer_count,
+                len(match_assignments),
+                len(uncovered_seller_ids),
+            )
             return broad_buyers, retained_buyers
 
     if best_retained_buyers:
@@ -2016,6 +2151,14 @@ def build_transaction_conditioned_segment(
                 distribution_tables=distribution_tables,
             )
             last_market_error = None
+            logging.info(
+                "Accepted seller market sample %s/%s with %s sellers, %s broad buyers, and %s retained buyers.",
+                seller_attempt,
+                seller_market_attempts,
+                len(sellers),
+                len(broad_buyers),
+                len(retained_buyers),
+            )
             break
         except ValueError as error:
             last_market_error = error
