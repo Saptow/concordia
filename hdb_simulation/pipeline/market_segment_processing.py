@@ -42,7 +42,7 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_BUYER_POOL_RESAMPLE_ATTEMPTS = 5
-MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 3
+MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_SELLER_POOL_RESAMPLE_ATTEMPTS = 3
 
 
@@ -1535,7 +1535,7 @@ def _build_buyer_pools_with_regeneration(
     income_prior: pd.DataFrame,
     distribution_tables: dict[str, pd.DataFrame],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Retry buyer-pool construction until negotiating sellers are all seedable."""
+    """Retry oversampled buyer-pool construction until all constraints pass."""
     target_retained_count = len(flats)
     last_unmatched_seller_ids: list[str] = []
 
