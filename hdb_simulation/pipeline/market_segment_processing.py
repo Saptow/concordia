@@ -1426,6 +1426,26 @@ def _validate_negotiating_seller_seedability(
     return not unmatched_seller_ids, unmatched_seller_ids, match_assignments
 
 
+def _validate_seller_candidate_coverage(
+    sellers: list[dict[str, Any]],
+    buyers: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    """Checks whether every seller has at least one feasible retained buyer."""
+    uncovered_seller_ids: list[str] = []
+    for seller in sorted(
+        sellers,
+        key=lambda item: int(item.get("initialization_order", 0)),
+    ):
+        seller_id = str(seller.get("seller_id", "")).strip()
+        if not seller_id:
+            continue
+        candidate_buyer_ids = _rank_candidate_buyer_ids_for_seller(seller, buyers)
+        if candidate_buyer_ids:
+            continue
+        uncovered_seller_ids.append(seller_id)
+    return not uncovered_seller_ids, uncovered_seller_ids
+
+
 def _cap_retained_buyers(
     sellers: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
@@ -1728,7 +1748,9 @@ def _build_buyer_pools_with_regeneration(
     best_retained_buyers: list[dict[str, Any]] = []
     best_matched_count = -1
     best_unmatched_seller_ids: list[str] = []
+    best_uncovered_seller_ids: list[str] = []
     last_unmatched_seller_ids: list[str] = []
+    last_uncovered_seller_ids: list[str] = []
 
     for broad_attempt in range(1, MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS + 1):
         broad_buyers = _build_broad_buyers(
@@ -1777,6 +1799,13 @@ def _build_buyer_pools_with_regeneration(
             cap=target_retained_buyer_count,
         )
         (
+            all_sellers_covered,
+            uncovered_seller_ids,
+        ) = _validate_seller_candidate_coverage(
+            sellers,
+            retained_buyers,
+        )
+        (
             seedable,
             unmatched_seller_ids,
             match_assignments,
@@ -1785,7 +1814,7 @@ def _build_buyer_pools_with_regeneration(
             retained_buyers,
         )
         logging.info(
-            "Oversampled buyer pool %s/%s retained %s feasible buyers for %s sellers; retained buyer target=%s; matched negotiating sellers=%s unmatched negotiating sellers=%s.",
+            "Oversampled buyer pool %s/%s retained %s feasible buyers for %s sellers; retained buyer target=%s; matched negotiating sellers=%s unmatched negotiating sellers=%s uncovered sellers=%s.",
             broad_attempt,
             MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
             len(retained_buyers),
@@ -1793,17 +1822,33 @@ def _build_buyer_pools_with_regeneration(
             target_retained_buyer_count,
             len(match_assignments),
             len(unmatched_seller_ids),
+            len(uncovered_seller_ids),
         )
         last_unmatched_seller_ids = unmatched_seller_ids
+        last_uncovered_seller_ids = uncovered_seller_ids
         matched_count = len(match_assignments)
 
-        if matched_count > best_matched_count:
+        if (
+            matched_count > best_matched_count
+            or (
+                matched_count == best_matched_count
+                and (
+                    not best_retained_buyers
+                    or len(uncovered_seller_ids) < len(best_uncovered_seller_ids)
+                )
+            )
+        ):
             best_broad_buyers = broad_buyers
             best_retained_buyers = retained_buyers
             best_matched_count = matched_count
             best_unmatched_seller_ids = unmatched_seller_ids
+            best_uncovered_seller_ids = uncovered_seller_ids
 
-        if len(retained_buyers) >= target_retained_buyer_count and seedable:
+        if (
+            len(retained_buyers) >= target_retained_buyer_count
+            and seedable
+            and all_sellers_covered
+        ):
             return broad_buyers, retained_buyers
 
     if best_retained_buyers:
@@ -1812,22 +1857,32 @@ def _build_buyer_pools_with_regeneration(
             if best_unmatched_seller_ids
             else "none"
         )
+        uncovered_text = (
+            ", ".join(best_uncovered_seller_ids)
+            if best_uncovered_seller_ids
+            else "none"
+        )
         logging.warning(
-            "Unable to fully seed all negotiating sellers after %s oversampled-pool attempts; using best pool with %s retained buyers, %s matched negotiating sellers, and unmatched sellers: %s.",
+            "Unable to build a retained buyer pool that both seeds all negotiating sellers and covers every seller after %s oversampled-pool attempts; using best pool with %s retained buyers, %s matched negotiating sellers, unmatched negotiating sellers: %s, uncovered sellers: %s.",
             MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
             len(best_retained_buyers),
             best_matched_count,
             unmatched_text,
+            uncovered_text,
         )
         return best_broad_buyers, best_retained_buyers
 
     unmatched_text = (
         ", ".join(last_unmatched_seller_ids) if last_unmatched_seller_ids else "unknown"
     )
+    uncovered_text = (
+        ", ".join(last_uncovered_seller_ids) if last_uncovered_seller_ids else "unknown"
+    )
     raise ValueError(
         "Unable to build a buyer pool with enough retained buyers after "
         f"{MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS} oversampled-pool attempts; "
-        f"unmatched negotiating sellers: {unmatched_text}."
+        f"unmatched negotiating sellers: {unmatched_text}; "
+        f"uncovered sellers: {uncovered_text}."
     )
 
 
