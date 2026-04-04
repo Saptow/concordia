@@ -301,6 +301,76 @@ class BuyerPreferencePrior(BaseModel):
         self.mean_vector[index] = max(0.0, float(mean))
         self.covariance_matrix[index][index] = max(1e-9, float(variance))
 
+    def update_from_pseudo_observation(
+        self,
+        attribute_vector: List[float],
+        target_value: float,
+        observation_variance: float,
+    ) -> None:
+        """Bayesian linear update from a pseudo-observed flat valuation target."""
+        if len(attribute_vector) != len(self.mean_vector):
+            raise ValueError('Attribute vector must match preference-prior dimensions.')
+
+        observation_variance = max(1e-9, float(observation_variance))
+        # Sigma x term used in the Bayesian linear-regression / Kalman-style gain.
+        covariance_times_attribute = [
+            sum(
+                covariance * attribute_value
+                for covariance, attribute_value in zip(
+                    row,
+                    attribute_vector,
+                    strict=True,
+                )
+            )
+            for row in self.covariance_matrix
+        ]
+        predicted_mean, predicted_variance = self.project(attribute_vector)
+        # x' Sigma x + sigma_obs^2
+        innovation_variance = max(1e-9, predicted_variance + observation_variance)
+        # K = Sigma x / (x' Sigma x + sigma_obs^2)
+        kalman_gain = [
+            covariance_value / innovation_variance
+            for covariance_value in covariance_times_attribute
+        ]
+        # y_fail - x' mu
+        residual = max(0.0, float(target_value)) - predicted_mean
+
+        # mu_new = mu + K (y_fail - x' mu)
+        self.mean_vector = [
+            float(mean + (gain * residual))
+            for mean, gain in zip(self.mean_vector, kalman_gain, strict=True)
+        ]
+
+        # Sigma_new = Sigma - K x' Sigma
+        updated_covariance = [
+            [
+                float(covariance - (kalman_gain[row_index] * covariance_times_attribute[col_index]))
+                for col_index, covariance in enumerate(row)
+            ]
+            for row_index, row in enumerate(self.covariance_matrix)
+        ]
+
+        size = len(updated_covariance)
+        for row_index in range(size):
+            updated_covariance[row_index][row_index] = max(
+                1e-9,
+                updated_covariance[row_index][row_index],
+            )
+            for col_index in range(row_index + 1, size):
+                symmetric_value = 0.5 * (
+                    updated_covariance[row_index][col_index]
+                    + updated_covariance[col_index][row_index]
+                )
+                updated_covariance[row_index][col_index] = symmetric_value
+                updated_covariance[col_index][row_index] = symmetric_value
+
+        intercept_index = self.index_of('intercept')
+        self.mean_vector[intercept_index] = max(
+            0.0,
+            float(self.mean_vector[intercept_index]),
+        )
+        self.covariance_matrix = updated_covariance
+
 
 def coerce_buyer_preferences(
     preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
@@ -498,6 +568,4 @@ class NegotiationOutcome(StrEnum):
     SUCCESS = 'SUCCESS'
     CLOSED = 'CLOSED'
     CLOSED_WITHOUT_SUCCESS = 'CLOSED_WITHOUT_SUCCESS'
-
-
 

@@ -6,6 +6,7 @@ from typing import Any
 from absl import logging
 from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation import listing_portal as listing_portal_lib
+from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
@@ -30,6 +31,38 @@ def _listing_price_for_seller(seller: listing_schemas.PortalSeller) -> float:
   min_price = float(seller.expectations.min_price)
   max_price = float(seller.expectations.max_price)
   return max(min_price, max_price)
+
+def _derive_failed_negotiation_pseudo_observation(
+    *,
+    buyer: listing_schemas.PortalBuyer,
+    seller: listing_schemas.PortalSeller,
+    payload: negotiation_schemas.NegotiationToListingPayload,
+    preference_prior: common_schemas.BuyerPreferencePrior,
+) -> tuple[list[float], float, float]:
+  """Builds a flat-specific pseudo-observation for buyer preference learning."""
+  # x_ij: feature vector for the failed-negotiation flat.
+  attribute_vector = common_schemas.build_buyer_flat_attribute_vector(
+      buyer.preferences,
+      seller.flat,
+  )
+  predicted_mean, predicted_variance = preference_prior.project(attribute_vector)
+  buyer_belief = payload.buyer_state.effective_reservation
+  buyer_final_mean = max(0.0, float(buyer_belief.mean))
+  buyer_final_std = max(1.0, float(buyer_belief.std))
+  confidence = max(0.05, min(1.0, float(buyer_belief.confidence)))
+  evidence_count = max(0, int(buyer_belief.evidence_count))
+
+  # y_fail: use the buyer's final flat-specific valuation belief after negotiation.
+  pseudo_target = buyer_final_mean
+  # More confidence and more accumulated evidence imply a more reliable pseudo-target.
+  evidence_scale = 1.0 + (0.25 * evidence_count)
+  belief_variance = buyer_final_std ** 2
+  confidence_adjusted_variance = belief_variance / (confidence * evidence_scale)
+  # sigma_obs^2: keep a floor tied to prior predictive variance to avoid over-learning
+  # from a single failed negotiation, even if the final belief is very tight.
+  variance_floor = max(1.0, 0.25 * predicted_variance)
+  observation_variance = max(variance_floor, confidence_adjusted_variance)
+  return attribute_vector, pseudo_target, observation_variance
 
 
 def execute_listing_week(
@@ -387,7 +420,21 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         continue
       buyer.negotiation_history.append(payload.negotiation_history.model_copy(deep=True))
       seller.negotiation_history.append(payload.negotiation_history.model_copy(deep=True))
-      portal._buyer_market_state(buyer).effective_reservation = (
+      buyer_market_state = portal._buyer_market_state(buyer)
+      attribute_vector, pseudo_target, observation_variance = (
+          _derive_failed_negotiation_pseudo_observation(
+              buyer=buyer,
+              seller=seller,
+              payload=payload,
+              preference_prior=buyer_market_state.preference_prior,
+          )
+      )
+      buyer_market_state.preference_prior.update_from_pseudo_observation(
+          attribute_vector,
+          pseudo_target,
+          observation_variance,
+      )
+      buyer_market_state.effective_reservation = (
           payload.buyer_state.effective_reservation.model_copy(deep=True)
       )
       portal._seller_market_state(seller).effective_reservation = (
