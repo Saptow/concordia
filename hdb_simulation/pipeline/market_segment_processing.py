@@ -733,7 +733,8 @@ Think step by step privately. Do not reveal your reasoning.
 4. Compare the buyer against the provided preference archetypes.
 5. Infer the most plausible flat-type and town preferences, constrained by the
    reachable market summary.
-6. Return a `preferences` list where each item has a `category` and `description`.
+6. Return a `preferences` list where each item has a `category`, `description`,
+   and numeric `strength` between 0 and 1.
 7. Include at least one `flat_type` preference and at least one `town`
    preference.
 8. Return only the final JSON object.
@@ -745,6 +746,9 @@ Think step by step privately. Do not reveal your reasoning.
 - Prefer market patterns that appear consistently across the summary buckets.
 - Use only the supported categories from the schema.
 - Keep each preference description concise but specific.
+- Use `strength` to reflect how strongly the language suggests that preference:
+  near 1.0 for must-haves, around 0.5 for ordinary preferences, and near 0.0
+  for weak nice-to-have signals.
 - Do not reveal your private reasoning or the market summary in the final answer.
 - Return JSON only. Do not wrap the answer in markdown fences.
 """
