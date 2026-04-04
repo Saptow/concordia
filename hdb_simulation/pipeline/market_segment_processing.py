@@ -784,6 +784,7 @@ def _restrain_transactions(
     transactions: pd.DataFrame,
     *,
     restrained_seller_count: int | None,
+    rng: random.Random | None = None,
 ) -> pd.DataFrame:
     """Uniformly downsample transactions when a seller cap is configured."""
     if restrained_seller_count is None:
@@ -793,10 +794,15 @@ def _restrain_transactions(
     if len(transactions) <= restrained_seller_count:
         return transactions.reset_index(drop=True)
 
-    selected_indices = _sample_indices_uniformly(
-        total_count=len(transactions),
-        cap=restrained_seller_count,
-    )
+    if rng is None:
+        selected_indices = _sample_indices_uniformly(
+            total_count=len(transactions),
+            cap=restrained_seller_count,
+        )
+    else:
+        selected_indices = sorted(
+            rng.sample(range(len(transactions)), k=restrained_seller_count)
+        )
     return transactions.iloc[selected_indices].copy().reset_index(drop=True)
 
 
@@ -1862,15 +1868,15 @@ def _build_buyer_pools_with_regeneration(
             if best_uncovered_seller_ids
             else "none"
         )
-        logging.warning(
-            "Unable to build a retained buyer pool that both seeds all negotiating sellers and covers every seller after %s oversampled-pool attempts; using best pool with %s retained buyers, %s matched negotiating sellers, unmatched negotiating sellers: %s, uncovered sellers: %s.",
-            MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
-            len(best_retained_buyers),
-            best_matched_count,
-            unmatched_text,
-            uncovered_text,
+        raise ValueError(
+            "Unable to build a retained buyer pool that both seeds all "
+            "negotiating sellers and covers every seller after "
+            f"{MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS} oversampled-pool "
+            f"attempts; best pool retained {len(best_retained_buyers)} buyers, "
+            f"matched negotiating sellers={best_matched_count}, "
+            f"unmatched negotiating sellers={unmatched_text}, "
+            f"uncovered sellers={uncovered_text}."
         )
-        return best_broad_buyers, best_retained_buyers
 
     unmatched_text = (
         ", ".join(last_unmatched_seller_ids) if last_unmatched_seller_ids else "unknown"
@@ -1960,39 +1966,73 @@ def build_transaction_conditioned_segment(
         len(hedonic_training_flats),
         window_start,
     )
-    transactions = _restrain_transactions(
-        transactions,
-        restrained_seller_count=config.restrained_seller_count,
+    seller_market_attempts = (
+        max(1, int(config.seller_segment_regeneration_attempts))
+        if config.restrained_seller_count is not None
+        else 1
     )
-    if config.restrained_seller_count is not None:
-        logging.info(
-            "Restrained seller pool to %s transaction(s); oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
-            len(transactions),
-            config.buyer_pool_multiplier,
-            config.retained_buyer_pool_multiplier,
+    last_market_error: Exception | None = None
+    flats: list[dict[str, Any]] = []
+    sellers: list[dict[str, Any]] = []
+    broad_buyers: list[dict[str, Any]] = []
+    retained_buyers: list[dict[str, Any]] = []
+
+    for seller_attempt in range(1, seller_market_attempts + 1):
+        restrained_transactions = _restrain_transactions(
+            transactions,
+            restrained_seller_count=config.restrained_seller_count,
+            rng=rng if config.restrained_seller_count is not None else None,
         )
-    flats = _build_flat_universe(transactions, town_transactions, config)
-    sellers = _build_sellers(
-        flats,
-        hedonic_training_flats,
-        distribution_tables,
-        donors,
-        seller_archetypes,
-        config=config,
-        rng=rng,
-    )
-    broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
-        sellers,
-        flats,
-        hedonic_training_flats,
-        donors,
-        archetypes,
-        config=config,
-        rng=rng,
-        age_prior=age_prior,
-        income_prior=income_prior,
-        distribution_tables=distribution_tables,
-    )
+        if config.restrained_seller_count is not None:
+            logging.info(
+                "Seller market sample %s/%s restrained seller pool to %s transaction(s); oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
+                seller_attempt,
+                seller_market_attempts,
+                len(restrained_transactions),
+                config.buyer_pool_multiplier,
+                config.retained_buyer_pool_multiplier,
+            )
+        flats = _build_flat_universe(restrained_transactions, town_transactions, config)
+        sellers = _build_sellers(
+            flats,
+            hedonic_training_flats,
+            distribution_tables,
+            donors,
+            seller_archetypes,
+            config=config,
+            rng=rng,
+        )
+        try:
+            broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
+                sellers,
+                flats,
+                hedonic_training_flats,
+                donors,
+                archetypes,
+                config=config,
+                rng=rng,
+                age_prior=age_prior,
+                income_prior=income_prior,
+                distribution_tables=distribution_tables,
+            )
+            last_market_error = None
+            break
+        except ValueError as error:
+            last_market_error = error
+            logging.warning(
+                "Rejected seller market sample %s/%s because the retained buyer pool could not satisfy the transacting-segment constraints: %s",
+                seller_attempt,
+                seller_market_attempts,
+                error,
+            )
+            continue
+
+    if last_market_error is not None:
+        raise ValueError(
+            "Unable to build a transacting market segment after "
+            f"{seller_market_attempts} seller-market sample attempts. "
+            f"Last failure: {last_market_error}"
+        ) from last_market_error
 
     if model is not None:
         logging.info(
