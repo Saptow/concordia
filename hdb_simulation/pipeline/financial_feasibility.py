@@ -8,10 +8,7 @@ Interpretation
 Outputs are deterministic affordability proxies based on:
 1. CPF OA accumulation from CPF contribution/allocation schedules
 2. Cash savings from a single published personal saving rate
-3. Monthly debt-service capacity capped by:
-   - MSR
-   - TDSR
-   - MAS-published 43% median TDSR benchmark for new mortgages
+3. Monthly debt-service capacity capped by MSR
 4. Loan quantum from standard amortisation
 5. Resale cash allocation between downpayment and COV
 """
@@ -30,14 +27,11 @@ class BudgetConfig:
     employee_cpf_rate: float = 0.20             # employee CPF contribution
     cpf_oa_interest: float = 0.025              # OA interest, annual
     personal_saving_rate: float = 0.364         # SingStat personal saving rate
-    debt_service_benchmark_ratio: float = 0.43  # MAS median TDSR for new mortgages (see https://www.mas.gov.sg/news/parliamentary-replies/2022/reply-to-parliamentary-question-on-risk-assessment-of-borrowers-defaulting-on-loans-financed-through-floating-rate-loan-packages-by-local-banks )
-
     hdb_income_ceiling: float = 14_000.0
     hdb_rate: float = 0.026
     bank_rate: float = 0.038
 
     msr_cap: float = 0.30
-    tdsr_cap: float = 0.55
 
     hdb_ltv: float = 0.80                      
     bank_ltv: float = 0.75
@@ -186,18 +180,11 @@ def compute_max_monthly_mortgage(
     Returns:
         (max_monthly_mortgage, total_debt_service_benchmark_monthly)
 
-    The 43% figure is treated as an all-in debt-service benchmark, not
-    pre-existing debt. This avoids double counting housing debt.
+    In this simplified model, resale affordability is constrained only by MSR.
     """
     msr_limit = monthly_income * cfg.msr_cap
-    tdsr_limit = monthly_income * cfg.tdsr_cap
-    debt_service_benchmark = monthly_income * cfg.debt_service_benchmark_ratio
-
-    max_monthly_mortgage = max(
-        0.0,
-        min(msr_limit, tdsr_limit, debt_service_benchmark),
-    )
-    return max_monthly_mortgage, debt_service_benchmark
+    max_monthly_mortgage = max(0.0, msr_limit)
+    return max_monthly_mortgage, msr_limit
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +221,6 @@ def allocate_resale_cash(
     cpf_oa_balance: float,
     cash_savings: float,
     use_hdb_loan: bool,
-    forced_max_cov: float = 0.0,
     cfg: BudgetConfig = CFG,
 ) -> tuple[float, float]:
     """
@@ -280,7 +266,6 @@ def allocate_resale_cash(
         max_cov = 0.0
 
     max_valuation = min(max_valuation, val_from_loan)
-    max_cov = forced_max_cov
 
     return max(0.0, max_valuation), max(0.0, max_cov)
 
@@ -313,7 +298,6 @@ class BuyerFinancials:
 def compute_buyer_financials(
     current_age: int,
     monthly_income: float,
-    forced_max_cov: float,
     cfg: BudgetConfig = CFG,
 ) -> BuyerFinancials:
     use_hdb_loan = monthly_income <= cfg.hdb_income_ceiling
@@ -327,7 +311,6 @@ def compute_buyer_financials(
         cpf_oa_balance=cpf_oa,
         cash_savings=cash,
         use_hdb_loan=use_hdb_loan,
-        forced_max_cov=forced_max_cov,
         cfg=cfg,
     )
 
@@ -364,7 +347,7 @@ def generate_financials_for_pool(
 
     Logic:
         monthly_income = upper bound of buyer's own band
-        max_cov       = upper bound of buyer's own band
+        max_cov       = residual cash after downpayment
     """
     for buyer in buyers:
         band_upper = resolve_income_band_upper(
@@ -375,7 +358,6 @@ def generate_financials_for_pool(
         financials = compute_buyer_financials(
             current_age=buyer["age"],
             monthly_income=band_upper,
-            forced_max_cov=band_upper,
             cfg=cfg,
         )
 

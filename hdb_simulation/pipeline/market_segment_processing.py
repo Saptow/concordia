@@ -28,6 +28,7 @@ from concordia.hdb_simulation.models.schemas.common import (
     Amenity,
     AmenityType,
     BuyerBudgetRange,
+    BuyerPreferenceItem,
     BuyerPreferenceProfile,
     Flat,
     SellerExpectationRange,
@@ -795,6 +796,70 @@ Think step by step privately. Do not reveal your reasoning.
 """
 
 
+def _constrain_buyer_preferences_to_reachable_market(
+    buyer: dict[str, Any],
+    preferences: BuyerPreferenceProfile,
+) -> BuyerPreferenceProfile:
+    """Clip flat-type and town preferences to the buyer's reachable market."""
+    payload = buyer.get("preference_classification_input", {})
+    reachable_market_summary = payload.get("reachable_market_summary", {})
+    allowed_flat_types = [
+        str(value).strip()
+        for value in reachable_market_summary.get("reachable_flat_types", ())
+        if str(value).strip()
+    ]
+    allowed_towns = [
+        str(value).strip()
+        for value in reachable_market_summary.get("reachable_towns", ())
+        if str(value).strip()
+    ]
+
+    constrained_items: list[BuyerPreferenceItem] = []
+    original_flat_type_items = preferences.items_for("flat_type")
+    original_town_items = preferences.items_for("town")
+    for item in preferences.preferences:
+        if item.category == "flat_type":
+            if item.description.strip() in allowed_flat_types:
+                constrained_items.append(item)
+            continue
+        if item.category == "town":
+            if item.description.strip() in allowed_towns:
+                constrained_items.append(item)
+            continue
+        constrained_items.append(item)
+
+    if not any(item.category == "flat_type" for item in constrained_items) and allowed_flat_types:
+        constrained_items.insert(
+            0,
+            BuyerPreferenceItem(
+                category="flat_type",
+                description=allowed_flat_types[0],
+                strength=(
+                    max(item.strength for item in original_flat_type_items)
+                    if original_flat_type_items
+                    else 0.75
+                ),
+            ),
+        )
+    if not any(item.category == "town" for item in constrained_items) and allowed_towns:
+        constrained_items.insert(
+            1 if constrained_items and constrained_items[0].category == "flat_type" else 0,
+            BuyerPreferenceItem(
+                category="town",
+                description=allowed_towns[0],
+                strength=(
+                    max(item.strength for item in original_town_items)
+                    if original_town_items
+                    else 0.75
+                ),
+            ),
+        )
+
+    return BuyerPreferenceProfile.model_validate(
+        {"preferences": [item.model_dump() for item in constrained_items]}
+    )
+
+
 def _load_town_transactions(config: SegmentConfig) -> pd.DataFrame:
     """Load all successful resale transactions for the configured town."""
     frame = pd.read_csv(config.resale_path)
@@ -1258,7 +1323,12 @@ def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
 
 
 def _sample_income_band(
-    income_prior: pd.DataFrame, age_band: str, rng: random.Random
+    income_prior: pd.DataFrame,
+    age_band: str,
+    *,
+    current_age: int,
+    min_effective_ceiling: float | None = None,
+    rng: random.Random,
 ) -> str:
     def _income_band_allowed(value: object) -> bool:
         band = INCOME_BANDS.get(str(value).strip())
@@ -1279,6 +1349,18 @@ def _sample_income_band(
             & (income_prior["income_band"].map(_normalize_text) != "total")
         ].copy()
     subset = subset[subset["income_band"].map(_income_band_allowed)]
+    if min_effective_ceiling is not None:
+        subset = subset[
+            subset["income_band"].map(
+                lambda value: (
+                    compute_buyer_financials(
+                        current_age=current_age,
+                        monthly_income=resolve_income_band_upper(str(value).strip()),
+                    ).effective_ceiling
+                    >= float(min_effective_ceiling)
+                )
+            )
+        ]
     subset["count"] = subset["count"].astype(float)
     subset = subset[subset["count"] > 0]
     if subset.empty:
@@ -1301,6 +1383,20 @@ def _sample_overall_distribution(
     subset["count"] = subset["count"].astype(float)
     subset = subset[subset["count"] > 0]
     return str(_weighted_choice(subset, value_column, "count", rng))
+
+
+def _compute_market_affordability_threshold(flats: list[dict[str, Any]]) -> float:
+    """Summarise the sampled market's overall affordability structure with one price threshold."""
+    if not flats:
+        return 0.0
+    prices = [
+        float(flat.get("observed_resale_price", 0.0))
+        for flat in flats
+        if float(flat.get("observed_resale_price", 0.0)) > 0.0
+    ]
+    if not prices:
+        return 0.0
+    return float(np.quantile(prices, FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE))
 
 
 def _build_buyer_budget(
@@ -1382,6 +1478,11 @@ def _build_broad_buyers(
     """Generate broad buyers conditioned on affordability for the sampled flats."""
     broad_count = max(len(flats), math.ceil(len(flats) * config.buyer_pool_multiplier))
     buyers: list[dict[str, Any]] = []
+    market_affordability_threshold = _compute_market_affordability_threshold(flats)
+    logging.info(
+        "Conditioning broad buyer generation on sampled-market affordability threshold %.2f.",
+        market_affordability_threshold,
+    )
     max_attempts = max(
         broad_count,
         broad_count * MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR,
@@ -1392,8 +1493,17 @@ def _build_broad_buyers(
         attempts += 1
         index = len(buyers) + 1
         age_band = str(_weighted_choice(age_prior, "age_group", "population", rng))
-        income_band = _sample_income_band(income_prior, age_band, rng)
         age = _sample_age_from_band(age_band, rng)
+        try:
+            income_band = _sample_income_band(
+                income_prior,
+                age_band,
+                current_age=age,
+                min_effective_ceiling=market_affordability_threshold,
+                rng=rng,
+            )
+        except ValueError:
+            continue
 
         donor = _sample_nemotron_donor(
             donors,
@@ -1434,7 +1544,6 @@ def _build_broad_buyers(
         financials = compute_buyer_financials(
             current_age=age,
             monthly_income=monthly_income,
-            forced_max_cov=monthly_income,
         ).__dict__
 
         buyer_record = {
@@ -1513,7 +1622,10 @@ def _populate_buyer_preferences(
             result_model=BuyerPreferenceProfile,
             max_tokens=500,
         )
-        buyer["preferences"] = result.model_dump()
+        buyer["preferences"] = _constrain_buyer_preferences_to_reachable_market(
+            buyer,
+            result,
+        ).model_dump()
         buyer["budget"] = _build_buyer_budget(
             buyer,
             hedonic_training_flats,
