@@ -33,6 +33,7 @@ from concordia.hdb_simulation.models.schemas.common import (
     SellerExpectationRange,
 )
 from concordia.hdb_simulation.pipeline.financial_feasibility import (
+    INCOME_BANDS,
     compute_buyer_financials,
     resolve_income_band_upper,
 )
@@ -41,6 +42,7 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
+MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
 FLAT_TYPE_LABELS = {
@@ -144,7 +146,7 @@ def _flat_type_from_row(value: Any) -> str:
 
 
 # Sampling helpers used for demographic generation.
-def _parse_age_band(label: str, *, adult_floor: int = 20) -> tuple[int, int]:
+def _parse_age_band(label: str, *, adult_floor: int = 21) -> tuple[int, int]:
     text = str(label or "").strip()
     if not text:
         return adult_floor, max(adult_floor, adult_floor + 4)
@@ -1162,6 +1164,13 @@ def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
 def _sample_income_band(
     income_prior: pd.DataFrame, age_band: str, rng: random.Random
 ) -> str:
+    def _income_band_allowed(value: object) -> bool:
+        band = INCOME_BANDS.get(str(value).strip())
+        if band is None:
+            return False
+        lower = band.get("lower")
+        return lower is not None and float(lower) >= MIN_BUYER_INCOME_BAND_LOWER
+
     age_group = _income_age_group_for_band(age_band, rng)
     subset = income_prior[
         (income_prior["age_group"].map(_normalize_text) == _normalize_text(age_group))
@@ -1173,8 +1182,14 @@ def _sample_income_band(
             (income_prior["sex"].map(_normalize_text) == "total")
             & (income_prior["income_band"].map(_normalize_text) != "total")
         ].copy()
+    subset = subset[subset["income_band"].map(_income_band_allowed)]
     subset["count"] = subset["count"].astype(float)
     subset = subset[subset["count"] > 0]
+    if subset.empty:
+        raise ValueError(
+            "No eligible buyer income bands remain after applying the minimum "
+            f"lower-bound filter of {MIN_BUYER_INCOME_BAND_LOWER:.0f}."
+        )
     return str(_weighted_choice(subset, "income_band", "count", rng))
 
 
@@ -1425,7 +1440,12 @@ def _rank_candidate_buyer_ids_for_seller(
         if budget_max < listing_price:
             continue
 
-        preferences = buyer.get("preferences", {})
+        preference_payload = buyer.get("preferences", {})
+        preference_profile = (
+            BuyerPreferenceProfile.model_validate(preference_payload)
+            if preference_payload.get("preferences")
+            else None
+        )
         feasible_flat_ids = {
             str(flat_id).strip()
             for flat_id in buyer.get("feasible_flat_ids", ())
@@ -1434,9 +1454,9 @@ def _rank_candidate_buyer_ids_for_seller(
         score = 0
         if linked_flat_id and linked_flat_id in feasible_flat_ids:
             score += 10
-        if flat.get("flat_type") in preferences.get("flat_type", ()):
+        if preference_profile and flat.get("flat_type") in preference_profile.values_for("flat_type"):
             score += 3
-        if flat.get("town") in preferences.get("towns", ()):
+        if preference_profile and flat.get("town") in preference_profile.values_for("town"):
             score += 2
         price_gap = abs(budget_max - listing_price)
         ranked.append((score, -price_gap, buyer_id))

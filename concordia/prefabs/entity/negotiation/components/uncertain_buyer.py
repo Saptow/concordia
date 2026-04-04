@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
+from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
@@ -155,19 +156,7 @@ class UncertainBuyer(
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
         buyer_state = listing_payload.buyer_state
-
-        own_belief = self._beliefs['own_reservation']
         distribution = buyer_state.effective_reservation
-        own_belief.mean = max(0.0, float(distribution.mean))
-        own_belief.std = float(distribution.std)
-        own_belief.confidence = max(
-            own_belief.confidence,
-            max(0.0, min(1.0, float(distribution.confidence))),
-        )
-        own_belief.evidence_count = max(
-            own_belief.evidence_count,
-            int(distribution.evidence_count),
-        )
 
         listing_price = uncertain_helper.coerce_positive_float(
             listing_payload.listing_record.listing_price
@@ -180,16 +169,34 @@ class UncertainBuyer(
         )
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         priors = self._calibrate_initial_pairing_priors(listing_payload)
+        own_confidence = max(0.0, min(1.0, float(distribution.confidence)))
         if priors is not None:
-            self._beliefs['own_reservation'].confidence = priors.own_confidence
+            own_confidence = max(own_confidence, float(priors.own_confidence))
             self._beliefs['counterpart_reservation'].confidence = (
                 priors.counterpart_confidence
             )
+        # Keep the listing-stage preference prior and the negotiated-flat NIG prior
+        # distinct: the former informs the moments, while the latter is specific to
+        # this buyer-flat pair during negotiation.
+        self._beliefs['own_reservation'] = self._build_flat_specific_own_prior(
+            listing_payload,
+            own_confidence=own_confidence,
+        )
 
     def get_effective_reservation_distribution(
         self,
     ) -> uncertain_helper.NormalDistribution:
-        return self._beliefs['own_reservation'].model_copy(deep=True)
+        own_belief = self._beliefs['own_reservation']
+        if isinstance(own_belief, uncertain_helper.NormalInverseGamma):
+            return uncertain_helper.NormalDistribution(
+                name=own_belief.name,
+                mean=max(0.0, float(own_belief.get_expected_mean)),
+                std=math.sqrt(max(1e-9, float(own_belief.get_expected_variance))),
+                confidence=max(0.0, min(1.0, float(own_belief.confidence))),
+                evidence_count=int(own_belief.evidence_count),
+                last_updated=own_belief.last_updated,
+            )
+        return own_belief.model_copy(deep=True)
 
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0, own_confidence: float = 0.5, counterpart_confidence: float = 0.5):
         """Initialize default beliefs about negotiation parameters."""
@@ -290,6 +297,109 @@ class UncertainBuyer(
                 min(1.0, priors.counterpart_confidence),
             ),
         )
+
+    def _build_flat_specific_own_prior(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+        *,
+        own_confidence: float,
+    ) -> uncertain_helper.NormalInverseGamma:
+        buyer_state = listing_payload.buyer_state
+        listing_prior = buyer_state.effective_reservation
+        fit_score = self._estimate_preference_fit_score(
+            listing_payload.listing_record.flat.model_dump(mode='json')
+        )
+        base_mean = max(0.0, float(listing_prior.mean))
+        base_std = max(1.0, float(listing_prior.std))
+        predictive_mean = max(
+            0.0,
+            base_mean + ((fit_score - 0.5) * 0.5 * base_std),
+        )
+        irreducible_noise_sq = max(1.0, (0.35 * base_std) ** 2)
+        predictive_variance = max(
+            1.0,
+            (base_std ** 2) * (1.0 + (1.0 - fit_score)) + irreducible_noise_sq,
+        )
+        failed_negotiation_count = max(0, len(buyer_state.negotiation_history))
+        kappa = self._kappa_from_failed_negotiations(failed_negotiation_count)
+        alpha = self._alpha_from_uncertainty_level(1.0 - own_confidence)
+        beta = self._beta_from_predictive_variance(
+            predictive_variance,
+            kappa=kappa,
+            alpha=alpha,
+        )
+        uncertain_helper.append_debug_trace(
+            self._debug_trace,
+            (
+                'Initialized flat-specific buyer NIG prior from listing-stage '
+                f'mean={base_mean:.2f}, std={base_std:.2f}, fit={fit_score:.2f}, '
+                f'kappa={kappa:.2f}, alpha={alpha:.2f}, beta={beta:.2f}.'
+            ),
+        )
+        return uncertain_helper.NormalInverseGamma(
+            name='Your Reservation Value For This Flat',
+            mu=predictive_mean,
+            lambda_=kappa,
+            a=alpha,
+            b=beta,
+            confidence=max(0.0, min(1.0, own_confidence)),
+            evidence_count=int(listing_prior.evidence_count),
+            last_updated=listing_prior.last_updated,
+        )
+
+    def _estimate_preference_fit_score(
+        self,
+        flat_listing: dict[str, Any],
+    ) -> float:
+        profile = common_schemas.coerce_buyer_preferences(self._preferences)
+        if profile is None:
+            return 0.5
+
+        checks: list[float] = []
+        flat_type = str(flat_listing.get('flat_type', '')).strip()
+        preferred_flat_types = profile.values_for('flat_type')
+        if preferred_flat_types:
+            checks.append(1.0 if flat_type in preferred_flat_types else 0.0)
+
+        town = str(flat_listing.get('town', '')).strip()
+        preferred_towns = profile.values_for('town')
+        if preferred_towns:
+            checks.append(1.0 if town in preferred_towns else 0.0)
+
+        amenities = flat_listing.get('amenities', {})
+        amenities = amenities if isinstance(amenities, dict) else {}
+        amenity_matches = {
+            'transport': int(amenities.get('mrt', {}).get('count', 0)) > 0,
+            'schools': int(amenities.get('primary_schools', {}).get('count', 0)) > 0,
+            'shopping': int(amenities.get('malls', {}).get('count', 0)) > 0,
+            'dining': int(amenities.get('hawker_centres', {}).get('count', 0)) > 0,
+        }
+        for category, is_match in amenity_matches.items():
+            if profile.values_for(category):
+                checks.append(1.0 if is_match else 0.0)
+
+        if not checks:
+            return 0.5
+        return sum(checks) / len(checks)
+
+    @staticmethod
+    def _kappa_from_failed_negotiations(failed_negotiation_count: int) -> float:
+        return max(1.0, 1.0 + float(failed_negotiation_count))
+
+    @staticmethod
+    def _alpha_from_uncertainty_level(uncertainty_level: float) -> float:
+        bounded_uncertainty = max(0.0, min(1.0, float(uncertainty_level)))
+        return 1.5 + (4.0 * (1.0 - bounded_uncertainty))
+
+    @staticmethod
+    def _beta_from_predictive_variance(
+        predictive_variance: float,
+        *,
+        kappa: float,
+        alpha: float,
+    ) -> float:
+        variance = max(1e-9, float(predictive_variance))
+        return variance * kappa * max(1e-9, alpha - 1.0) / (kappa + 1.0)
 
     def _build_belief_summary_for_strategy(self) -> str:
         own_reservation = self._beliefs['own_reservation']
@@ -518,7 +628,8 @@ class UncertainBuyer(
 
         # own distribution's summary statistics
         own_reservation=self._beliefs['own_reservation']
-        mu_own, var_own = own_reservation.mean, own_reservation.std**2
+        mu_own = own_reservation.get_expected_mean
+        var_own = max(1e-9, own_reservation.get_expected_variance)
 
         # find surplus (own-counterpart)
         mu_diff = mu_own - mu_cp
