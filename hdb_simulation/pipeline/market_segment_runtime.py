@@ -7,11 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from absl import logging
+from fastembed import SparseTextEmbedding
+from sentence_transformers import SentenceTransformer
 
-from configs import REPO_ROOT, SegmentConfig
+from configs import QdrantConfig, REPO_ROOT, SegmentConfig
 from concordia.concordia.contrib.language_models.vllm.vllm_model import (
     VLLMLanguageModel,
 )
+from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
+from concordia.hdb_simulation.pipeline import flat_embedding
 from concordia.hdb_simulation.pipeline import market_segment_processing
 
 
@@ -117,8 +121,74 @@ def build_or_load_market_segment(
         segment_config,
         model=model,
     )
-    manifest = market_segment_processing.save_segment_outputs(
+    market_segment_processing.save_segment_outputs(
         bundle,
         segment_config.output_dir,
     )
-    return bundle, manifest
+    manifest_path = segment_config.output_dir / 'manifest.json'
+    _, resolved_manifest = load_bundle_from_manifest(manifest_path)
+    return bundle, resolved_manifest
+
+
+def ensure_market_segment_listing_index(
+    *,
+    segment_config: SegmentConfig,
+    manifest: dict[str, object],
+    dense_embedder: SentenceTransformer,
+    sparse_embedder: SparseTextEmbedding | None = None,
+    client: Any | None = None,
+    rebuild: bool = False,
+) -> tuple[dict[str, object], int]:
+    """Ensure the market-segment listing index exists and return an enriched manifest."""
+    collection_name = (
+        str(manifest.get('qdrant_collection_name', '')).strip()
+        or QdrantConfig.DEFAULT_COLLECTION_NAME
+    )
+    persisted_qdrant_db_path = (
+        str(manifest.get('qdrant_db_path', '')).strip()
+        or QdrantConfig.market_db_path(
+            town=segment_config.town,
+            year=segment_config.year,
+            restrained_seller_count=segment_config.restrained_seller_count,
+            buyer_pool_multiplier=segment_config.buyer_pool_multiplier,
+        )
+    )
+
+    enriched_manifest = dict(manifest)
+    enriched_manifest['qdrant_db_path'] = persisted_qdrant_db_path
+    enriched_manifest['qdrant_collection_name'] = collection_name
+
+    if not rebuild and str(manifest.get('qdrant_db_path', '')).strip():
+        existing_client = qdrant_schemas.make_qdrant_client(persisted_qdrant_db_path)
+        if existing_client.collection_exists(collection_name):
+            logging.info(
+                'Reusing existing market-segment Qdrant index from %s.',
+                persisted_qdrant_db_path,
+            )
+            return enriched_manifest, 0
+        logging.warning(
+            'Manifest pointed to %s, but collection %s was missing; rebuilding listing index.',
+            persisted_qdrant_db_path,
+            collection_name,
+        )
+
+    logging.info('Indexing generated flats into Qdrant listing portal.')
+    runtime_client = client or qdrant_schemas.make_qdrant_client(
+        QdrantConfig.DEFAULT_DB_PATH
+    )
+    if runtime_client.collection_exists(collection_name):
+        runtime_client.delete_collection(collection_name)
+    records = flat_embedding.index_market_segment_flats(
+        flat_data_path=manifest['flat_units_path'],
+        seller_data_path=manifest['sellers_path'],
+        dense_embedder=dense_embedder,
+        sparse_embedder=sparse_embedder,
+        client=runtime_client,
+        collection_name=collection_name,
+        db_path=QdrantConfig.DEFAULT_DB_PATH,
+        persist_db_path=persisted_qdrant_db_path,
+        listed_week=0,
+        active=False,
+    )
+    logging.info('Saved persistent Qdrant copy to %s.', persisted_qdrant_db_path)
+    return enriched_manifest, len(records)
