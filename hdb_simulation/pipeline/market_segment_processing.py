@@ -1402,6 +1402,7 @@ def _build_buyer_budget(
 def _annotate_buyer_market_feasibility(
     buyer: dict[str, Any],
     flats: list[dict[str, Any]],
+    price_by_flat_id: dict[str, float],
     archetypes: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Annotate buyer feasibility against the sampled flat market."""
@@ -1410,7 +1411,7 @@ def _annotate_buyer_market_feasibility(
     feasible_flat_ids = [
         flat["flat_id"]
         for flat in flats
-        if float(flat["observed_resale_price"]) <= effective_ceiling
+        if float(price_by_flat_id.get(str(flat["flat_id"]), 0.0)) <= effective_ceiling
     ]
     buyer["feasible_flat_ids"] = feasible_flat_ids
     if not feasible_flat_ids:
@@ -1433,6 +1434,7 @@ def _annotate_buyer_market_feasibility(
 
 def _build_broad_buyers(
     flats: list[dict[str, Any]],
+    price_by_flat_id: dict[str, float],
     hedonic_training_flats: list[dict[str, Any]],
     donors: pd.DataFrame,
     archetypes: list[dict[str, Any]],
@@ -1523,6 +1525,7 @@ def _build_broad_buyers(
         if not _annotate_buyer_market_feasibility(
             buyer_record,
             flats,
+            price_by_flat_id,
             archetypes,
         ):
             continue
@@ -1590,6 +1593,7 @@ def _populate_buyer_preferences(
 def _retain_feasible_buyers(
     buyers: list[dict[str, Any]],
     flats: list[dict[str, Any]],
+    price_by_flat_id: dict[str, float],
     archetypes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Keep only buyers who can financially reach at least one flat in the seller pool."""
@@ -1599,6 +1603,7 @@ def _retain_feasible_buyers(
         if not _annotate_buyer_market_feasibility(
             buyer,
             flats,
+            price_by_flat_id,
             archetypes,
         ):
             continue
@@ -1646,15 +1651,15 @@ def _validate_seller_candidate_coverage(
 
 
 def _validate_market_quantile_dominance(
-    flats: list[dict[str, Any]],
+    sellers: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
 ) -> tuple[bool, dict[str, Any]]:
-    """Checks strict market-level quantile dominance of buyer ceilings over flat prices."""
-    flat_prices = np.array(
+    """Checks strict market-level quantile dominance of buyer ceilings over listing prices."""
+    listing_prices = np.array(
         [
-            float(flat.get("observed_resale_price", 0.0))
-            for flat in flats
-            if float(flat.get("observed_resale_price", 0.0)) > 0.0
+            float(seller.get("expectations", {}).get("max_price", 0.0))
+            for seller in sellers
+            if float(seller.get("expectations", {}).get("max_price", 0.0)) > 0.0
         ],
         dtype=float,
     )
@@ -1666,31 +1671,31 @@ def _validate_market_quantile_dominance(
         ],
         dtype=float,
     )
-    if flat_prices.size == 0 or buyer_ceilings.size == 0:
+    if listing_prices.size == 0 or buyer_ceilings.size == 0:
         diagnostics = {
             "ok": False,
             "reason": "empty_market_or_buyers",
-            "flat_count": int(flat_prices.size),
+            "listing_count": int(listing_prices.size),
             "buyer_count": int(buyer_ceilings.size),
         }
         return False, diagnostics
 
     quantiles = np.array(MARKET_QUANTILE_DOMINANCE_GRID, dtype=float)
-    flat_quantiles = np.quantile(flat_prices, quantiles)
+    listing_quantiles = np.quantile(listing_prices, quantiles)
     buyer_quantiles = np.quantile(buyer_ceilings, quantiles)
-    gaps = buyer_quantiles - flat_quantiles
-    top_supported = float(np.max(buyer_ceilings)) >= float(np.max(flat_prices))
+    gaps = buyer_quantiles - listing_quantiles
+    top_supported = float(np.max(buyer_ceilings)) >= float(np.max(listing_prices))
     diagnostics = {
         "ok": bool(np.all(gaps >= 0.0) and top_supported),
         "quantiles": quantiles.tolist(),
-        "flat_quantiles": np.round(flat_quantiles, 2).tolist(),
+        "listing_quantiles": np.round(listing_quantiles, 2).tolist(),
         "buyer_quantiles": np.round(buyer_quantiles, 2).tolist(),
         "gaps": np.round(gaps, 2).tolist(),
         "min_gap": round(float(np.min(gaps)), 2),
-        "max_flat_price": round(float(np.max(flat_prices)), 2),
+        "max_listing_price": round(float(np.max(listing_prices)), 2),
         "max_buyer_ceiling": round(float(np.max(buyer_ceilings)), 2),
         "top_supported": bool(top_supported),
-        "flat_count": int(flat_prices.size),
+        "listing_count": int(listing_prices.size),
         "buyer_count": int(buyer_ceilings.size),
     }
     return bool(diagnostics["ok"]), diagnostics
@@ -1990,6 +1995,13 @@ def _build_buyer_pools_with_regeneration(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Retry buyer generation against a fixed seller market until constraints pass."""
     seller_count = len(flats)
+    price_by_flat_id = {
+        str(seller.get("linked_flat_id", "")).strip(): float(
+            seller.get("expectations", {}).get("max_price", 0.0)
+        )
+        for seller in sellers
+        if str(seller.get("linked_flat_id", "")).strip()
+    }
     target_retained_buyer_count = max(
         1,
         math.ceil(len(flats) * config.retained_buyer_pool_multiplier),
@@ -2005,6 +2017,7 @@ def _build_buyer_pools_with_regeneration(
     for broad_attempt in range(1, MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS + 1):
         broad_buyers = _build_broad_buyers(
             flats,
+            price_by_flat_id,
             hedonic_training_flats,
             donors,
             archetypes,
@@ -2017,6 +2030,7 @@ def _build_buyer_pools_with_regeneration(
         oversampled_retained_buyers = _retain_feasible_buyers(
             broad_buyers,
             flats,
+            price_by_flat_id,
             archetypes,
         )
         logging.info(
@@ -2048,7 +2062,7 @@ def _build_buyer_pools_with_regeneration(
             market_support_ok,
             market_support_diagnostics,
         ) = _validate_market_quantile_dominance(
-            flats,
+            sellers,
             oversampled_retained_buyers,
         )
         if not market_support_ok:
