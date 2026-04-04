@@ -1569,7 +1569,8 @@ def _build_buyer_pools_with_regeneration(
     distribution_tables: dict[str, pd.DataFrame],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Retry buyer generation against a fixed seller market until constraints pass."""
-    target_retained_count = max(
+    seller_count = len(flats)
+    target_retained_buyer_count = max(
         1,
         math.ceil(len(flats) * config.retained_buyer_pool_multiplier),
     )
@@ -1596,14 +1597,15 @@ def _build_buyer_pools_with_regeneration(
             archetypes,
         )
         logging.info(
-            "Oversampled buyer pool %s/%s produced %s feasible buyers for %s sellers before matching.",
+            "Oversampled buyer pool %s/%s produced %s feasible buyers for %s sellers before matching; retained buyer target=%s.",
             broad_attempt,
             MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
             len(oversampled_retained_buyers),
-            target_retained_count,
+            seller_count,
+            target_retained_buyer_count,
         )
 
-        if len(oversampled_retained_buyers) < target_retained_count:
+        if len(oversampled_retained_buyers) < target_retained_buyer_count:
             last_unmatched_seller_ids = [
                 str(seller.get("seller_id", ""))
                 for seller in sellers
@@ -1611,11 +1613,11 @@ def _build_buyer_pools_with_regeneration(
                 == "negotiating"
             ]
             logging.info(
-                "Skipping oversampled buyer pool %s/%s because only %s feasible buyers were retained, below the %s required sellers.",
+                "Skipping oversampled buyer pool %s/%s because only %s feasible buyers were retained, below the retained buyer target of %s.",
                 broad_attempt,
                 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
                 len(oversampled_retained_buyers),
-                target_retained_count,
+                target_retained_buyer_count,
             )
             continue
 
@@ -1629,11 +1631,12 @@ def _build_buyer_pools_with_regeneration(
             retained_buyers,
         )
         logging.info(
-            "Oversampled buyer pool %s/%s retained %s feasible buyers for %s sellers; matched negotiating sellers=%s unmatched negotiating sellers=%s.",
+            "Oversampled buyer pool %s/%s retained %s feasible buyers for %s sellers; retained buyer target=%s; matched negotiating sellers=%s unmatched negotiating sellers=%s.",
             broad_attempt,
             MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
             len(retained_buyers),
-            target_retained_count,
+            seller_count,
+            target_retained_buyer_count,
             len(match_assignments),
             len(unmatched_seller_ids),
         )
@@ -1646,7 +1649,7 @@ def _build_buyer_pools_with_regeneration(
             best_matched_count = matched_count
             best_unmatched_seller_ids = unmatched_seller_ids
 
-        if len(retained_buyers) >= target_retained_count and seedable:
+        if len(retained_buyers) >= target_retained_buyer_count and seedable:
             return broad_buyers, retained_buyers
 
     if best_retained_buyers:
