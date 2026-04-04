@@ -12,6 +12,7 @@ from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import game_master as gm_components
 from concordia.components.agent import action_spec_ignored
+from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.name_utils import resolve_profile_name
 from concordia.language_model import language_model
@@ -40,9 +41,12 @@ def build_market_profiles(
     ]
     if str(buyer.get('general_persona', '')).strip():
       description_parts.append(str(buyer['general_persona']).strip())
-    if str(buyer.get('preferences', {}).get('features', '')).strip():
+    preference_summary = common_schemas.summarize_buyer_features(
+        buyer.get('preferences')
+    )
+    if preference_summary:
       description_parts.append(
-          'Housing priorities: ' + str(buyer['preferences']['features']).strip()
+          'Housing priorities: ' + preference_summary
       )
     buyer_profiles[buyer_id] = {
         'name': buyer_name,
@@ -223,11 +227,16 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
     flat = seller_profile['flat']
     listing_price = float(seller_profile['expectations']['max_price'])
     linked_flat_id = str(seller_raw.get('linked_flat_id', '')).strip()
+    seeded_buyer_id = str(seller_raw.get('seeded_buyer_id', '')).strip()
     preferred_buyer_ids = [
         str(buyer_id).strip()
         for buyer_id in seller_raw.get('potential_buyer_ids', ())
         if str(buyer_id).strip()
     ]
+    if seeded_buyer_id:
+      preferred_buyer_ids = [seeded_buyer_id] + [
+          buyer_id for buyer_id in preferred_buyer_ids if buyer_id != seeded_buyer_id
+      ]
 
     if preferred_buyer_ids:
       ranked_preferred_buyer_ids: list[str] = []
@@ -255,7 +264,9 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
       if budget_max < listing_price:
         continue
 
-      preferences = buyer_profile.get('preferences', {})
+      preferences = common_schemas.coerce_buyer_preferences(
+          buyer_profile.get('preferences')
+      )
       feasible_flat_ids = {
           str(flat_id).strip()
           for flat_id in buyer_raw.get('feasible_flat_ids', ())
@@ -264,9 +275,9 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
       score = 0
       if linked_flat_id and linked_flat_id in feasible_flat_ids:
         score += 10
-      if flat['flat_type'] in preferences.get('flat_type', ()):
+      if preferences and flat['flat_type'] in preferences.values_for('flat_type'):
         score += 3
-      if flat['town'] in preferences.get('towns', ()):
+      if preferences and flat['town'] in preferences.values_for('town'):
         score += 2
       price_gap = abs(budget_max - listing_price)
       ranked.append((score, -price_gap, buyer_id))

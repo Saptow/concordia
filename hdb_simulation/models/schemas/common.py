@@ -3,10 +3,11 @@
 import copy
 import dataclasses
 import math
+from collections.abc import Mapping
 from enum import StrEnum
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Structured Action Schemas (shared)
 class ActionReasoningFields(BaseModel):
@@ -174,10 +175,91 @@ class NormalDistribution:
         return (lower, upper)
 
 
+PREFERENCE_CATEGORY_LABELS: dict[str, str] = {
+    'flat_type': 'Flat Type',
+    'town': 'Town',
+    'transport': 'Transport',
+    'schools': 'Schools',
+    'shopping': 'Shopping',
+    'dining': 'Dining',
+    'other': 'Other Priorities',
+}
+
+
+class BuyerPreferenceItem(BaseModel):
+    category: Literal[
+        'flat_type',
+        'town',
+        'transport',
+        'schools',
+        'shopping',
+        'dining',
+        'other',
+    ]
+    description: str = Field(min_length=1)
+
+
 class BuyerPreferenceProfile(BaseModel):
-    flat_type: List[str] = Field(default_factory=list)
-    towns: List[str] = Field(default_factory=list)
-    features: str = ''
+    preferences: List[BuyerPreferenceItem] = Field(min_length=2)
+
+    @model_validator(mode='after')
+    def _validate_required_preferences(self) -> 'BuyerPreferenceProfile':
+        if not self.values_for('flat_type'):
+            raise ValueError('BuyerPreferenceProfile must include at least one flat_type preference.')
+        if not self.values_for('town'):
+            raise ValueError('BuyerPreferenceProfile must include at least one town preference.')
+        return self
+
+    def values_for(self, category: str) -> list[str]:
+        return [
+            preference.description.strip()
+            for preference in self.preferences
+            if preference.category == category and preference.description.strip()
+        ]
+
+    def grouped_preferences(self) -> list[tuple[str, list[str]]]:
+        grouped: list[tuple[str, list[str]]] = []
+        for category, label in PREFERENCE_CATEGORY_LABELS.items():
+            values = self.values_for(category)
+            if values:
+                grouped.append((label, values))
+        return grouped
+
+    def feature_summary(self) -> str:
+        return '; '.join(
+            f'{label}: {", ".join(values)}'
+            for label, values in self.grouped_preferences()
+            if label not in {'Flat Type', 'Town'}
+        )
+
+
+def coerce_buyer_preferences(
+    preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
+) -> BuyerPreferenceProfile | None:
+    if isinstance(preferences, BuyerPreferenceProfile):
+        return preferences
+    if isinstance(preferences, Mapping):
+        return BuyerPreferenceProfile.model_validate(dict(preferences))
+    return None
+
+
+def summarize_buyer_features(
+    preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
+) -> str:
+    profile = coerce_buyer_preferences(preferences)
+    return profile.feature_summary() if profile is not None else ''
+
+
+def format_buyer_preferences(
+    preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
+) -> list[str]:
+    profile = coerce_buyer_preferences(preferences)
+    if profile is None:
+        return []
+    return [
+        f'- {label}: {", ".join(values)}'
+        for label, values in profile.grouped_preferences()
+    ]
 
 class BaseBuyer(BaseModel):
     id: str

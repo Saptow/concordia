@@ -340,12 +340,14 @@ class ListingPortal:
         buyer: listing_schemas.PortalBuyer,
         supplied_query: str,
     ) -> str:
-        features = buyer.preferences.features.strip()
+        flat_types = buyer.preferences.values_for('flat_type')
+        towns = buyer.preferences.values_for('town')
+        features = buyer.preferences.feature_summary()
         if supplied_query.strip():
             return supplied_query.strip()
         return (
-            f"{', '.join(buyer.preferences.flat_type)} flat in "
-            f"{', '.join(buyer.preferences.towns)}. {features}"
+            f"{', '.join(flat_types)} flat in "
+            f"{', '.join(towns)}. {features}"
         ).strip()
 
     @staticmethod

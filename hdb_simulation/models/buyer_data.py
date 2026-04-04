@@ -14,9 +14,12 @@ Schema:
             "max_price": float
         },
         "preferences": {
-            "flat_type": List[str],
-            "towns": List[str],
-            "features": str # free text describing other preferences
+            "preferences": [
+                {
+                    "category": str,  # one of flat_type, town, transport, schools, shopping, dining, other
+                    "description": str
+                }
+            ]
         }
 '''
 
@@ -32,9 +35,16 @@ BUYER_DATA = {
             "max_price": 545000.0
         },
         "preferences": {
-            "flat_type": ["3-Room", "4-Room"],
-            "towns": ["Jurong East", "Bukit Batok", "Clementi"],
-            "features": "Preferably near a park and with good schools nearby."
+            "preferences": [
+                {"category": "flat_type", "description": "3-Room"},
+                {"category": "flat_type", "description": "4-Room"},
+                {"category": "town", "description": "Jurong East"},
+                {"category": "town", "description": "Bukit Batok"},
+                {"category": "town", "description": "Clementi"},
+                {"category": "schools", "description": "Good schools nearby"},
+                {"category": "shopping", "description": "Supermarkets nearby"},
+                {"category": "other", "description": "Near a park"},
+            ]
         },
     },
     "buyer_002": {
@@ -47,9 +57,16 @@ BUYER_DATA = {
             "max_price": 740000.0
         },
         "preferences": {
-            "flat_type": ["4-Room", "5-Room"],
-            "towns": ["Tampines", "Pasir Ris", "Bedok"],
-            "features": "Near MRT, childcare options, and supermarkets."
+            "preferences": [
+                {"category": "flat_type", "description": "4-Room"},
+                {"category": "flat_type", "description": "5-Room"},
+                {"category": "town", "description": "Tampines"},
+                {"category": "town", "description": "Pasir Ris"},
+                {"category": "town", "description": "Bedok"},
+                {"category": "transport", "description": "Near MRT"},
+                {"category": "shopping", "description": "Supermarkets nearby"},
+                {"category": "other", "description": "Childcare options nearby"},
+            ]
         },
     },
     "buyer_003": {
@@ -62,9 +79,15 @@ BUYER_DATA = {
             "max_price": 505000.0
         },
         "preferences": {
-            "flat_type": ["3-Room"],
-            "towns": ["Woodlands", "Yishun", "Sembawang"],
-            "features": "Good ventilation, quiet surroundings, and close to bus interchange."
+            "preferences": [
+                {"category": "flat_type", "description": "3-Room"},
+                {"category": "town", "description": "Woodlands"},
+                {"category": "town", "description": "Yishun"},
+                {"category": "town", "description": "Sembawang"},
+                {"category": "transport", "description": "Close to bus interchange"},
+                {"category": "other", "description": "Good ventilation"},
+                {"category": "other", "description": "Quiet surroundings"},
+            ]
         },
     },
     "buyer_004": {
@@ -77,9 +100,16 @@ BUYER_DATA = {
             "max_price": 875000.0
         },
         "preferences": {
-            "flat_type": ["5-Room", "Executive"],
-            "towns": ["Bishan", "Toa Payoh", "Serangoon"],
-            "features": "High floor preferred, larger living room, and nearby food options."
+            "preferences": [
+                {"category": "flat_type", "description": "5-Room"},
+                {"category": "flat_type", "description": "Executive"},
+                {"category": "town", "description": "Bishan"},
+                {"category": "town", "description": "Toa Payoh"},
+                {"category": "town", "description": "Serangoon"},
+                {"category": "dining", "description": "Nearby food options"},
+                {"category": "other", "description": "High floor preferred"},
+                {"category": "other", "description": "Larger living room"},
+            ]
         },
     },
     "buyer_005": {
@@ -92,9 +122,15 @@ BUYER_DATA = {
             "max_price": 670000.0
         },
         "preferences": {
-            "flat_type": ["4-Room"],
-            "towns": ["Sengkang", "Punggol", "Hougang"],
-            "features": "Near LRT/MRT, park connector access, and good natural lighting."
+            "preferences": [
+                {"category": "flat_type", "description": "4-Room"},
+                {"category": "town", "description": "Sengkang"},
+                {"category": "town", "description": "Punggol"},
+                {"category": "town", "description": "Hougang"},
+                {"category": "transport", "description": "Near LRT/MRT"},
+                {"category": "other", "description": "Park connector access"},
+                {"category": "other", "description": "Good natural lighting"},
+            ]
         },
     },
     "buyer_006": {
@@ -107,9 +143,15 @@ BUYER_DATA = {
             "max_price": 1015000.0
         },
         "preferences": {
-            "flat_type": ["Executive", "5-Room"],
-            "towns": ["Queenstown", "Bukit Merah", "Clementi"],
-            "features": "Prefer mature estate amenities and within walking distance to MRT."
+            "preferences": [
+                {"category": "flat_type", "description": "Executive"},
+                {"category": "flat_type", "description": "5-Room"},
+                {"category": "town", "description": "Queenstown"},
+                {"category": "town", "description": "Bukit Merah"},
+                {"category": "town", "description": "Clementi"},
+                {"category": "transport", "description": "Within walking distance to MRT"},
+                {"category": "other", "description": "Mature estate amenities"},
+            ]
         },
     },
 }

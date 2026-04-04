@@ -243,14 +243,9 @@ class Entity(prefab_lib.Prefab):
         safe_description = _escape_format_braces(description)
         preferences_block = ''
         if role == common_schemas.RoleType.BUYER and buyer_preferences:
-            preference_lines = []
-            for key, value in buyer_preferences.items():
-                label = str(key).replace('_', ' ').strip().title()
-                if isinstance(value, list):
-                    value_str = ', '.join(str(v) for v in value) if value else 'None'
-                else:
-                    value_str = str(value)
-                preference_lines.append(f'- {label}: {value_str}')
+            preference_lines = common_schemas.format_buyer_preferences(
+                buyer_preferences
+            )
             preferences_block = 'Buyer preferences:\n' + '\n'.join(preference_lines) + '\n'
             preferences_block = _escape_format_braces(preferences_block)
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
