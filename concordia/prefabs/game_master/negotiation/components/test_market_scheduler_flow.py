@@ -1,12 +1,12 @@
 import copy
 import unittest
 
-from concordia.concordia.prefabs.game_master.negotiation.components import (
+from concordia.prefabs.game_master.negotiation.components import (
     hdb_coordinator_helper,
     hdb_listing,
     hdb_negotiation_helpers,
 )
-from concordia.concordia.prefabs.game_master.negotiation import hdb_initializer_gm
+from concordia.prefabs.game_master.negotiation import hdb_initializer_gm
 from concordia.hdb_simulation.models.buyer_data import BUYER_DATA
 from concordia.hdb_simulation.models.seller_data import SELLER_DATA
 
