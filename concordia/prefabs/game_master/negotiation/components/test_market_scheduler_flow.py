@@ -126,6 +126,7 @@ class _FakeNegotiationModule:
     self._enabled = True
     self.relisting_payloads = []
     self.pair_states = []
+    self.last_relisting_pair_records = None
 
   def set_enabled(self, enabled: bool) -> None:
     self.enabled = enabled
@@ -138,7 +139,11 @@ class _FakeNegotiationModule:
     return list(self._open_pairs)
 
   def build_relisting_transfer_payloads(self, pair_records, *, week_number: int):
-    del pair_records, week_number
+    del week_number
+    normalized_pair_records = list(pair_records)
+    self.last_relisting_pair_records = normalized_pair_records
+    if not normalized_pair_records:
+      return []
     return list(self.relisting_payloads)
 
   def get_pair_state_snapshots(self, pair_ids=None):
