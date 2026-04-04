@@ -650,6 +650,13 @@ def render_dynamic_html(
   Returns:
     Complete HTML string with embedded data and dynamic rendering.
   """
+  return structured_logging_html.render_dynamic_html(
+      simulation_log=simulation_log,
+      entity_memories=entity_memories,
+      game_master_memories=game_master_memories,
+      player_scores=player_scores,
+      title=title,
+  )
 
   # Build the content store data for JavaScript
   content_store_data = simulation_log.content_store.to_dict()

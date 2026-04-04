@@ -20,6 +20,44 @@ from concordia.typing import entity_component
 from concordia.typing import prefab as prefab_lib
 
 
+def _unique_market_display_name(
+    *,
+    participant_id: str,
+    requested_name: str,
+    role_label: str,
+    seen_names: set[str],
+) -> str:
+  """Returns a display name that is unique across the whole market."""
+  candidate = str(requested_name).strip() or str(participant_id).strip()
+  if candidate not in seen_names:
+    seen_names.add(candidate)
+    return candidate
+
+  suffix = participant_id.rsplit('_', 1)[-1]
+  disambiguated = f'{candidate} ({role_label} {suffix})'
+  if disambiguated not in seen_names:
+    logging.warning(
+        'Duplicate participant display name %r detected; using %r instead.',
+        candidate,
+        disambiguated,
+    )
+    seen_names.add(disambiguated)
+    return disambiguated
+
+  counter = 2
+  while True:
+    numbered = f'{disambiguated} #{counter}'
+    if numbered not in seen_names:
+      logging.warning(
+          'Duplicate participant display name %r detected repeatedly; using %r instead.',
+          candidate,
+          numbered,
+      )
+      seen_names.add(numbered)
+      return numbered
+    counter += 1
+
+
 def build_market_profiles(
     bundle: Mapping[str, Any],
     *,
@@ -27,11 +65,18 @@ def build_market_profiles(
 ) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
   """Build listing/negotiation profiles from a market-segment bundle."""
   buyer_profiles: dict[str, dict[str, object]] = {}
+  seen_names: set[str] = set()
   for buyer in bundle.get('buyers_retained', ()):
     buyer_id = str(buyer['buyer_id'])
     buyer_name = resolve_profile_name(
         buyer,
         fallback_name=f"{town} Buyer {buyer_id.rsplit('_', 1)[-1]}",
+    )
+    buyer_name = _unique_market_display_name(
+        participant_id=buyer_id,
+        requested_name=buyer_name,
+        role_label='Buyer',
+        seen_names=seen_names,
     )
     description_parts = [
         (
@@ -62,6 +107,12 @@ def build_market_profiles(
         seller,
         fallback_name=f"{town} Seller {seller_id.rsplit('_', 1)[-1]}",
     )
+    seller_name = _unique_market_display_name(
+        participant_id=seller_id,
+        requested_name=seller_name,
+        role_label='Seller',
+        seen_names=seen_names,
+    )
     flat = seller['flat']
     motivation_summary = str(
         seller.get('seller_motivations', {}).get('motivation_summary', '')
@@ -81,6 +132,8 @@ def build_market_profiles(
         'description': ' '.join(description_parts),
         'flat': flat,
         'expectations': seller['expectations'],
+        'initial_market_state': seller.get('initial_market_state', ''),
+        'initialization_order': int(seller.get('initialization_order', 0) or 0),
     }
 
   return buyer_profiles, seller_profiles

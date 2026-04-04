@@ -221,6 +221,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
   run_week returns ListingWeeklyBatchOutcome.
   """
 
+  @staticmethod
+  def _normalize_market_state(value: object) -> str:
+    return str(value or '').strip().casefold().replace('-', '_').replace(' ', '_')
+
   def __init__(
       self,
       *,
@@ -258,11 +262,38 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._last_run_week = 0
     self._stage_exhausted = False
     self._last_outcome = listing_schemas.ListingWeeklyBatchOutcome(week_number=1)
+    self._active_seller_ids: set[str] = set()
+    self._inactive_seller_queue: list[str] = []
+    self._target_active_seller_count = 0
+    self._last_released_seller_ids: list[str] = []
 
     if isinstance(buyer_profiles, str):
       buyer_profiles = json.loads(buyer_profiles) if buyer_profiles else {}
     if isinstance(seller_profiles, str):
       seller_profiles = json.loads(seller_profiles) if seller_profiles else {}
+
+    normalized_seller_profiles = {
+        str(seller_id): dict(payload)
+        for seller_id, payload in dict(seller_profiles).items()
+    }
+    initially_listed_seller_ids = {
+        seller_id
+        for seller_id, payload in normalized_seller_profiles.items()
+        if self._normalize_market_state(payload.get('initial_market_state'))
+        == 'listed'
+    }
+    inactive_seller_records = sorted(
+        (
+            (
+                int(payload.get('initialization_order', 0) or 0),
+                seller_id,
+            )
+            for seller_id, payload in normalized_seller_profiles.items()
+            if self._normalize_market_state(payload.get('initial_market_state'))
+            == 'not_yet_listed'
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
 
     self._buyers = {
         buyer_id: listing_schemas.PortalBuyer.model_validate(
@@ -274,8 +305,13 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         seller_id: listing_schemas.PortalSeller.model_validate(
             {'id': seller_id, **payload}
         )
-        for seller_id, payload in dict(seller_profiles).items()
+        for seller_id, payload in normalized_seller_profiles.items()
     }
+    self._inactive_seller_queue = [seller_id for _, seller_id in inactive_seller_records]
+    self._active_seller_ids = set(self._sellers) - set(self._inactive_seller_queue)
+    self._target_active_seller_count = len(initially_listed_seller_ids)
+    if self._target_active_seller_count <= 0 and self._inactive_seller_queue:
+      self._target_active_seller_count = 1
     self._portal_state: dict[str, Any] = {}
     self._portal: listing_portal_lib.ListingPortal | None = None
     if not self._enabled:
@@ -323,6 +359,39 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
   def is_finished(self) -> bool:
     return not self._enabled or self._stage_exhausted or not self.get_open_player_ids()
 
+  def _release_inactive_sellers_if_needed(self) -> list[str]:
+    """Release queued sellers when active listing capacity becomes available."""
+    if not self._inactive_seller_queue or self._target_active_seller_count <= 0:
+      self._last_released_seller_ids = []
+      return []
+
+    portal = self._ensure_portal()
+    active_open_seller_count = sum(
+        1
+        for seller_id in self._active_seller_ids
+        if not portal.is_player_closed(seller_id)
+    )
+    missing_capacity = self._target_active_seller_count - active_open_seller_count
+    if missing_capacity <= 0:
+      self._last_released_seller_ids = []
+      return []
+
+    released: list[str] = []
+    while self._inactive_seller_queue and len(released) < missing_capacity:
+      seller_id = self._inactive_seller_queue.pop(0)
+      self._active_seller_ids.add(seller_id)
+      released.append(seller_id)
+    self._last_released_seller_ids = released
+    return released
+
+  def prepare_weekly_market(self, *, week_number: int | None = None) -> list[str]:
+    """Refresh listing availability before assignments are computed."""
+    del week_number
+    if not self._enabled:
+      self._last_released_seller_ids = []
+      return []
+    return self._release_inactive_sellers_if_needed()
+
   def get_open_player_ids(self) -> set[str]:
     if not self._enabled or self._stage_exhausted:
       return set()
@@ -331,7 +400,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     for buyer_id in self._buyers:
       if not portal.is_player_closed(buyer_id):
         open_ids.add(buyer_id)
-    for seller_id in self._sellers:
+    for seller_id in self._active_seller_ids:
       if not portal.is_player_closed(seller_id):
         open_ids.add(seller_id)
     return open_ids
@@ -574,6 +643,53 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     )
     return snapshot.model_dump_json()
 
+  def get_market_snapshot(
+      self,
+      player_ids: Sequence[str] | None = None,
+  ) -> dict[str, Any]:
+    """Returns listing-state data formatted for weekly HTML logging."""
+    week_number = max(1, self._last_run_week or 1)
+    if not self._enabled:
+      return {
+          'week_number': week_number,
+          'buyers': [],
+          'listed_sellers': [],
+      }
+
+    portal = self._ensure_portal()
+    requested_ids = (
+        {str(player_id) for player_id in player_ids}
+        if player_ids is not None
+        else None
+    )
+
+    buyers: list[dict[str, Any]] = []
+    for buyer_id in self._buyers:
+      if requested_ids is not None and buyer_id not in requested_ids:
+        continue
+      if portal.is_player_closed(buyer_id):
+        continue
+      buyers.append(self._buyer_state(buyer_id).model_dump(mode='json'))
+
+    listed_sellers: list[dict[str, Any]] = []
+    for seller_id in self._sellers:
+      if requested_ids is not None and seller_id not in requested_ids:
+        continue
+      if portal.is_player_closed(seller_id):
+        continue
+      seller_state = self._seller_state(seller_id)
+      if seller_state.listed:
+        listed_sellers.append(seller_state.model_dump(mode='json'))
+
+    return {
+        'week_number': week_number,
+        'buyers': buyers,
+        'listed_sellers': listed_sellers,
+        'released_seller_ids': list(self._last_released_seller_ids),
+        'inactive_seller_ids': list(self._inactive_seller_queue),
+        'active_seller_ids': sorted(self._active_seller_ids),
+    }
+
   def get_state(self) -> entity_component.ComponentState:
     """Serializes listing-owned profiles, portal state, and progress counters."""
     return {
@@ -598,6 +714,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'last_run_week': self._last_run_week,
         'stage_exhausted': int(self._stage_exhausted),
         'last_outcome': self._last_outcome.model_dump(),
+        'active_seller_ids': sorted(self._active_seller_ids),
+        'inactive_seller_queue': list(self._inactive_seller_queue),
+        'target_active_seller_count': self._target_active_seller_count,
+        'last_released_seller_ids': list(self._last_released_seller_ids),
     }
 
   def get_dynamic_state(self) -> entity_component.ComponentState:
@@ -610,6 +730,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'completed_weeks': self._completed_weeks,
         'last_run_week': self._last_run_week,
         'stage_exhausted': int(self._stage_exhausted),
+        'active_seller_count': len(self._active_seller_ids),
+        'inactive_seller_count': len(self._inactive_seller_queue),
+        'target_active_seller_count': self._target_active_seller_count,
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
@@ -637,6 +760,18 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._completed_weeks = int(state.get('completed_weeks', 0))
     self._last_run_week = int(state.get('last_run_week', 0))
     self._stage_exhausted = bool(state.get('stage_exhausted', 0))
+    self._active_seller_ids = {
+        str(seller_id) for seller_id in state.get('active_seller_ids', ())
+    } or set(self._sellers)
+    self._inactive_seller_queue = [
+        str(seller_id) for seller_id in state.get('inactive_seller_queue', ())
+    ]
+    self._target_active_seller_count = int(
+        state.get('target_active_seller_count', self._target_active_seller_count)
+    )
+    self._last_released_seller_ids = [
+        str(seller_id) for seller_id in state.get('last_released_seller_ids', ())
+    ]
     if 'last_outcome' in state:
       self._last_outcome = listing_schemas.ListingWeeklyBatchOutcome.model_validate(
           state['last_outcome']

@@ -439,6 +439,73 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         memories[self._get_player_name(player_id)] = memory_text
     return memories
 
+  def get_pair_state_snapshots(
+      self,
+      pair_ids: Sequence[Sequence[str]] | None = None,
+  ) -> list[dict[str, Any]]:
+    """Returns current pair-level negotiation state for weekly HTML logging."""
+    self._offer_tracker._ensure_initialized()
+
+    requested_pairs = (
+        [
+            (str(pair[0]), str(pair[1]))
+            for pair in pair_ids
+            if len(pair) == 2
+        ]
+        if pair_ids is not None
+        else self._scheduler.get_pair_queue_ids()
+    )
+
+    snapshots: list[dict[str, Any]] = []
+    for buyer_id, seller_id in requested_pairs:
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      if pair_key not in self._offer_tracker._pair_members:
+        continue
+
+      buyer_entity = self._entities_by_id.get(buyer_id)
+      seller_entity = self._entities_by_id.get(seller_id)
+      buyer_log = (
+          dict(buyer_entity.get_last_log())
+          if buyer_entity is not None and hasattr(buyer_entity, 'get_last_log')
+          and isinstance(buyer_entity.get_last_log(), Mapping)
+          else {}
+      )
+      seller_log = (
+          dict(seller_entity.get_last_log())
+          if seller_entity is not None and hasattr(seller_entity, 'get_last_log')
+          and isinstance(seller_entity.get_last_log(), Mapping)
+          else {}
+      )
+
+      snapshots.append({
+          'pair_key': pair_key,
+          'buyer_id': buyer_id,
+          'buyer_name': self._get_player_name(buyer_id),
+          'seller_id': seller_id,
+          'seller_name': self._get_player_name(seller_id),
+          'pair_round_number': self._scheduler.get_pair_round_number(
+              buyer_id,
+              seller_id,
+          ),
+          'closed': pair_key in self._offer_tracker._closed_pairs,
+          'outcome': self._offer_tracker._closed_pair_outcomes.get(
+              pair_key,
+              negotiation_schemas.NegotiationOutcome.CLOSED,
+          ).value
+          if pair_key in self._offer_tracker._closed_pairs
+          else 'OPEN',
+          'has_active_offer': self._offer_tracker._active_offers.get(pair_key)
+          is not None,
+          'active_offer': self._offer_tracker._active_offers.get(pair_key),
+          'offer_history': list(
+              self._offer_tracker.get_offer_history_for_pair(buyer_id, seller_id)
+          ),
+          'turn_count': int(self._offer_tracker._turn_counts.get(pair_key, 0)),
+          'buyer_log': buyer_log,
+          'seller_log': seller_log,
+      })
+    return snapshots
+
   def _effective_reservation_distribution_for_listing(
       self,
       player_id: str,

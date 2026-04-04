@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -170,6 +171,9 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     listing = self.get_listing_module()
     negotiation = self.get_negotiation_module()
     current_week = self._week_number
+
+    if listing.is_enabled() and hasattr(listing, 'prepare_weekly_market'):
+      listing.prepare_weekly_market(week_number=current_week)
 
     # Pending matches come from listing output of the previous completed week.
     new_negotiation_pairs = list(self._pending_matches)
@@ -427,14 +431,44 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
 
     self._pending_matches = next_pending_matches
 
-    # Logging 
+    listing_snapshot = listing.get_market_snapshot(
+        self._module_assignments.get('listing', ())
+    )
+    listing_summary = (
+        listing_outcome.model_dump(mode='json')
+        if listing_outcome is not None
+        else {'week_number': current_week}
+    )
+    listing_summary['buyer_states'] = listing_snapshot.get('buyers', [])
+    listing_summary['listed_sellers'] = listing_snapshot.get('listed_sellers', [])
+    listing_summary['released_seller_ids'] = listing_snapshot.get(
+        'released_seller_ids',
+        [],
+    )
+    listing_summary['inactive_seller_ids'] = listing_snapshot.get(
+        'inactive_seller_ids',
+        [],
+    )
+    listing_summary['active_seller_ids'] = listing_snapshot.get(
+        'active_seller_ids',
+        [],
+    )
+
+    negotiation_summary = (
+        dict(negotiation_outcome) if negotiation_outcome is not None else {}
+    )
+    negotiation_summary['pair_states'] = negotiation.get_pair_state_snapshots(
+        self._module_assignments.get('negotiation', ())
+    )
+
+    # Logging
     self._last_week_summary = {
         'week_number': current_week,
         'assignments': dict(self._module_assignments),
         'listing_enabled': listing.is_enabled(),
         'negotiation_enabled': negotiation.is_enabled(),
-        'listing': listing_outcome.model_dump() if listing_outcome else None,
-        'negotiation': dict(negotiation_outcome) if negotiation_outcome else None,
+        'listing': listing_summary,
+        'negotiation': negotiation_summary,
         'pending_matches_for_next_week': list(self._pending_matches),
         'reopened_listing_pairs': reopened_listing_pairs,
     }

@@ -1,4 +1,3 @@
-# Copyright 2025 DeepMind Technologies Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,23 +11,346 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HTML rendering for structured simulation logs.
-
-This module provides the render_dynamic_html function which converts a
-SimulationLog into an interactive HTML page with JavaScript-based content
-composition and deduplication.
-"""
+"""HTML rendering for structured simulation logs."""
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
 import html
 import json
 from typing import Any
 
 from concordia.utils import structured_logging
 
-# pylint: disable=g-inconsistent-quotes
-# pylint: disable=invalid-name
+
+def _escape(value: object) -> str:
+  return html.escape(str(value), quote=True)
+
+
+def _json_block(value: Any) -> str:
+  rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+  return f'<pre class="json-block">{html.escape(rendered)}</pre>'
+
+
+def _details(summary: str, body: str, *, open_by_default: bool = False,
+             css_class: str = '') -> str:
+  open_attr = ' open' if open_by_default else ''
+  class_attr = f' class="{css_class}"' if css_class else ''
+  return (
+      f'<details{class_attr}{open_attr}>'
+      f'<summary>{summary}</summary>'
+      f'{body}'
+      '</details>'
+  )
+
+
+def _render_collection(
+    title: str,
+    items: Sequence[Mapping[str, Any]],
+    summary_builder,
+    *,
+    empty_message: str,
+    open_by_default: bool = True,
+) -> str:
+  if not items:
+    return (
+        f'<section class="collection-card"><h4>{_escape(title)}</h4>'
+        f'<div class="empty-state">{_escape(empty_message)}</div></section>'
+    )
+
+  parts = [
+      '<section class="collection-card">',
+      f'<h4>{_escape(title)} ({len(items)})</h4>',
+  ]
+  for item in items:
+    parts.append(
+        _details(
+            _escape(summary_builder(item)),
+            _json_block(item),
+            open_by_default=False,
+            css_class='item-dropdown',
+        )
+    )
+  parts.append('</section>')
+  return ''.join(parts)
+
+
+def _participant_summary(participant: Mapping[str, Any]) -> str:
+  name = participant.get('name') or participant.get('id') or 'Participant'
+  participant_id = participant.get('id')
+  suffix = f' ({participant_id})' if participant_id else ''
+  return f'{name}{suffix}'
+
+
+def _seller_summary(seller: Mapping[str, Any]) -> str:
+  name = seller.get('name') or seller.get('id') or 'Seller'
+  seller_id = seller.get('id')
+  listing_price = seller.get('current_listing_price')
+  suffix = f' ({seller_id})' if seller_id else ''
+  if listing_price is None:
+    return f'{name}{suffix}'
+  return f'{name}{suffix} | listed at {listing_price}'
+
+
+def _pair_summary(pair_state: Mapping[str, Any]) -> str:
+  buyer_name = pair_state.get('buyer_name') or pair_state.get('buyer_id') or 'Buyer'
+  seller_name = (
+      pair_state.get('seller_name') or pair_state.get('seller_id') or 'Seller'
+  )
+  round_number = pair_state.get('pair_round_number', '?')
+  outcome = pair_state.get('outcome', 'OPEN')
+  return f'{buyer_name} <-> {seller_name} | {outcome} | round {round_number}'
+
+
+def _matched_pair_summary(match: Mapping[str, Any]) -> str:
+  buyer_name = match.get('buyer_name') or match.get('buyer_id') or 'Buyer'
+  seller_name = match.get('seller_name') or match.get('seller_id') or 'Seller'
+  match_id = match.get('match_id')
+  suffix = f' | {match_id}' if match_id else ''
+  return f'{buyer_name} <-> {seller_name}{suffix}'
+
+
+def _extract_payload(
+    simulation_log: structured_logging.SimulationLog,
+    entry: structured_logging.StructuredLogEntry,
+) -> dict[str, Any]:
+  reconstructed = simulation_log.reconstruct_value(dict(entry.deduplicated_data))
+  return dict(reconstructed) if isinstance(reconstructed, Mapping) else {}
+
+
+def _extract_week_summary(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+  value = payload.get('value')
+  if not isinstance(value, Mapping):
+    return None
+  week_summary = value.get('week_summary')
+  if not isinstance(week_summary, Mapping):
+    return None
+  return dict(week_summary)
+
+
+def _build_week_views(
+    simulation_log: structured_logging.SimulationLog,
+) -> list[dict[str, Any]]:
+  step_entries: dict[int, list[structured_logging.StructuredLogEntry]] = defaultdict(list)
+  for entry in simulation_log.entries:
+    step_entries[entry.step].append(entry)
+
+  views: list[dict[str, Any]] = []
+  for step in sorted(step_entries):
+    entries = step_entries[step]
+    week_summary: dict[str, Any] | None = None
+    additional_logs: list[dict[str, Any]] = []
+    for entry in entries:
+      payload = _extract_payload(simulation_log, entry)
+      summary_candidate = _extract_week_summary(payload)
+      if summary_candidate is not None:
+        week_summary = summary_candidate
+        continue
+      if payload:
+        additional_logs.append({
+            'entity_name': entry.entity_name,
+            'component_name': entry.component_name,
+            'entry_type': entry.entry_type,
+            'payload': payload,
+        })
+
+    views.append({
+        'step': step,
+        'week_number': (
+            int(week_summary.get('week_number', step))
+            if isinstance(week_summary, Mapping)
+            else step
+        ),
+        'summary': entries[0].summary if entries else '',
+        'week_summary': week_summary or {},
+        'additional_logs': additional_logs,
+    })
+  return views
+
+
+def _render_memory_sections(
+    entity_memories: Mapping[str, Sequence[str]],
+    gm_memories: Sequence[str],
+) -> str:
+  sections: list[str] = []
+
+  if entity_memories:
+    parts = ['<section class="memory-section"><h2>Participant Memories</h2>']
+    for entity_name, memories in sorted(entity_memories.items()):
+      memory_body = ''.join(
+          f'<div class="memory-row">{_escape(memory)}</div>' for memory in memories
+      )
+      parts.append(
+          _details(
+              _escape(f'{entity_name} ({len(memories)})'),
+              memory_body or '<div class="empty-state">No memories.</div>',
+              open_by_default=False,
+              css_class='memory-dropdown',
+          )
+      )
+    parts.append('</section>')
+    sections.append(''.join(parts))
+
+  if gm_memories:
+    gm_body = ''.join(
+        f'<div class="memory-row">{_escape(memory)}</div>' for memory in gm_memories
+    )
+    sections.append(
+        '<section class="memory-section"><h2>Game Master Memories</h2>'
+        + _details(
+            _escape(f'Game Master ({len(gm_memories)})'),
+            gm_body,
+            open_by_default=False,
+            css_class='memory-dropdown',
+        )
+        + '</section>'
+    )
+
+  return ''.join(sections)
+
+
+def _render_week_view(week_view: Mapping[str, Any]) -> str:
+  week_summary = dict(week_view.get('week_summary', {}))
+  listing = dict(week_summary.get('listing', {}))
+  negotiation = dict(week_summary.get('negotiation', {}))
+
+  buyers = [
+      item for item in listing.get('buyer_states', ())
+      if isinstance(item, Mapping)
+  ]
+  listed_sellers = [
+      item for item in listing.get('listed_sellers', ())
+      if isinstance(item, Mapping)
+  ]
+  released_seller_ids = list(listing.get('released_seller_ids', ()))
+  inactive_seller_ids = list(listing.get('inactive_seller_ids', ()))
+  matched_pairs = [
+      item for item in listing.get('matched_pairs', ())
+      if isinstance(item, Mapping)
+  ]
+  pair_states = [
+      item for item in negotiation.get('pair_states', ())
+      if isinstance(item, Mapping)
+  ]
+  closed_pairs = [
+      item for item in negotiation.get('closed_pairs', ())
+      if isinstance(item, Mapping)
+  ]
+
+  additional_logs = [
+      item for item in week_view.get('additional_logs', ())
+      if isinstance(item, Mapping)
+  ]
+  additional_logs_html = ''
+  if additional_logs:
+    additional_logs_html = _render_collection(
+        'Additional Logs',
+        additional_logs,
+        lambda item: (
+            f'{item.get("entity_name", "Unknown")} '
+            f'[{item.get("component_name", "component")}]'
+        ),
+        empty_message='No extra logs recorded.',
+        open_by_default=False,
+    )
+
+  listing_html = ''.join([
+      '<section class="module-card">',
+      '<h3>Listing</h3>',
+      (
+          '<div class="module-meta">'
+          f'Buyer states: {len(buyers)} | '
+          f'Currently listed sellers: {len(listed_sellers)} | '
+          f'Released this week: {len(released_seller_ids)} | '
+          f'Still inactive: {len(inactive_seller_ids)} | '
+          f'Matches this week: {len(matched_pairs)}'
+          '</div>'
+      ),
+      _render_collection(
+          'Buyer States',
+          buyers,
+          _participant_summary,
+          empty_message='No active buyers in listing this week.',
+      ),
+      _render_collection(
+          'Currently Listed Sellers',
+          listed_sellers,
+          _seller_summary,
+          empty_message='No sellers are currently listed this week.',
+      ),
+      _render_collection(
+          'Matched Pairs',
+          matched_pairs,
+          _matched_pair_summary,
+          empty_message='No new listing matches this week.',
+          open_by_default=False,
+      ),
+      '</section>',
+  ])
+
+  negotiation_html = ''.join([
+      '<section class="module-card">',
+      '<h3>Negotiation</h3>',
+      (
+          '<div class="module-meta">'
+          f'Pair states: {len(pair_states)} | '
+          f'Pairs negotiated this week: '
+          f'{_escape(negotiation.get("number_of_pairs_negotiated", 0))} | '
+          f'Closed this week: {len(closed_pairs)}'
+          '</div>'
+      ),
+      _render_collection(
+          'Negotiation Pair States',
+          pair_states,
+          _pair_summary,
+          empty_message='No negotiation pairs tracked this week.',
+      ),
+      _render_collection(
+          'Closed Pairs This Week',
+          closed_pairs,
+          _pair_summary,
+          empty_message='No pairs closed this week.',
+          open_by_default=False,
+      ),
+      '</section>',
+  ])
+
+  assignments = dict(week_summary.get('assignments', {}))
+  listing_assignments = assignments.get('listing', ())
+  negotiation_assignments = assignments.get('negotiation', ())
+  overview = (
+      '<div class="week-overview">'
+      f'Listing assignments: {_escape(len(listing_assignments))} | '
+      f'Negotiation assignments: {_escape(len(negotiation_assignments))} | '
+      f'Pending matches next week: '
+      f'{_escape(len(week_summary.get("pending_matches_for_next_week", ())))}'
+      '</div>'
+  )
+
+  return ''.join([
+      '<section class="week-card">',
+      '<div class="week-header">',
+      f'<h2>Week {_escape(week_view.get("week_number", week_view.get("step", "?")))}</h2>',
+      (
+          f'<div class="week-step">Step {_escape(week_view.get("step", "?"))}'
+          '</div>'
+      ),
+      '</div>',
+      (
+          f'<div class="week-subtitle">{_escape(week_view.get("summary", ""))}'
+          '</div>'
+          if week_view.get('summary')
+          else ''
+      ),
+      overview,
+      '<div class="module-grid">',
+      listing_html,
+      negotiation_html,
+      '</div>',
+      additional_logs_html,
+      '</section>',
+  ])
 
 
 def render_dynamic_html(
@@ -38,391 +360,70 @@ def render_dynamic_html(
     player_scores: dict[str, Any] | None = None,
     title: str = 'Simulation Log',
 ) -> str:
-  """Render the log to HTML with JavaScript-based content composition.
-
-  Args:
-    simulation_log: The log to render.
-    entity_memories: Dict mapping entity names to lists of memory strings.
-    game_master_memories: List of game master memory strings.
-    player_scores: Optional dict of player scores to display.
-    title: Title for the HTML page.
-
-  Returns:
-    Complete HTML string with embedded data and dynamic rendering.
-  """
-
-  # Build the content store data for JavaScript
-  content_store_data = simulation_log.content_store.to_dict()
-
-  # Build entries data
-  entries_data = []
-  for entry in simulation_log.entries:
-    entries_data.append({
-        'step': entry.step,
-        'timestamp': entry.timestamp,
-        'entity_name': entry.entity_name,
-        'component_name': entry.component_name,
-        'entry_type': entry.entry_type,
-        'summary': entry.summary,
-        'deduplicated_data': dict(entry.deduplicated_data),
-    })
-
-  # Build entity memories data
+  """Render the log into a weekly, single-page HTML view."""
+  week_views = _build_week_views(simulation_log)
   entity_memories_data = entity_memories or {}
   gm_memories_data = game_master_memories or []
 
-  # Get entity names for tabs
-  entity_names = simulation_log.get_entity_names()
-  # Filter to only entities that have memories
-  entity_tabs = [name for name in entity_names if name in entity_memories_data]
-
-  # Build the HTML
   html_parts = [
-      """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>"""
-      + html.escape(title)
-      + """</title>
+      '<!DOCTYPE html><html><head><meta charset="UTF-8">',
+      f'<title>{html.escape(title)}</title>',
+      """
 <style>
-body { font-family: Arial, sans-serif; margin: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-.container { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-.tab { overflow: hidden; border-bottom: 2px solid #ddd; margin-bottom: 15px; }
-.tab button { background-color: #f1f1f1; border: none; padding: 12px 24px; cursor: pointer; font-size: 14px; transition: all 0.3s; border-radius: 4px 4px 0 0; margin-right: 2px; }
-.tab button:hover { background-color: #ddd; }
-.tab button.active { background-color: #667eea; color: white; }
-.tabcontent { display: none; padding: 15px; animation: fadeIn 0.3s; }
-.tabcontent.active { display: block; }
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-.step { margin: 10px 0; padding: 10px; background: #f9f9f9; border-left: 3px solid #667eea; border-radius: 4px; }
-.step-header { font-weight: bold; color: #333; margin-bottom: 8px; }
-.entry { margin: 5px 0; padding: 8px; background: white; border-radius: 4px; }
-.entry-entity { color: #667eea; font-weight: bold; }
-.entry-component { color: #888; font-size: 12px; }
-.entry-summary { margin: 5px 0; }
-.content-block { margin: 5px 0; padding: 8px; background: #f0f0f0; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; max-height: 200px; overflow-y: auto; }
-.content-label { font-weight: bold; color: #555; font-size: 11px; text-transform: uppercase; }
-.memory-item { margin: 5px 0; padding: 8px; background: #f9f9f9; border-radius: 4px; }
-details { margin: 5px 0; }
-details summary { cursor: pointer; font-weight: bold; padding: 5px; background: #f0f0f0; border-radius: 4px; }
-details[open] summary { background: #e0e0e0; }
-/* Step-level details get special styling with a colored left border */
-details.step-details { margin: 10px 0; border-left: 3px solid #667eea; padding-left: 10px; }
-details.step-details > summary { background: #e8e8ff; font-size: 14px; }
-details.step-details[open] > summary { background: #d8d8ff; }
-/* Content inside steps is indented */
-details.step-details > details { margin-left: 15px; }
-.summary { padding: 10px; background: #e8f4f8; border-radius: 4px; margin-bottom: 15px; }
-h1 { color: #333; margin-bottom: 5px; }
-.subtitle { color: #666; margin-bottom: 20px; }
+body { font-family: Arial, sans-serif; margin: 0; background: #eef3f8; color: #17212b; }
+.container { max-width: 1440px; margin: 0 auto; padding: 24px; }
+.page-header { margin-bottom: 24px; }
+.page-header h1 { margin: 0 0 8px 0; font-size: 30px; }
+.page-header p { margin: 0; color: #52606d; }
+.summary-card, .week-card, .memory-section { background: #ffffff; border: 1px solid #d7e0ea; border-radius: 14px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }
+.summary-card { padding: 16px 18px; margin-bottom: 20px; }
+.week-card { padding: 18px; margin-bottom: 18px; }
+.week-header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.week-header h2 { margin: 0; font-size: 24px; }
+.week-step { color: #5b6b79; font-size: 14px; }
+.week-subtitle { margin-top: 8px; color: #405261; }
+.week-overview { margin-top: 12px; padding: 10px 12px; background: #f4f8fc; border-radius: 10px; color: #314353; font-size: 14px; }
+.module-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-top: 16px; }
+.module-card { border: 1px solid #d7e0ea; border-radius: 12px; padding: 14px; background: #fcfdff; }
+.module-card h3 { margin: 0 0 8px 0; font-size: 20px; }
+.module-meta { margin-bottom: 12px; color: #516170; font-size: 14px; }
+.collection-card { margin-top: 12px; }
+.collection-card h4 { margin: 0 0 8px 0; font-size: 15px; color: #233445; }
+details { border: 1px solid #d7e0ea; border-radius: 10px; background: #ffffff; }
+details + details { margin-top: 8px; }
+summary { cursor: pointer; list-style: none; padding: 10px 12px; font-weight: 600; }
+summary::-webkit-details-marker { display: none; }
+.item-dropdown[open] summary, .memory-dropdown[open] summary { border-bottom: 1px solid #e5ecf3; }
+.json-block { margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; border-radius: 0 0 10px 10px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.45; }
+.empty-state { padding: 12px; border: 1px dashed #c5d0db; border-radius: 10px; color: #6a7a88; background: #f8fbfd; }
+.memory-section { margin-top: 20px; padding: 18px; }
+.memory-section h2 { margin: 0 0 12px 0; font-size: 20px; }
+.memory-row { padding: 10px 12px; border-top: 1px solid #e8eef5; background: #fff; }
 </style>
-</head>
-<body>
-<div class="container">
-<h1>"""
-      + html.escape(title)
-      + """</h1>
-<p class="subtitle">Click on the tabs to view different sections.</p>
-"""
+</head><body><div class="container">
+""",
+      '<header class="page-header">',
+      f'<h1>{html.escape(title)}</h1>',
+      '<p>Weekly listing and negotiation state in one page. Participant-heavy sections use dropdowns instead of tabs.</p>',
+      '</header>',
   ]
 
   if player_scores:
     html_parts.append(
-        '<div class="summary">'
-        f'Player Scores: {html.escape(str(player_scores))}</div>'
+        '<section class="summary-card"><h2>Simulation Summary</h2>'
+        + _json_block(player_scores)
+        + '</section>'
     )
 
-  # Tab buttons
-  html_parts.append('<div class="tab">\n')
+  if week_views:
+    html_parts.extend(_render_week_view(week_view) for week_view in week_views)
+  else:
+    html_parts.append(
+        '<section class="week-card"><div class="empty-state">No weekly log entries were recorded.</div></section>'
+    )
+
   html_parts.append(
-      '<button class="tablinks active" onclick="openTab(event, \'gm_log\')">Game Master log</button>\n'  # pylint: disable=line-too-long
+      _render_memory_sections(entity_memories_data, gm_memories_data)
   )
-  for name in entity_tabs:
-    safe_id = html.escape(name.replace(' ', '_'))
-    html_parts.append(
-        f'<button class="tablinks" onclick="openTab(event, \'{safe_id}\')">{html.escape(name)}</button>\n'  # pylint: disable=line-too-long
-    )
-  if gm_memories_data:
-    html_parts.append(
-        '<button class="tablinks" onclick="openTab(event, \'gm_memories\')">Game Master Memories</button>\n'  # pylint: disable=line-too-long
-    )
-  html_parts.append('</div>\n')
-
-  # GM Log tab - uses JavaScript to render
-  html_parts.append('<div id="gm_log" class="tabcontent active"></div>\n')
-
-  # Entity tabs
-  for name in entity_tabs:
-    safe_id = html.escape(name.replace(' ', '_'))
-    html_parts.append(f'<div id="{safe_id}" class="tabcontent"></div>\n')
-
-  # GM Memories tab
-  if gm_memories_data:
-    html_parts.append('<div id="gm_memories" class="tabcontent"></div>\n')
-
-  # Embed data as JSON
-  html_parts.append('<script>\n')
-  html_parts.append('const CONTENT_STORE = ')
-  html_parts.append(json.dumps(content_store_data))
-  html_parts.append(';\n')
-  html_parts.append('const ENTRIES = ')
-  html_parts.append(json.dumps(entries_data))
-  html_parts.append(';\n')
-  html_parts.append('const ENTITY_MEMORIES = ')
-  html_parts.append(json.dumps(entity_memories_data))
-  html_parts.append(';\n')
-  html_parts.append('const GM_MEMORIES = ')
-  html_parts.append(json.dumps(gm_memories_data))
-  html_parts.append(';\n')
-
-  html_parts.append("""
-function getContent(id) {
-  const raw = CONTENT_STORE[id] || '';
-  return resolveContentRefs(raw);
-}
-
-function resolveContentRefs(text) {
-  if (typeof text !== 'string') return text;
-  return text.replace(/!\\[([^\\]]*)\\]\\(content_ref:([a-f0-9]+)\\)/g, function(m, alt, refId) {
-    const data = CONTENT_STORE[refId];
-    return data ? '![' + alt + '](' + data + ')' : m;
-  });
-}
-
-function renderImageMarkdown(text) {
-  return text.replace(/!\\[([^\\]]*)\\]\\((data:image\\/[^)]+)\\)/g, function(m, alt, src) {
-    return '<img src="' + src + '" alt="' + alt + '" style="max-width:400px;max-height:400px;display:block;margin:8px 0;border-radius:4px;" loading=\\"lazy\\">';
-  });
-}
-
-function escapeHtml(text) {
-  if (!text) return '';
-  const div = document.createElement('div');
-  div.textContent = String(text);
-  return div.innerHTML.replace(/\\\\n/g, '<br />');
-}
-
-function renderObject(obj) {
-  if (obj === null || obj === undefined) {
-    return '';
-  }
-
-  if (typeof obj === 'string') {
-    if (obj.includes('data:image/')) {
-      return renderImageMarkdown(escapeHtml(obj));
-    }
-    return escapeHtml(obj);
-  }
-
-  if (typeof obj === 'number' || typeof obj === 'boolean') {
-    return String(obj);
-  }
-
-  if (Array.isArray(obj)) {
-    let html = '';
-    obj.forEach(item => {
-      html += renderObject(item) + '<br />';
-    });
-    return html;
-  }
-
-  if (typeof obj === 'object') {
-    if (obj._ref && Object.keys(obj).length === 1) {
-      const content = getContent(obj._ref);
-      if (content !== undefined) {
-        if (content.includes('data:image/')) {
-          return renderImageMarkdown(escapeHtml(content));
-        }
-        return escapeHtml(content);
-      }
-      return '[ref:' + obj._ref + ']';
-    }
-
-    // Determine summary from special keys (like PythonObjectToHTMLConverter)
-    let summary = '';
-    if (obj.date) {
-      summary = escapeHtml(obj.date);
-      if (obj.Summary) {
-        summary += '  ' + escapeHtml(obj.Summary);
-      }
-    } else if (obj.Summary) {
-      summary = escapeHtml(obj.Summary);
-    } else if (obj.Name) {
-      summary = escapeHtml(obj.Name);
-    } else if (obj.Key) {
-      summary = escapeHtml(obj.Key);
-    } else if (obj.Value !== undefined || obj.value !== undefined) {
-      // Entity data with a "Value" key - use "Details" as summary
-      summary = 'Details';
-    } else {
-      // For all other objects, use "Details" as a generic summary
-      summary = 'Details';
-    }
-
-    let html = '<details>';
-    html += '<summary>' + summary + '</summary>';
-
-    for (const [key, value] of Object.entries(obj)) {
-      if (key !== 'date' && key !== 'Summary') {
-        html += '<b><ul>' + escapeHtml(key) + '</b>';
-        html += '<li>' + renderObject(value) + '</li></ul>';
-      }
-    }
-
-    html += '</details>';
-    return html;
-  }
-
-  return String(obj);
-}
-
-// Render object children directly without wrapping in outer <details>
-// Used when we already have an outer details wrapper for the entity
-function renderObjectChildren(obj) {
-  if (obj === null || obj === undefined) {
-    return '';
-  }
-
-  if (typeof obj !== 'object' || Array.isArray(obj)) {
-    return renderObject(obj);
-  }
-
-  let html = '';
-  for (const [key, value] of Object.entries(obj)) {
-    if (key !== 'date' && key !== 'Summary') {
-      html += '<b><ul>' + escapeHtml(key) + '</b>';
-      html += '<li>' + renderObject(value) + '</li></ul>';
-    }
-  }
-  return html;
-}
-
-function renderGMLog() {
-  const container = document.getElementById('gm_log');
-  let html = '';
-
-  // Group entries by step
-  const stepMap = {};
-  ENTRIES.forEach(entry => {
-    if (!stepMap[entry.step]) stepMap[entry.step] = [];
-    stepMap[entry.step].push(entry);
-  });
-
-  const steps = Object.keys(stepMap).map(Number).sort((a, b) => a - b);
-
-  steps.forEach(step => {
-    const entries = stepMap[step];
-    \n\
-    // Build step summary from entries
-    let stepSummary = 'Step ' + step;
-    if (entries.length > 0 && entries[0].summary) {
-      stepSummary += ' --- ' + entries[0].summary;
-    }
-    \n\
-    html += '<details class="step-details" open>';
-    html += '<summary><b>' + escapeHtml(stepSummary) + '</b></summary>';
-
-    entries.forEach(entry => {
-      // Create a label for this entry (like "Entity [name]" or component name)
-      let entryLabel = entry.entity_name;
-      if (entry.entry_type === 'entity') {
-        entryLabel = 'Entity [' + entry.entity_name + ']';
-      }
-      \n\
-      // If entry has deduplicated_data, render it as collapsible content
-      if (entry.deduplicated_data && Object.keys(entry.deduplicated_data).length > 0) {
-        html += '<details>';
-        html += '<summary>' + escapeHtml(entryLabel) + '</summary>';
-        // Render all the data in deduplicated_data recursively
-        for (const [key, value] of Object.entries(entry.deduplicated_data)) {
-          html += '<b><ul>' + escapeHtml(key) + '</b>';
-          html += '<li>' + renderObject(value) + '</li></ul>';
-        }
-        html += '</details>';
-      } else {
-        // Simple entry with no data
-        html += '<div class="entry">';
-        html += '<span class="entry-entity">' + escapeHtml(entryLabel) + '</span>';
-        html += ' <span class="entry-component">(' + escapeHtml(entry.component_name) + ')</span>';
-        if (entry.summary) {
-          html += '<div class="entry-summary">' + escapeHtml(entry.summary) + '</div>';
-        }
-        html += '</div>';
-      }
-    });
-
-    html += '</details>';
-  });
-
-  container.innerHTML = html || '<p>No log entries.</p>';
-}
-
-function renderEntityMemories(entityName, containerId) {
-  const container = document.getElementById(containerId);
-  const memories = ENTITY_MEMORIES[entityName] || [];
-  let html = '';
-
-  if (memories.length === 0) {
-    html = '<p>No memories for ' + escapeHtml(entityName) + '.</p>';
-  } else {
-    memories.forEach(mem => {
-      html += '<div class="memory-item">' + escapeHtml(mem) + '</div>';
-    });
-  }
-
-  container.innerHTML = html;
-}
-
-function renderGMMemories() {
-  const container = document.getElementById('gm_memories');
-  if (!container) return;
-
-  let html = '';
-  if (GM_MEMORIES.length === 0) {
-    html = '<p>No game master memories.</p>';
-  } else {
-    GM_MEMORIES.forEach(mem => {
-      html += '<div class="memory-item">' + escapeHtml(mem) + '</div>';
-    });
-  }
-
-  container.innerHTML = html;
-}
-
-function openTab(evt, tabId) {
-  // Hide all tab content
-  document.querySelectorAll('.tabcontent').forEach(tc => {
-    tc.classList.remove('active');
-  });
-
-  // Remove active class from all buttons
-  document.querySelectorAll('.tablinks').forEach(btn => {
-    btn.classList.remove('active');
-  });
-
-  // Show the selected tab
-  document.getElementById(tabId).classList.add('active');
-  evt.currentTarget.classList.add('active');
-}
-
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', function() {
-  renderGMLog();
-
-  // Render entity memories
-  Object.keys(ENTITY_MEMORIES).forEach(name => {
-    const containerId = name.replace(/ /g, '_');
-    if (document.getElementById(containerId)) {
-      renderEntityMemories(name, containerId);
-    }
-  });
-
-  renderGMMemories();
-});
-</script>
-""")
-
-  html_parts.append('</div>\n</body>\n</html>')
-
+  html_parts.append('</div></body></html>')
   return ''.join(html_parts)
