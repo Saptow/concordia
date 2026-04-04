@@ -1436,16 +1436,16 @@ def _validate_negotiating_seller_seedability(
 
 
 def _resample_buyers_from_oversampled_pool(
-    broad_buyers: list[dict[str, Any]],
+    retained_buyers: list[dict[str, Any]],
     *,
     target_sample_size: int,
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    """Draw one candidate buyer pool from the oversampled broad pool."""
-    if not broad_buyers or target_sample_size <= 0:
+    """Draw one candidate buyer pool from an oversampled retained pool."""
+    if not retained_buyers or target_sample_size <= 0:
         return []
-    sample_size = min(len(broad_buyers), target_sample_size)
-    sampled_buyers = rng.sample(broad_buyers, k=sample_size)
+    sample_size = min(len(retained_buyers), target_sample_size)
+    sampled_buyers = rng.sample(retained_buyers, k=sample_size)
     return [copy.deepcopy(buyer) for buyer in sampled_buyers]
 
 
@@ -1550,13 +1550,41 @@ def _build_buyer_pools_with_regeneration(
             income_prior=income_prior,
             distribution_tables=distribution_tables,
         )
+        oversampled_retained_buyers = _retain_feasible_buyers(
+            broad_buyers,
+            flats,
+            archetypes,
+        )
+        logging.info(
+            "Oversampled buyer pool %s/%s produced %s feasible buyers for %s sellers before resampling.",
+            broad_attempt,
+            MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
+            len(oversampled_retained_buyers),
+            target_retained_count,
+        )
+
+        if len(oversampled_retained_buyers) < target_retained_count:
+            last_unmatched_seller_ids = [
+                str(seller.get("seller_id", ""))
+                for seller in sellers
+                if str(seller.get("initial_market_state", "")).strip().casefold()
+                == "negotiating"
+            ]
+            logging.info(
+                "Skipping buyer-pool resampling for oversampled pool %s/%s because only %s feasible buyers were retained, below the %s required sellers.",
+                broad_attempt,
+                MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
+                len(oversampled_retained_buyers),
+                target_retained_count,
+            )
+            continue
+
         for sample_attempt in range(1, MAX_BUYER_POOL_RESAMPLE_ATTEMPTS + 1):
-            sampled_buyers = _resample_buyers_from_oversampled_pool(
-                broad_buyers,
+            retained_buyers = _resample_buyers_from_oversampled_pool(
+                oversampled_retained_buyers,
                 target_sample_size=target_retained_count,
                 rng=rng,
             )
-            retained_buyers = _retain_feasible_buyers(sampled_buyers, flats, archetypes)
             seedable, unmatched_seller_ids = _validate_negotiating_seller_seedability(
                 sellers,
                 retained_buyers,
