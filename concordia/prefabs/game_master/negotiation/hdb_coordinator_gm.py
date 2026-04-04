@@ -113,7 +113,9 @@ class GameMaster(prefab_lib.Prefab):
     negotiation_module = hdb_negotiation.NegotiationModule(
         entities=self.entities,
         participant_specs=negotiation_params.get('participant_specs', {}),
-        negotiation_pairs=negotiation_params.get('negotiation_pairs') or None,
+        # Preserve an explicit empty sequence so the scheduler starts with no
+        # pairs and waits for initializer/listing handoff via pending matches.
+        negotiation_pairs=negotiation_params.get('negotiation_pairs'),
         action_prompt=str(
             negotiation_params.get('action_prompt', 'What should {name} do next?')
         ),

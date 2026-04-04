@@ -223,6 +223,26 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
     flat = seller_profile['flat']
     listing_price = float(seller_profile['expectations']['max_price'])
     linked_flat_id = str(seller_raw.get('linked_flat_id', '')).strip()
+    preferred_buyer_ids = [
+        str(buyer_id).strip()
+        for buyer_id in seller_raw.get('potential_buyer_ids', ())
+        if str(buyer_id).strip()
+    ]
+
+    if preferred_buyer_ids:
+      ranked_preferred_buyer_ids: list[str] = []
+      for buyer_id in preferred_buyer_ids:
+        if buyer_id in used_buyer_ids:
+          continue
+        buyer_profile = buyer_profiles.get(buyer_id)
+        if buyer_profile is None:
+          continue
+        budget_max = float(buyer_profile['budget']['max_price'])
+        if budget_max < listing_price:
+          continue
+        ranked_preferred_buyer_ids.append(buyer_id)
+      if ranked_preferred_buyer_ids:
+        return ranked_preferred_buyer_ids
 
     ranked: list[tuple[int, float, str]] = []
     for buyer_id, buyer_raw in self._buyers_raw.items():

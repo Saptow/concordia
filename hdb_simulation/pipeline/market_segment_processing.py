@@ -8,6 +8,7 @@ pool for the transaction-conditioned Choa Chu Kang 2023 resale segment.
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import math
 import random
@@ -40,7 +41,9 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
 
 DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
-MAX_BUYER_POOL_REGEN_ATTEMPTS = 5
+MAX_BUYER_POOL_RESAMPLE_ATTEMPTS = 5
+MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 3
+MAX_SELLER_POOL_RESAMPLE_ATTEMPTS = 3
 
 
 FLAT_TYPE_LABELS = {
@@ -317,10 +320,11 @@ def _estimate_hedonic_price(
     *,
     target_flat: dict[str, Any] | None = None,
 ) -> tuple[float, float]:
-    """Fit a simple hedonic anchor and return (predicted price, residual scale)."""
+    """Fit a simple hedonic anchor on log prices and return log-space stats."""
 
     training_frame = _hedonic_feature_frame(training_flats)
     y = training_frame["observed_resale_price"].astype(float).to_numpy()
+    log_y = np.log(np.clip(y, a_min=1.0, a_max=None))
 
     if target_flat is None:
         target_frame = training_frame.iloc[[0]].copy()
@@ -346,9 +350,9 @@ def _estimate_hedonic_price(
     ).reindex(columns=training_design.columns, fill_value=0.0)
 
     if len(training_frame) < 8 or training_design.shape[1] >= len(training_frame):
-        anchor = float(np.median(y))
-        sigma = float(np.std(y, ddof=0)) if len(y) > 1 else max(anchor * 0.05, 1.0)
-        return anchor, max(sigma, max(anchor * 0.05, 1.0))
+        anchor_log = float(np.median(log_y))
+        sigma_log = float(np.std(log_y, ddof=0)) if len(log_y) > 1 else 0.05
+        return anchor_log, max(sigma_log, 0.05)
 
     x_train = np.column_stack(
         [np.ones(len(training_design)), training_design.to_numpy(dtype=float)]
@@ -357,16 +361,16 @@ def _estimate_hedonic_price(
         [np.ones(len(target_design)), target_design.to_numpy(dtype=float)]
     )
 
-    beta, *_ = np.linalg.lstsq(x_train, y, rcond=None)
+    beta, *_ = np.linalg.lstsq(x_train, log_y, rcond=None)
     fitted = x_train @ beta
-    residuals = y - fitted
-    sigma = float(np.sqrt(np.mean(residuals**2))) if len(residuals) else 0.0
-    anchor = float((x_target @ beta)[0])
+    residuals = log_y - fitted
+    sigma_log = float(np.sqrt(np.mean(residuals**2))) if len(residuals) else 0.0
+    anchor_log = float((x_target @ beta)[0])
 
-    if not np.isfinite(anchor) or anchor <= 0:
-        anchor = float(np.median(y))
-    sigma = max(sigma, max(anchor * 0.05, 1.0))
-    return anchor, sigma
+    if not np.isfinite(anchor_log):
+        anchor_log = float(np.median(log_y))
+    sigma_log = max(sigma_log, 0.05)
+    return anchor_log, sigma_log
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -1063,12 +1067,17 @@ def _build_seller_expectations(
     rng: random.Random,
 ) -> dict[str, Any]:
     """Sample a seller reservation / asking range around the hedonic anchor."""
-    anchor_price, sigma_price = _estimate_hedonic_price(
+    anchor_log_price, sigma_log_price = _estimate_hedonic_price(
         hedonic_training_flats,
         target_flat=flat,
     )
-    reservation_price = max(0.0, rng.normalvariate(anchor_price, sigma_price))
-    ask_price = max(reservation_price, anchor_price + sigma_price)
+    reservation_price = float(
+        np.exp(rng.normalvariate(anchor_log_price, sigma_log_price))
+    )
+    ask_price = max(
+        reservation_price,
+        float(np.exp(anchor_log_price + sigma_log_price)),
+    )
     return SellerExpectationRange(
         min_price=round(reservation_price, 2),
         max_price=round(ask_price, 2),
@@ -1196,10 +1205,12 @@ def _build_buyer_budget(
         town=buyer["town"],
         preferred_flat_types=preferred_flat_types,
     )
-    anchor_price, sigma_price = _estimate_hedonic_price(training_flats)
-    buyer_value_draw = max(0.0, rng.normalvariate(anchor_price, sigma_price))
+    anchor_log_price, sigma_log_price = _estimate_hedonic_price(training_flats)
+    buyer_value_draw = float(
+        np.exp(rng.normalvariate(anchor_log_price, sigma_log_price))
+    )
     max_price = min(float(buyer["financials"]["effective_ceiling"]), buyer_value_draw)
-    min_price = max(0.0, anchor_price - sigma_price)
+    min_price = max(0.0, float(np.exp(anchor_log_price - sigma_log_price)))
     if max_price < min_price:
         min_price = max(0.0, min(max_price, min_price))
     return BuyerBudgetRange(
@@ -1424,6 +1435,93 @@ def _validate_negotiating_seller_seedability(
     return not unmatched_seller_ids, unmatched_seller_ids
 
 
+def _resample_buyers_from_oversampled_pool(
+    broad_buyers: list[dict[str, Any]],
+    *,
+    target_sample_size: int,
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    """Draw one candidate buyer pool from the oversampled broad pool."""
+    if not broad_buyers or target_sample_size <= 0:
+        return []
+    sample_size = min(len(broad_buyers), target_sample_size)
+    sampled_buyers = rng.sample(broad_buyers, k=sample_size)
+    return [copy.deepcopy(buyer) for buyer in sampled_buyers]
+
+
+def _rank_candidate_buyer_ids_for_seller(
+    seller: dict[str, Any],
+    buyers: list[dict[str, Any]],
+) -> list[str]:
+    """Rank feasible buyers for one seller using the initializer's heuristics."""
+    listing_price = float(seller["expectations"]["max_price"])
+    linked_flat_id = str(seller.get("linked_flat_id", "")).strip()
+    flat = seller.get("flat", {})
+
+    ranked: list[tuple[int, float, str]] = []
+    for buyer in buyers:
+        buyer_id = str(buyer.get("buyer_id", "")).strip()
+        if not buyer_id:
+            continue
+        budget_max = float(buyer.get("budget", {}).get("max_price", 0.0))
+        if budget_max < listing_price:
+            continue
+
+        preferences = buyer.get("preferences", {})
+        feasible_flat_ids = {
+            str(flat_id).strip()
+            for flat_id in buyer.get("feasible_flat_ids", ())
+            if str(flat_id).strip()
+        }
+        score = 0
+        if linked_flat_id and linked_flat_id in feasible_flat_ids:
+            score += 10
+        if flat.get("flat_type") in preferences.get("flat_type", ()):
+            score += 3
+        if flat.get("town") in preferences.get("towns", ()):
+            score += 2
+        price_gap = abs(budget_max - listing_price)
+        ranked.append((score, -price_gap, buyer_id))
+
+    ranked.sort(reverse=True)
+    return [buyer_id for _, _, buyer_id in ranked]
+
+
+def _annotate_seller_potential_matches(
+    sellers: list[dict[str, Any]],
+    buyers: list[dict[str, Any]],
+) -> None:
+    """Store feasible buyer rankings so the main simulation can reuse them."""
+    for seller in sellers:
+        seller["potential_buyer_ids"] = _rank_candidate_buyer_ids_for_seller(
+            seller,
+            buyers,
+        )
+
+    used_buyer_ids: set[str] = set()
+    for seller in sorted(
+        sellers,
+        key=lambda item: int(item.get("initialization_order", 0)),
+    ):
+        if (
+            str(seller.get("initial_market_state", "")).strip().casefold()
+            != "negotiating"
+        ):
+            seller["seeded_buyer_id"] = ""
+            continue
+        seeded_buyer_id = next(
+            (
+                buyer_id
+                for buyer_id in seller.get("potential_buyer_ids", ())
+                if buyer_id not in used_buyer_ids
+            ),
+            "",
+        )
+        seller["seeded_buyer_id"] = seeded_buyer_id
+        if seeded_buyer_id:
+            used_buyer_ids.add(seeded_buyer_id)
+
+
 def _build_buyer_pools_with_regeneration(
     sellers: list[dict[str, Any]],
     flats: list[dict[str, Any]],
@@ -1437,13 +1535,11 @@ def _build_buyer_pools_with_regeneration(
     income_prior: pd.DataFrame,
     distribution_tables: dict[str, pd.DataFrame],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Regenerate buyers until coverage and week-1 seedability pass or retries exhaust."""
+    """Retry buyer-pool construction until negotiating sellers are all seedable."""
     target_retained_count = len(flats)
-    best_broad_buyers: list[dict[str, Any]] = []
-    best_retained_buyers: list[dict[str, Any]] = []
-    best_unmatched_seller_ids: list[str] = []
+    last_unmatched_seller_ids: list[str] = []
 
-    for attempt in range(1, MAX_BUYER_POOL_REGEN_ATTEMPTS + 1):
+    for broad_attempt in range(1, MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS + 1):
         broad_buyers = _build_broad_buyers(
             flats,
             hedonic_training_flats,
@@ -1454,41 +1550,41 @@ def _build_buyer_pools_with_regeneration(
             income_prior=income_prior,
             distribution_tables=distribution_tables,
         )
-        retained_buyers = _retain_feasible_buyers(broad_buyers, flats, archetypes)
-        seedable, unmatched_seller_ids = _validate_negotiating_seller_seedability(
-            sellers,
-            retained_buyers,
-        )
-        logging.info(
-            "Buyer-pool attempt %s/%s retained %s feasible buyers for %s sellers; unmatched negotiating sellers=%s.",
-            attempt,
-            MAX_BUYER_POOL_REGEN_ATTEMPTS,
-            len(retained_buyers),
-            target_retained_count,
-            len(unmatched_seller_ids),
-        )
+        for sample_attempt in range(1, MAX_BUYER_POOL_RESAMPLE_ATTEMPTS + 1):
+            sampled_buyers = _resample_buyers_from_oversampled_pool(
+                broad_buyers,
+                target_sample_size=target_retained_count,
+                rng=rng,
+            )
+            retained_buyers = _retain_feasible_buyers(sampled_buyers, flats, archetypes)
+            seedable, unmatched_seller_ids = _validate_negotiating_seller_seedability(
+                sellers,
+                retained_buyers,
+            )
+            logging.info(
+                "Buyer-pool sample attempt %s/%s within oversampled pool %s/%s retained %s feasible buyers for %s sellers; unmatched negotiating sellers=%s.",
+                sample_attempt,
+                MAX_BUYER_POOL_RESAMPLE_ATTEMPTS,
+                broad_attempt,
+                MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
+                len(retained_buyers),
+                target_retained_count,
+                len(unmatched_seller_ids),
+            )
+            last_unmatched_seller_ids = unmatched_seller_ids
 
-        if len(retained_buyers) > len(best_retained_buyers):
-            best_broad_buyers = broad_buyers
-            best_retained_buyers = retained_buyers
-            best_unmatched_seller_ids = unmatched_seller_ids
+            if len(retained_buyers) >= target_retained_count and seedable:
+                return broad_buyers, retained_buyers
 
-        if len(retained_buyers) >= target_retained_count and seedable:
-            return broad_buyers, retained_buyers
-
-    logging.warning(
-        "Buyer-pool regeneration ended after %s attempts; using best attempt with %s retained buyers for %s sellers and %s unmatched negotiating sellers.",
-        MAX_BUYER_POOL_REGEN_ATTEMPTS,
-        len(best_retained_buyers),
-        target_retained_count,
-        len(best_unmatched_seller_ids),
+    unmatched_text = (
+        ", ".join(last_unmatched_seller_ids) if last_unmatched_seller_ids else "unknown"
     )
-    if best_unmatched_seller_ids:
-        logging.warning(
-            "Unmatched negotiating sellers in best buyer-pool attempt: %s",
-            ", ".join(best_unmatched_seller_ids),
-        )
-    return best_broad_buyers, best_retained_buyers
+    raise ValueError(
+        "Unable to build a seedable buyer pool after "
+        f"{MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS} oversampled-pool attempts "
+        f"and {MAX_BUYER_POOL_RESAMPLE_ATTEMPTS} resamples each; "
+        f"unmatched negotiating sellers: {unmatched_text}."
+    )
 
 
 def build_transaction_conditioned_segment(
@@ -1576,27 +1672,49 @@ def build_transaction_conditioned_segment(
             config.buyer_pool_multiplier,
         )
     flats = _build_flat_universe(transactions, town_transactions, config)
-    sellers = _build_sellers(
-        flats,
-        hedonic_training_flats,
-        distribution_tables,
-        donors,
-        seller_archetypes,
-        config=config,
-        rng=rng,
-    )
-    broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
-        sellers,
-        flats,
-        hedonic_training_flats,
-        donors,
-        archetypes,
-        config=config,
-        rng=rng,
-        age_prior=age_prior,
-        income_prior=income_prior,
-        distribution_tables=distribution_tables,
-    )
+    sellers: list[dict[str, Any]] = []
+    broad_buyers: list[dict[str, Any]] = []
+    retained_buyers: list[dict[str, Any]] = []
+    last_error: Exception | None = None
+
+    for seller_attempt in range(1, MAX_SELLER_POOL_RESAMPLE_ATTEMPTS + 1):
+        sellers = _build_sellers(
+            flats,
+            hedonic_training_flats,
+            distribution_tables,
+            donors,
+            seller_archetypes,
+            config=config,
+            rng=rng,
+        )
+        try:
+            broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
+                sellers,
+                flats,
+                hedonic_training_flats,
+                donors,
+                archetypes,
+                config=config,
+                rng=rng,
+                age_prior=age_prior,
+                income_prior=income_prior,
+                distribution_tables=distribution_tables,
+            )
+            break
+        except ValueError as error:
+            last_error = error
+            logging.warning(
+                "Seller-pool attempt %s/%s could not seed all negotiating sellers: %s",
+                seller_attempt,
+                MAX_SELLER_POOL_RESAMPLE_ATTEMPTS,
+                error,
+            )
+    else:
+        raise ValueError(
+            "Unable to build a market segment where all negotiating sellers have matches "
+            f"after {MAX_SELLER_POOL_RESAMPLE_ATTEMPTS} seller-pool attempts."
+        ) from last_error
+
     if model is not None:
         logging.info(
             "Populating seller motivations and buyer preferences with the configured model."
@@ -1613,6 +1731,7 @@ def build_transaction_conditioned_segment(
             "Skipping model-based enrichment because no language model was provided."
         )
 
+    _annotate_seller_potential_matches(sellers, retained_buyers)
     logging.info(
         "Built market segment with %s flats, %s sellers, %s broad buyers, and %s retained buyers.",
         len(flats),
