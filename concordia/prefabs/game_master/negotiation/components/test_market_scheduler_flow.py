@@ -194,32 +194,36 @@ class BuildMarketProfilesTest(unittest.TestCase):
 
 class ListingReleaseTest(unittest.TestCase):
 
-  def _build_listing_module(self) -> hdb_listing.ListingModule:
+  def _build_listing_module(
+      self,
+      seller_specs: tuple[tuple[str, str, str, int, float, float], ...] | None = None,
+  ) -> hdb_listing.ListingModule:
     buyer_profile = _buyer_profile(name='Buyer 1')
-    seller_one = _seller_profile(name='Seller 1')
-    seller_two = _seller_profile(
-        name='Seller 2',
-        flat_type='4-Room',
-        min_price=620000.0,
-        max_price=660000.0,
+    seller_specs = seller_specs or (
+        ('seller_001', 'Seller 1', 'listed', 1, 500000.0, 530000.0),
+        ('seller_002', 'Seller 2', 'not_yet_listed', 2, 620000.0, 660000.0),
     )
-    seller_one['initial_market_state'] = 'listed'
-    seller_one['initialization_order'] = 1
-    seller_two['initial_market_state'] = 'not_yet_listed'
-    seller_two['initialization_order'] = 2
+    seller_profiles: dict[str, dict[str, object]] = {}
+    player_ids = ['buyer_001']
+    player_names = [str(buyer_profile['name'])]
+    for seller_id, seller_name, market_state, order, min_price, max_price in seller_specs:
+      seller_profile = _seller_profile(
+          name=seller_name,
+          flat_type='4-Room' if seller_id.endswith('2') else '3-Room',
+          min_price=min_price,
+          max_price=max_price,
+      )
+      seller_profile['initial_market_state'] = market_state
+      seller_profile['initialization_order'] = order
+      seller_profiles[seller_id] = seller_profile
+      player_ids.append(seller_id)
+      player_names.append(seller_name)
 
     return hdb_listing.ListingModule(
-        player_names=(
-            buyer_profile['name'],
-            seller_one['name'],
-            seller_two['name'],
-        ),
-        player_ids=('buyer_001', 'seller_001', 'seller_002'),
+        player_names=tuple(player_names),
+        player_ids=tuple(player_ids),
         buyer_profiles={'buyer_001': buyer_profile},
-        seller_profiles={
-            'seller_001': seller_one,
-            'seller_002': seller_two,
-        },
+        seller_profiles=seller_profiles,
         enabled=True,
     )
 
@@ -239,6 +243,70 @@ class ListingReleaseTest(unittest.TestCase):
     self.assertEqual(released, ['seller_002'])
     self.assertIn('seller_002', released_open_ids)
     self.assertNotIn('seller_001', released_open_ids)
+
+  def test_releases_sellers_in_initialization_order(self):
+    listing_module = self._build_listing_module((
+        ('seller_001', 'Seller 1', 'listed', 1, 500000.0, 530000.0),
+        ('seller_003', 'Seller 3', 'not_yet_listed', 3, 640000.0, 680000.0),
+        ('seller_002', 'Seller 2', 'not_yet_listed', 2, 620000.0, 660000.0),
+    ))
+    portal = listing_module._ensure_portal()
+    portal.closed_sellers.add('seller_001')
+
+    first_release = listing_module.prepare_weekly_market(week_number=2)
+
+    self.assertEqual(first_release, ['seller_002'])
+    self.assertIn('seller_002', listing_module.get_open_player_ids())
+    self.assertNotIn('seller_003', listing_module.get_open_player_ids())
+
+    portal.closed_sellers.add('seller_002')
+    second_release = listing_module.prepare_weekly_market(week_number=3)
+
+    self.assertEqual(second_release, ['seller_003'])
+    self.assertIn('seller_003', listing_module.get_open_player_ids())
+
+  def test_does_not_release_when_active_seller_capacity_is_full(self):
+    listing_module = self._build_listing_module((
+        ('seller_001', 'Seller 1', 'listed', 1, 500000.0, 530000.0),
+        ('seller_002', 'Seller 2', 'listed', 2, 620000.0, 660000.0),
+        ('seller_003', 'Seller 3', 'not_yet_listed', 3, 640000.0, 680000.0),
+    ))
+
+    released = listing_module.prepare_weekly_market(week_number=2)
+
+    self.assertEqual(released, [])
+    self.assertIn('seller_001', listing_module.get_open_player_ids())
+    self.assertIn('seller_002', listing_module.get_open_player_ids())
+    self.assertNotIn('seller_003', listing_module.get_open_player_ids())
+
+  def test_state_round_trip_preserves_delayed_release_queue(self):
+    seller_specs = (
+        ('seller_001', 'Seller 1', 'listed', 1, 500000.0, 530000.0),
+        ('seller_002', 'Seller 2', 'not_yet_listed', 2, 620000.0, 660000.0),
+        ('seller_003', 'Seller 3', 'not_yet_listed', 3, 640000.0, 680000.0),
+    )
+    listing_module = self._build_listing_module(seller_specs)
+    portal = listing_module._ensure_portal()
+    portal.closed_sellers.add('seller_001')
+    self.assertEqual(
+        listing_module.prepare_weekly_market(week_number=2),
+        ['seller_002'],
+    )
+
+    saved_state = listing_module.get_state()
+    restored_module = self._build_listing_module(seller_specs)
+    restored_module.set_state(saved_state)
+
+    self.assertIn('seller_002', restored_module.get_open_player_ids())
+    self.assertNotIn('seller_003', restored_module.get_open_player_ids())
+
+    restored_portal = restored_module._ensure_portal()
+    restored_portal.closed_sellers.add('seller_002')
+    self.assertEqual(
+        restored_module.prepare_weekly_market(week_number=3),
+        ['seller_003'],
+    )
+    self.assertIn('seller_003', restored_module.get_open_player_ids())
 
 
 class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
@@ -269,6 +337,45 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
     self.assertEqual(
         week_context['open_negotiation_pairs'],
         [['buyer_001', 'seller_001']],
+    )
+
+  def test_prepare_week_deduplicates_pending_pairs_against_open_pairs(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001', 'buyer_002', 'seller_002'},
+    )
+    negotiation_module = _FakeNegotiationModule(
+        open_pairs=[('buyer_001', 'seller_001')],
+    )
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001', 'buyer_002', 'seller_002'),
+        player_names=('Buyer 1', 'Seller 1', 'Buyer 2', 'Seller 2'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+    state = coordinator.get_state()
+    state['pending_matches'] = [{
+        'buyer_id': 'buyer_001',
+        'seller_id': 'seller_001',
+        'buyer_state': {'id': 'buyer_001'},
+        'seller_state': {'id': 'seller_001'},
+    }]
+    coordinator.set_state(state)
+
+    week_context = coordinator.prepare_week()
+
+    self.assertEqual(
+        week_context['new_negotiation_pairs'],
+        state['pending_matches'],
+    )
+    self.assertEqual(
+        week_context['open_negotiation_pairs'],
+        [['buyer_001', 'seller_001']],
+    )
+    self.assertEqual(
+        sorted(week_context['listing_player_ids']),
+        ['buyer_002', 'seller_002'],
     )
 
   def test_listing_match_hands_off_to_negotiation_next_week(self):
@@ -381,6 +488,108 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
     self.assertEqual(
         summary['reopened_listing_pairs'],
         negotiation_module.relisting_payloads,
+    )
+
+  def test_successful_negotiation_does_not_reopen_into_listing(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001'},
+    )
+    negotiation_module = _FakeNegotiationModule(
+        open_pairs=[('buyer_001', 'seller_001')],
+    )
+    negotiation_module.relisting_payloads = [{
+        'buyer_id': 'buyer_001',
+        'seller_id': 'seller_001',
+    }]
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001'),
+        player_names=('Buyer 1', 'Seller 1'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+
+    negotiation_outcome = {
+        'week_number': 1,
+        'number_of_pairs_negotiated': 1,
+        'events': [],
+        'closed_pairs': [ {
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'buyer_name': 'Buyer 1',
+            'seller_name': 'Seller 1',
+            'outcome': 'SUCCESS',
+        }],
+        'successful_pairs': [ {
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'buyer_name': 'Buyer 1',
+            'seller_name': 'Seller 1',
+            'outcome': 'SUCCESS',
+        }],
+        'failed_pairs': [],
+    }
+
+    summary = coordinator.complete_week(
+        listing_outcome=None,
+        negotiation_outcome=negotiation_outcome,
+    )
+
+    self.assertEqual(listing_module.reopened_payloads, [])
+    self.assertEqual(summary['reopened_listing_pairs'], [])
+
+  def test_state_round_trip_preserves_pending_matches_for_next_week(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001', 'buyer_002', 'seller_002'},
+    )
+    listing_module.transfer_payloads = [{
+        'buyer_id': 'buyer_002',
+        'seller_id': 'seller_002',
+        'buyer_state': {'id': 'buyer_002'},
+        'seller_state': {'id': 'seller_002'},
+    }]
+    negotiation_module = _FakeNegotiationModule(open_pairs=[])
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001', 'buyer_002', 'seller_002'),
+        player_names=('Buyer 1', 'Seller 1', 'Buyer 2', 'Seller 2'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+    listing_outcome = type('ListingOutcome', (), {
+        'matched_pairs': [],
+        'model_dump': lambda self, mode='json': {
+            'week_number': 1,
+            'matched_pairs': [],
+        },
+    })()
+    coordinator.complete_week(
+        listing_outcome=listing_outcome,
+        negotiation_outcome=None,
+    )
+
+    restored_coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001', 'buyer_002', 'seller_002'),
+        player_names=('Buyer 1', 'Seller 1', 'Buyer 2', 'Seller 2'),
+    )
+    restored_coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+    restored_coordinator.set_state(coordinator.get_state())
+
+    next_week = restored_coordinator.prepare_week()
+
+    self.assertEqual(next_week['week_number'], 2)
+    self.assertEqual(
+        next_week['new_negotiation_pairs'],
+        listing_module.transfer_payloads,
+    )
+    self.assertEqual(
+        next_week['open_negotiation_pairs'],
+        [['buyer_002', 'seller_002']],
     )
 
 
