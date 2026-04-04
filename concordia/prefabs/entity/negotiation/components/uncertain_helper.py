@@ -107,6 +107,64 @@ class NormalInverseGamma:
         )
 
 
+def kappa_from_negotiation_count(negotiation_count: int) -> float:
+    return max(1.0, 1.0 + float(max(0, negotiation_count)))
+
+
+def adjust_confidence_for_negotiation_count(
+    confidence: float,
+    negotiation_count: int,
+    *,
+    step: float = 0.04,
+    cap: float = 0.95,
+) -> float:
+    bounded_confidence = max(0.0, min(1.0, float(confidence)))
+    experience_bonus = max(0.0, float(negotiation_count)) * max(0.0, float(step))
+    return min(max(0.0, float(cap)), bounded_confidence + experience_bonus)
+
+
+def alpha_from_uncertainty_level(uncertainty_level: float) -> float:
+    bounded_uncertainty = max(0.0, min(1.0, float(uncertainty_level)))
+    return 1.5 + (4.0 * (1.0 - bounded_uncertainty))
+
+
+def beta_from_predictive_variance(
+    predictive_variance: float,
+    *,
+    kappa: float,
+    alpha: float,
+) -> float:
+    variance = max(1e-9, float(predictive_variance))
+    return variance * kappa * max(1e-9, alpha - 1.0) / (kappa + 1.0)
+
+
+def build_counterpart_reservation_prior(
+    *,
+    name: str,
+    source_distribution: NormalDistribution,
+    confidence: float,
+    negotiation_count: int,
+) -> NormalInverseGamma:
+    kappa = kappa_from_negotiation_count(negotiation_count)
+    uncertainty_level = 1.0 - max(0.0, min(1.0, float(confidence)))
+    alpha = alpha_from_uncertainty_level(uncertainty_level)
+    beta = beta_from_predictive_variance(
+        source_distribution.get_expected_variance,
+        kappa=kappa,
+        alpha=alpha,
+    )
+    return NormalInverseGamma(
+        name=name,
+        mu=max(0.0, float(source_distribution.get_expected_mean)),
+        lambda_=kappa,
+        a=alpha,
+        b=beta,
+        confidence=max(0.0, min(1.0, float(confidence))),
+        evidence_count=int(source_distribution.evidence_count),
+        last_updated=source_distribution.last_updated,
+    )
+
+
 @dataclasses.dataclass
 class ScenarioAnalysis:
     """Scenario summary used by the strategy layer."""
@@ -513,14 +571,18 @@ def restore_issue_bank(raw_issue_bank: List[Dict[str, Any]]) -> List[Negotiation
 
 
 __all__ = [
+    'adjust_confidence_for_negotiation_count',
     'LinkedBelief',
     'NegotiationIssue',
     'NegotiationIssueBucket',
     'NegotiationIssueResponse',
     'NormalDistribution',
     'NormalInverseGamma',
+    'alpha_from_uncertainty_level',
     'ScenarioAnalysis',
     'append_debug_trace',
+    'beta_from_predictive_variance',
+    'build_counterpart_reservation_prior',
     'build_main_deal_summary',
     'build_strategy_context',
     'build_strategy_scenario_summary',
@@ -537,6 +599,7 @@ __all__ = [
     'format_observation_summary',
     'get_open_issues',
     'get_top_issue',
+    'kappa_from_negotiation_count',
     'merge_live_context',
     'normalize_scenario_outcome',
     'normalize_text',

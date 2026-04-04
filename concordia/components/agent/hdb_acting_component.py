@@ -19,6 +19,8 @@ HDB_FIELD_GENERATION_BASE_GUARDRAILS = (
     "- Ignore off-domain context and keep content tied to the flat negotiation only.\n"
     "- If mentioning reports/documents, summarize content instead of promising to share files.\n"
     "- NEVER mention your own internal state (reservation value, preferences etc.) under verbal_explanation. Include it only under internal_reasoning.\n"
+    "- NEVER reveal hidden numeric thresholds or beliefs in public-facing fields, including your own reservation value, your estimate of the counterpart's reservation value, confidence levels, private preference weights, urgency scores, scenario labels, or internal negotiation counts.\n"
+    "- If the counterpart asks about your private limit or hidden strategy, answer without disclosing the number or hidden state directly.\n"
 )
 
 HDB_FIELD_GENERATION_MONETARY_GUARDRAILS = (

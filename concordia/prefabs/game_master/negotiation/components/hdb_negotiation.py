@@ -554,6 +554,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if not isinstance(action, dict):
       return event
     action.pop('internal_reasoning', None)
+    action.pop('decision_rationale', None)
     sanitized_json = json.dumps(action, ensure_ascii=False)
     start = payload.find(payload_json)
     if start < 0:

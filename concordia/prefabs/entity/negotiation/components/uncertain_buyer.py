@@ -157,46 +157,49 @@ class UncertainBuyer(
     ) -> None:
         buyer_state = listing_payload.buyer_state
         distribution = buyer_state.effective_reservation
-
-        listing_price = uncertain_helper.coerce_positive_float(
-            listing_payload.listing_record.listing_price
-        )
-        if listing_price > 0.0:
-            self._beliefs['counterpart_reservation'].mu = listing_price
-        self._beliefs['counterpart_reservation'].a = max(
-            5.0,
-            float(len(buyer_state.negotiation_history)),
-        )
+        negotiation_count = max(0, len(buyer_state.negotiation_history))
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         priors = self._calibrate_initial_pairing_priors(listing_payload)
         own_confidence = max(0.0, min(1.0, float(distribution.confidence)))
+        counterpart_confidence = float(self._beliefs['counterpart_reservation'].confidence)
         if priors is not None:
             own_confidence = max(own_confidence, float(priors.own_confidence))
-            self._beliefs['counterpart_reservation'].confidence = (
-                priors.counterpart_confidence
-            )
-        # Keep the listing-stage preference prior and the negotiated-flat NIG prior
-        # distinct: the former informs the moments, while the latter is specific to
-        # this buyer-flat pair during negotiation.
-        self._beliefs['own_reservation'] = self._build_flat_specific_own_prior(
+            counterpart_confidence = float(priors.counterpart_confidence)
+        own_confidence = uncertain_helper.adjust_confidence_for_negotiation_count(
+            own_confidence,
+            negotiation_count,
+        )
+        counterpart_confidence = uncertain_helper.adjust_confidence_for_negotiation_count(
+            counterpart_confidence,
+            negotiation_count,
+        )
+        self._beliefs['own_reservation'] = self._build_flat_specific_own_reservation(
             listing_payload,
             own_confidence=own_confidence,
+        )
+        self._beliefs['counterpart_reservation'] = (
+            uncertain_helper.build_counterpart_reservation_prior(
+                name="Counterpart's Reservation Value",
+                source_distribution=self._build_observed_seller_signal(
+                    listing_payload
+                ),
+                confidence=counterpart_confidence,
+                negotiation_count=negotiation_count,
+            )
+        )
+        uncertain_helper.append_debug_trace(
+            self._debug_trace,
+            (
+                'Initialized counterpart NIG prior from buyer-observable seller '
+                f'signals with negotiation_count={negotiation_count} '
+                f'and confidence={counterpart_confidence:.2f}.'
+            ),
         )
 
     def get_effective_reservation_distribution(
         self,
     ) -> uncertain_helper.NormalDistribution:
-        own_belief = self._beliefs['own_reservation']
-        if isinstance(own_belief, uncertain_helper.NormalInverseGamma):
-            return uncertain_helper.NormalDistribution(
-                name=own_belief.name,
-                mean=max(0.0, float(own_belief.get_expected_mean)),
-                std=math.sqrt(max(1e-9, float(own_belief.get_expected_variance))),
-                confidence=max(0.0, min(1.0, float(own_belief.confidence))),
-                evidence_count=int(own_belief.evidence_count),
-                last_updated=own_belief.last_updated,
-            )
-        return own_belief.model_copy(deep=True)
+        return self._beliefs['own_reservation'].model_copy(deep=True)
 
     def _initialize_default_beliefs(self, mu: float = 0.0, lambda_: float = 1.0, a: float = 1.0, b: float = 1.0, own_reservation_: float = 0.0, own_reservation_std: float = 0.0, own_confidence: float = 0.5, counterpart_confidence: float = 0.5):
         """Initialize default beliefs about negotiation parameters."""
@@ -224,6 +227,7 @@ class UncertainBuyer(
         listing_record = listing_payload.listing_record
         buyer_state = listing_payload.buyer_state
         observation_count = len(buyer_state.latest_search_results)
+        negotiation_count = len(buyer_state.negotiation_history)
         if str(buyer_state.latest_market_feedback).strip():
             observation_count += 1
 
@@ -247,6 +251,7 @@ class UncertainBuyer(
             f"{listing_record.model_dump(mode='json')}\n\n"
             "## Listing-Stage Signals Seen So Far\n"
             f"- observation_count: {observation_count}\n"
+            f"- prior_negotiation_count: {negotiation_count}\n"
             f"- latest_market_feedback: {buyer_state.latest_market_feedback}\n"
             f"- latest_search_results: {len(buyer_state.latest_search_results)}\n\n"
             "# Rubric\n"
@@ -273,9 +278,9 @@ class UncertainBuyer(
             "- Return JSON only.\n"
             "- Keep both values within [0, 1].\n"
             "- Higher own_confidence should correspond to more decisive/valuation-driven personas "
-            "and more observations.\n"
+            "and more observations or negotiation experience.\n"
             "- Higher counterpart_confidence should correspond to stronger listing-preference fit "
-            "and a persona that seems confident in judging market value.\n"
+            "and a persona that seems confident in judging market value, especially after more negotiations.\n"
             "- Use the examples as anchors, not as fixed templates.\n"
         )
 
@@ -298,12 +303,12 @@ class UncertainBuyer(
             ),
         )
 
-    def _build_flat_specific_own_prior(
+    def _build_flat_specific_own_reservation(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
         *,
         own_confidence: float,
-    ) -> uncertain_helper.NormalInverseGamma:
+    ) -> uncertain_helper.NormalDistribution:
         buyer_state = listing_payload.buyer_state
         listing_prior = buyer_state.effective_reservation
         attribute_vector = common_schemas.build_buyer_flat_attribute_vector(
@@ -315,54 +320,53 @@ class UncertainBuyer(
         )
         irreducible_noise_sq = max(1.0, (0.35 * float(listing_prior.std)) ** 2)
         predictive_variance = max(1.0, preference_variance + irreducible_noise_sq)
-        uncertainty_level = preference_variance / predictive_variance
-        failed_negotiation_count = max(0, len(buyer_state.negotiation_history))
-        kappa = self._kappa_from_failed_negotiations(failed_negotiation_count)
-        alpha = self._alpha_from_uncertainty_level(uncertainty_level)
-        beta = self._beta_from_predictive_variance(
-            predictive_variance,
-            kappa=kappa,
-            alpha=alpha,
-        )
         uncertain_helper.append_debug_trace(
             self._debug_trace,
             (
-                'Initialized flat-specific buyer NIG prior from preference prior '
+                'Initialized flat-specific buyer own reservation from preference prior '
                 f'with predictive_mean={predictive_mean:.2f}, '
                 f'preference_var={preference_variance:.2f}, '
-                f'noise_var={irreducible_noise_sq:.2f}, '
-                f'kappa={kappa:.2f}, alpha={alpha:.2f}, beta={beta:.2f}.'
+                f'noise_var={irreducible_noise_sq:.2f}.'
             ),
         )
-        return uncertain_helper.NormalInverseGamma(
+        return uncertain_helper.NormalDistribution(
             name='Your Reservation Value For This Flat',
-            mu=max(0.0, predictive_mean),
-            lambda_=kappa,
-            a=alpha,
-            b=beta,
+            mean=max(0.0, predictive_mean),
+            std=math.sqrt(max(1e-9, predictive_variance)),
             confidence=max(0.0, min(1.0, own_confidence)),
             evidence_count=int(listing_prior.evidence_count),
             last_updated=listing_prior.last_updated,
         )
 
-    @staticmethod
-    def _kappa_from_failed_negotiations(failed_negotiation_count: int) -> float:
-        return max(1.0, 1.0 + float(failed_negotiation_count))
-
-    @staticmethod
-    def _alpha_from_uncertainty_level(uncertainty_level: float) -> float:
-        bounded_uncertainty = max(0.0, min(1.0, float(uncertainty_level)))
-        return 1.5 + (4.0 * (1.0 - bounded_uncertainty))
-
-    @staticmethod
-    def _beta_from_predictive_variance(
-        predictive_variance: float,
-        *,
-        kappa: float,
-        alpha: float,
-    ) -> float:
-        variance = max(1e-9, float(predictive_variance))
-        return variance * kappa * max(1e-9, alpha - 1.0) / (kappa + 1.0)
+    def _build_observed_seller_signal(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> uncertain_helper.NormalDistribution:
+        buyer_state = listing_payload.buyer_state
+        listing_prior = buyer_state.effective_reservation
+        listing_price = uncertain_helper.coerce_positive_float(
+            listing_payload.listing_record.listing_price,
+            default=float(listing_prior.mean),
+        )
+        observation_count = len(buyer_state.latest_search_results)
+        if str(buyer_state.latest_market_feedback).strip():
+            observation_count += 1
+        observed_std = max(
+            1.0,
+            max(
+                float(listing_prior.std),
+                0.10 * max(1.0, listing_price),
+                20000.0,
+            ) / math.sqrt(1.0 + observation_count),
+        )
+        return uncertain_helper.NormalDistribution(
+            name='Observed Seller Signal',
+            mean=max(0.0, listing_price),
+            std=observed_std,
+            confidence=max(0.0, min(1.0, float(listing_prior.confidence))),
+            evidence_count=observation_count,
+            last_updated=listing_prior.last_updated,
+        )
 
     def _build_belief_summary_for_strategy(self) -> str:
         own_reservation = self._beliefs['own_reservation']

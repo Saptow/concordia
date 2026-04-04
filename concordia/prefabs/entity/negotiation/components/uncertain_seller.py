@@ -170,24 +170,43 @@ class UncertainSeller(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
+        seller_state = listing_payload.seller_state
+        negotiation_count = max(0, len(seller_state.negotiation_history))
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
+        own_reservation = self._beliefs['own_reservation'].mean
         listing_price = uncertain_helper.coerce_positive_float(
             listing_payload.listing_record.listing_price
         )
-        if listing_price <= 0.0:
-            return
-        self._listing_price_prior_discount = 1.0
-        self._beliefs['counterpart_reservation'].mu = listing_price
-        own_reservation = self._beliefs['own_reservation'].mean
         if abs(float(own_reservation) - float(listing_price)) <= 1e-9:
             self._debug_trace.append(
                 'Own reservation equals listing price; seller expectation spread is absent.'
             )
         priors = self._calibrate_initial_pairing_priors(listing_payload)
+        counterpart_confidence = float(self._beliefs['counterpart_reservation'].confidence)
         if priors is not None:
-            self._beliefs['counterpart_reservation'].confidence = (
-                priors.counterpart_confidence
+            counterpart_confidence = float(priors.counterpart_confidence)
+        counterpart_confidence = uncertain_helper.adjust_confidence_for_negotiation_count(
+            counterpart_confidence,
+            negotiation_count,
+        )
+        self._beliefs['counterpart_reservation'] = (
+            uncertain_helper.build_counterpart_reservation_prior(
+                name="Counterpart's Reservation Value",
+                source_distribution=self._build_observed_buyer_signal(
+                    listing_payload
+                ),
+                confidence=counterpart_confidence,
+                negotiation_count=negotiation_count,
             )
+        )
+        uncertain_helper.append_debug_trace(
+            self._debug_trace,
+            (
+                'Initialized seller counterpart NIG prior from seller-observable '
+                f'buyer signals with negotiation_count={negotiation_count} '
+                f'and confidence={counterpart_confidence:.2f}.'
+            ),
+        )
 
     def get_effective_reservation_distribution(
         self,
@@ -226,6 +245,7 @@ class UncertainSeller(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> Optional[InitialSellerPairingPriors]:
+        negotiation_count = len(listing_payload.seller_state.negotiation_history)
         prompt = (
             "# Role\n"
             "You are calibrating initial uncertainty priors for a seller who has "
@@ -240,6 +260,8 @@ class UncertainSeller(
             f"{listing_payload.listing_record.model_dump(mode='json')}\n\n"
             "## Seller State\n"
             f"{listing_payload.seller_state.model_dump(mode='json')}\n\n"
+            "## Seller Experience\n"
+            f"- prior_negotiation_count: {negotiation_count}\n\n"
             "# Rubric\n"
             "- 0.20-0.40: seller persona seems unsure, reactive, or inexperienced in reading buyers.\n"
             "- 0.45-0.65: seller persona seems somewhat informed but still uncertain about buyer limits.\n"
@@ -256,7 +278,7 @@ class UncertainSeller(
             "# Rules\n"
             "- Return JSON only.\n"
             "- Keep the value within [0, 1].\n"
-            "- Base the estimate primarily on the seller persona.\n"
+            "- Base the estimate primarily on the seller persona and how many negotiations they have already gone through.\n"
             "- Higher values should reflect personas that seem experienced, assertive, "
             "or market-aware.\n"
             "- Use the examples as anchors, not as fixed templates.\n"
@@ -278,6 +300,36 @@ class UncertainSeller(
                 0.0,
                 min(1.0, priors.counterpart_confidence),
             ),
+        )
+
+    def _build_observed_buyer_signal(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> uncertain_helper.NormalDistribution:
+        seller_state = listing_payload.seller_state
+        listing_price = uncertain_helper.coerce_positive_float(
+            listing_payload.listing_record.listing_price,
+            default=float(self._beliefs['own_reservation'].mean),
+        )
+        request_count = max(1, int(seller_state.open_requests))
+        observed_std = max(
+            1.0,
+            max(
+                abs(float(listing_price) - float(self._beliefs['own_reservation'].mean)),
+                0.10 * max(1.0, listing_price),
+                20000.0,
+            ) / math.sqrt(float(request_count)),
+        )
+        return uncertain_helper.NormalDistribution(
+            name='Observed Buyer Signal',
+            mean=max(0.0, listing_price),
+            std=observed_std,
+            confidence=max(
+                0.0,
+                min(1.0, float(self._beliefs['own_reservation'].confidence)),
+            ),
+            evidence_count=request_count,
+            last_updated=self._beliefs['own_reservation'].last_updated,
         )
 
     def _build_belief_summary_for_strategy(self) -> str:

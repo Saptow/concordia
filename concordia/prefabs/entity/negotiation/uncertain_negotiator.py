@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 import dataclasses
 import json
+from types import SimpleNamespace
 
 from configs import NegotiationComponentConfig
 from concordia.agents import entity_agent_with_logging
@@ -402,6 +403,41 @@ def update_agent_from_listing(
     agent: entity_agent_with_logging.EntityAgentWithLogging,
     listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
 ) -> None:
+    def _buyer_safe_payload() -> SimpleNamespace:
+        return SimpleNamespace(
+            match_id=listing_payload.match_id,
+            week_matched=listing_payload.week_matched,
+            listing_record=listing_payload.listing_record,
+            buyer_state=listing_payload.buyer_state,
+            seller_state=SimpleNamespace(
+                id=listing_payload.seller_state.id,
+                name=listing_payload.seller_state.name,
+                role=listing_payload.seller_state.role,
+                description=listing_payload.seller_state.description,
+                listed=listing_payload.seller_state.listed,
+                current_listing_id=listing_payload.seller_state.current_listing_id,
+                current_listing_price=listing_payload.seller_state.current_listing_price,
+            ),
+        )
+
+    def _seller_safe_payload() -> SimpleNamespace:
+        return SimpleNamespace(
+            match_id=listing_payload.match_id,
+            week_matched=listing_payload.week_matched,
+            listing_record=listing_payload.listing_record,
+            seller_state=listing_payload.seller_state,
+            buyer_state=SimpleNamespace(
+                id=listing_payload.buyer_state.id,
+                name=listing_payload.buyer_state.name,
+                role=listing_payload.buyer_state.role,
+                description=listing_payload.buyer_state.description,
+            ),
+        )
+
+    buyer_safe_payload = _buyer_safe_payload()
+    seller_safe_payload = _seller_safe_payload()
+    instructions_payload = SimpleNamespace(listing_record=listing_payload.listing_record)
+
     for component_name in (
         'NegotiationInstructions',
         'uncertain_buyer',
@@ -415,7 +451,22 @@ def update_agent_from_listing(
         apply_listing_handoff = getattr(component, 'apply_listing_handoff', None)
         if not callable(apply_listing_handoff):
             continue
-        apply_listing_handoff(listing_payload)
+        if component_name == 'NegotiationInstructions':
+            apply_listing_handoff(instructions_payload)
+            continue
+        if component_name == 'uncertain_buyer':
+            apply_listing_handoff(buyer_safe_payload)
+            continue
+        if component_name == 'uncertain_seller':
+            apply_listing_handoff(seller_safe_payload)
+            continue
+        component_role = getattr(component, '_role', None)
+        if component_role == common_schemas.RoleType.BUYER:
+            apply_listing_handoff(buyer_safe_payload)
+        elif component_role == common_schemas.RoleType.SELLER:
+            apply_listing_handoff(seller_safe_payload)
+        else:
+            apply_listing_handoff(instructions_payload)
 
 def build_agent(
     model: language_model.LanguageModel,
