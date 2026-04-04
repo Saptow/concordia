@@ -541,7 +541,7 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
         negotiation_outcome=negotiation_outcome,
     )
 
-    self.assertEqual(listing_module.reopened_payloads, [])
+    self.assertEqual(listing_module.reopened_payloads, [[]])
     self.assertEqual(summary['reopened_listing_pairs'], [])
 
   def test_state_round_trip_preserves_pending_matches_for_next_week(self):

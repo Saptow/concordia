@@ -1432,7 +1432,7 @@ def _cap_retained_buyers(
     *,
     cap: int,
 ) -> list[dict[str, Any]]:
-    """Trim retained buyers to the configured cap while preserving seeding coverage."""
+    """Trim retained buyers while preserving negotiating seeds and seller coverage."""
     if len(buyers) <= cap:
         return buyers
 
@@ -1471,9 +1471,66 @@ def _cap_retained_buyers(
         )
         seeded_buyers = seeded_buyers[:cap]
 
+    candidate_buyer_ids_by_seller = {
+        str(seller.get("seller_id", "")).strip(): _rank_candidate_buyer_ids_for_seller(
+            seller,
+            buyers,
+        )
+        for seller in sellers
+        if str(seller.get("seller_id", "")).strip()
+    }
     selected_ids = {
         str(buyer.get("buyer_id", "")).strip() for buyer in seeded_buyers
     }
+    seller_ids_covered_by_selected = {
+        seller_id
+        for seller_id, candidate_buyer_ids in candidate_buyer_ids_by_seller.items()
+        if selected_ids.intersection(candidate_buyer_ids)
+    }
+
+    while len(selected_ids) < cap:
+        best_buyer = None
+        best_buyer_id = ""
+        best_newly_covered_seller_ids: set[str] = set()
+        for buyer in buyers:
+            buyer_id = str(buyer.get("buyer_id", "")).strip()
+            if not buyer_id or buyer_id in selected_ids:
+                continue
+            newly_covered_seller_ids = {
+                seller_id
+                for seller_id, candidate_buyer_ids in candidate_buyer_ids_by_seller.items()
+                if seller_id not in seller_ids_covered_by_selected
+                and buyer_id in candidate_buyer_ids
+            }
+            if not newly_covered_seller_ids:
+                continue
+            if best_buyer is None:
+                best_buyer = buyer
+                best_buyer_id = buyer_id
+                best_newly_covered_seller_ids = newly_covered_seller_ids
+                continue
+            best_priority = (
+                len(best_newly_covered_seller_ids),
+                len(best_buyer.get("feasible_flat_ids", ())),
+                float(best_buyer.get("budget", {}).get("max_price", 0.0)),
+                best_buyer_id,
+            )
+            candidate_priority = (
+                len(newly_covered_seller_ids),
+                len(buyer.get("feasible_flat_ids", ())),
+                float(buyer.get("budget", {}).get("max_price", 0.0)),
+                buyer_id,
+            )
+            if candidate_priority > best_priority:
+                best_buyer = buyer
+                best_buyer_id = buyer_id
+                best_newly_covered_seller_ids = newly_covered_seller_ids
+
+        if best_buyer is None:
+            break
+        selected_ids.add(best_buyer_id)
+        seller_ids_covered_by_selected.update(best_newly_covered_seller_ids)
+
     remaining_candidates = [
         buyer
         for buyer in buyers
@@ -1488,8 +1545,26 @@ def _cap_retained_buyers(
         reverse=True,
     )
 
-    capped_buyers = seeded_buyers + remaining_candidates[: max(0, cap - len(seeded_buyers))]
+    capped_buyers = [
+        buyer
+        for buyer in buyers
+        if str(buyer.get("buyer_id", "")).strip() in selected_ids
+    ]
+    remaining_capacity = max(0, cap - len(capped_buyers))
+    capped_buyers.extend(remaining_candidates[:remaining_capacity])
     capped_ids = {str(buyer.get("buyer_id", "")).strip() for buyer in capped_buyers}
+    uncovered_seller_ids = sorted(
+        seller_id
+        for seller_id, candidate_buyer_ids in candidate_buyer_ids_by_seller.items()
+        if candidate_buyer_ids and not capped_ids.intersection(candidate_buyer_ids)
+    )
+    if uncovered_seller_ids:
+        logging.warning(
+            "Retained buyer cap %s left %s seller(s) without any retained candidate buyers after capping: %s",
+            cap,
+            len(uncovered_seller_ids),
+            uncovered_seller_ids[:10],
+        )
     return [
         buyer
         for buyer in buyers
