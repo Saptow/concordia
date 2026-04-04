@@ -43,6 +43,8 @@ DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
+MIN_FLATS_FOR_QUANTILE_SUPPORT_CHECK = 10
+FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE = 0.75
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
@@ -1577,6 +1579,86 @@ def _validate_seller_candidate_coverage(
     return not uncovered_seller_ids, uncovered_seller_ids
 
 
+def _validate_flat_type_affordability_support(
+    flats: list[dict[str, Any]],
+    buyers: list[dict[str, Any]],
+) -> tuple[bool, dict[str, dict[str, Any]]]:
+    """Checks whether buyer ceilings support sampled flat prices within each flat type."""
+    diagnostics: dict[str, dict[str, Any]] = {}
+    flat_types = sorted(
+        {
+            str(flat.get("flat_type", "")).strip()
+            for flat in flats
+            if str(flat.get("flat_type", "")).strip()
+        }
+    )
+
+    for flat_type in flat_types:
+        flat_prices = sorted(
+            float(flat.get("observed_resale_price", 0.0))
+            for flat in flats
+            if str(flat.get("flat_type", "")).strip() == flat_type
+        )
+        if not flat_prices:
+            continue
+        type_flat_ids = {
+            str(flat.get("flat_id", "")).strip()
+            for flat in flats
+            if str(flat.get("flat_type", "")).strip() == flat_type
+            and str(flat.get("flat_id", "")).strip()
+        }
+        buyer_ceilings = sorted(
+            float(buyer.get("financials", {}).get("effective_ceiling", 0.0))
+            for buyer in buyers
+            if type_flat_ids.intersection(
+                {
+                    str(flat_id).strip()
+                    for flat_id in buyer.get("feasible_flat_ids", ())
+                    if str(flat_id).strip()
+                }
+            )
+        )
+        sample_count = len(flat_prices)
+        buyer_count = len(buyer_ceilings)
+        if not buyer_ceilings:
+            diagnostics[flat_type] = {
+                "ok": False,
+                "rule": "no_buyers",
+                "flat_count": sample_count,
+                "buyer_count": buyer_count,
+                "flat_threshold_value": max(flat_prices),
+                "buyer_threshold_value": None,
+            }
+            continue
+
+        if sample_count >= MIN_FLATS_FOR_QUANTILE_SUPPORT_CHECK:
+            flat_threshold_value = float(
+                np.quantile(flat_prices, FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE)
+            )
+            buyer_threshold_value = float(
+                np.quantile(buyer_ceilings, FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE)
+            )
+            rule = f"q{FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE:.1f}"
+        else:
+            flat_threshold_value = max(flat_prices)
+            buyer_threshold_value = max(buyer_ceilings)
+            rule = "max"
+
+        diagnostics[flat_type] = {
+            "ok": buyer_threshold_value >= flat_threshold_value,
+            "rule": rule,
+            "flat_count": sample_count,
+            "buyer_count": buyer_count,
+            "flat_threshold_value": round(flat_threshold_value, 2),
+            "buyer_threshold_value": round(buyer_threshold_value, 2),
+        }
+
+    all_supported = all(
+        diagnostic.get("ok", False) for diagnostic in diagnostics.values()
+    )
+    return all_supported, diagnostics
+
+
 def _cap_retained_buyers(
     sellers: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
@@ -1922,6 +2004,27 @@ def _build_buyer_pools_with_regeneration(
                 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
                 len(oversampled_retained_buyers),
                 target_retained_buyer_count,
+            )
+            continue
+
+        (
+            flat_type_support_ok,
+            flat_type_support_diagnostics,
+        ) = _validate_flat_type_affordability_support(
+            flats,
+            oversampled_retained_buyers,
+        )
+        if not flat_type_support_ok:
+            failed_types = {
+                flat_type: diagnostic
+                for flat_type, diagnostic in flat_type_support_diagnostics.items()
+                if not diagnostic.get("ok", False)
+            }
+            logging.info(
+                "Rejecting oversampled buyer pool %s/%s because flat-type affordability support failed: %s",
+                broad_attempt,
+                MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
+                failed_types,
             )
             continue
 
