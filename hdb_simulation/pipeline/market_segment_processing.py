@@ -44,8 +44,7 @@ DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
-MIN_FLATS_FOR_QUANTILE_SUPPORT_CHECK = 10
-FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE = 0.9
+MARKET_QUANTILE_DOMINANCE_GRID = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
@@ -1646,84 +1645,55 @@ def _validate_seller_candidate_coverage(
     return not uncovered_seller_ids, uncovered_seller_ids
 
 
-def _validate_flat_type_affordability_support(
+def _validate_market_quantile_dominance(
     flats: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
-) -> tuple[bool, dict[str, dict[str, Any]]]:
-    """Checks whether buyer ceilings support sampled flat prices within each flat type."""
-    diagnostics: dict[str, dict[str, Any]] = {}
-    flat_types = sorted(
-        {
-            str(flat.get("flat_type", "")).strip()
-            for flat in flats
-            if str(flat.get("flat_type", "")).strip()
-        }
-    )
-
-    for flat_type in flat_types:
-        flat_prices = sorted(
+) -> tuple[bool, dict[str, Any]]:
+    """Checks strict market-level quantile dominance of buyer ceilings over flat prices."""
+    flat_prices = np.array(
+        [
             float(flat.get("observed_resale_price", 0.0))
             for flat in flats
-            if str(flat.get("flat_type", "")).strip() == flat_type
-        )
-        if not flat_prices:
-            continue
-        type_flat_ids = {
-            str(flat.get("flat_id", "")).strip()
-            for flat in flats
-            if str(flat.get("flat_type", "")).strip() == flat_type
-            and str(flat.get("flat_id", "")).strip()
-        }
-        buyer_ceilings = sorted(
+            if float(flat.get("observed_resale_price", 0.0)) > 0.0
+        ],
+        dtype=float,
+    )
+    buyer_ceilings = np.array(
+        [
             float(buyer.get("financials", {}).get("effective_ceiling", 0.0))
             for buyer in buyers
-            if type_flat_ids.intersection(
-                {
-                    str(flat_id).strip()
-                    for flat_id in buyer.get("feasible_flat_ids", ())
-                    if str(flat_id).strip()
-                }
-            )
-        )
-        sample_count = len(flat_prices)
-        buyer_count = len(buyer_ceilings)
-        if not buyer_ceilings:
-            diagnostics[flat_type] = {
-                "ok": False,
-                "rule": "no_buyers",
-                "flat_count": sample_count,
-                "buyer_count": buyer_count,
-                "flat_threshold_value": max(flat_prices),
-                "buyer_threshold_value": None,
-            }
-            continue
-
-        if sample_count >= MIN_FLATS_FOR_QUANTILE_SUPPORT_CHECK:
-            flat_threshold_value = float(
-                np.quantile(flat_prices, FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE)
-            )
-            buyer_threshold_value = float(
-                np.quantile(buyer_ceilings, FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE)
-            )
-            rule = f"q{FLAT_TYPE_AFFORDABILITY_SUPPORT_QUANTILE:.1f}"
-        else:
-            flat_threshold_value = max(flat_prices)
-            buyer_threshold_value = max(buyer_ceilings)
-            rule = "max"
-
-        diagnostics[flat_type] = {
-            "ok": buyer_threshold_value >= flat_threshold_value,
-            "rule": rule,
-            "flat_count": sample_count,
-            "buyer_count": buyer_count,
-            "flat_threshold_value": round(flat_threshold_value, 2),
-            "buyer_threshold_value": round(buyer_threshold_value, 2),
-        }
-
-    all_supported = all(
-        diagnostic.get("ok", False) for diagnostic in diagnostics.values()
+            if float(buyer.get("financials", {}).get("effective_ceiling", 0.0)) > 0.0
+        ],
+        dtype=float,
     )
-    return all_supported, diagnostics
+    if flat_prices.size == 0 or buyer_ceilings.size == 0:
+        diagnostics = {
+            "ok": False,
+            "reason": "empty_market_or_buyers",
+            "flat_count": int(flat_prices.size),
+            "buyer_count": int(buyer_ceilings.size),
+        }
+        return False, diagnostics
+
+    quantiles = np.array(MARKET_QUANTILE_DOMINANCE_GRID, dtype=float)
+    flat_quantiles = np.quantile(flat_prices, quantiles)
+    buyer_quantiles = np.quantile(buyer_ceilings, quantiles)
+    gaps = buyer_quantiles - flat_quantiles
+    top_supported = float(np.max(buyer_ceilings)) >= float(np.max(flat_prices))
+    diagnostics = {
+        "ok": bool(np.all(gaps >= 0.0) and top_supported),
+        "quantiles": quantiles.tolist(),
+        "flat_quantiles": np.round(flat_quantiles, 2).tolist(),
+        "buyer_quantiles": np.round(buyer_quantiles, 2).tolist(),
+        "gaps": np.round(gaps, 2).tolist(),
+        "min_gap": round(float(np.min(gaps)), 2),
+        "max_flat_price": round(float(np.max(flat_prices)), 2),
+        "max_buyer_ceiling": round(float(np.max(buyer_ceilings)), 2),
+        "top_supported": bool(top_supported),
+        "flat_count": int(flat_prices.size),
+        "buyer_count": int(buyer_ceilings.size),
+    }
+    return bool(diagnostics["ok"]), diagnostics
 
 
 def _cap_retained_buyers(
@@ -2075,23 +2045,18 @@ def _build_buyer_pools_with_regeneration(
             continue
 
         (
-            flat_type_support_ok,
-            flat_type_support_diagnostics,
-        ) = _validate_flat_type_affordability_support(
+            market_support_ok,
+            market_support_diagnostics,
+        ) = _validate_market_quantile_dominance(
             flats,
             oversampled_retained_buyers,
         )
-        if not flat_type_support_ok:
-            failed_types = {
-                flat_type: diagnostic
-                for flat_type, diagnostic in flat_type_support_diagnostics.items()
-                if not diagnostic.get("ok", False)
-            }
+        if not market_support_ok:
             logging.info(
-                "Rejecting oversampled buyer pool %s/%s because flat-type affordability support failed: %s",
+                "Rejecting oversampled buyer pool %s/%s because market quantile dominance failed: %s",
                 broad_attempt,
                 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
-                failed_types,
+                market_support_diagnostics,
             )
             continue
 
