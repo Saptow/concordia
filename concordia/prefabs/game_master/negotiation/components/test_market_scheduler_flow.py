@@ -17,9 +17,20 @@ class _FakeListingModule:
     self._open_ids = set(open_ids)
     self.prepare_calls = 0
     self.enabled = True
+    self._enabled = True
+    self.transfer_payloads = []
+    self.reopened_payloads = []
+    self.market_snapshot = {
+        'buyers': [],
+        'listed_sellers': [],
+        'released_seller_ids': [],
+        'inactive_seller_ids': [],
+        'active_seller_ids': sorted(open_ids),
+    }
 
   def set_enabled(self, enabled: bool) -> None:
     self.enabled = enabled
+    self._enabled = enabled
 
   def is_enabled(self) -> bool:
     return self.enabled
@@ -32,21 +43,51 @@ class _FakeListingModule:
     self.prepare_calls += 1
     return []
 
+  def build_negotiation_transfer_payloads(self, matched_pairs):
+    del matched_pairs
+    return list(self.transfer_payloads)
+
+  def reopen_failed_negotiation_pairs(self, payloads):
+    self.reopened_payloads.append(list(payloads))
+    return list(payloads)
+
+  def get_market_snapshot(self, player_ids=None):
+    del player_ids
+    return dict(self.market_snapshot)
+
+  def is_finished(self) -> bool:
+    return not self._open_ids
+
 
 class _FakeNegotiationModule:
 
   def __init__(self, open_pairs):
     self._open_pairs = list(open_pairs)
     self.enabled = True
+    self._enabled = True
+    self.relisting_payloads = []
+    self.pair_states = []
 
   def set_enabled(self, enabled: bool) -> None:
     self.enabled = enabled
+    self._enabled = enabled
 
   def is_enabled(self) -> bool:
     return self.enabled
 
   def get_open_pairs(self) -> list[tuple[str, str]]:
     return list(self._open_pairs)
+
+  def build_relisting_transfer_payloads(self, pair_records, *, week_number: int):
+    del pair_records, week_number
+    return list(self.relisting_payloads)
+
+  def get_pair_state_snapshots(self, pair_ids=None):
+    del pair_ids
+    return list(self.pair_states)
+
+  def is_finished(self) -> bool:
+    return not self._open_pairs
 
 
 class _FakeEntity:
@@ -164,6 +205,118 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
     self.assertEqual(
         week_context['open_negotiation_pairs'],
         [['buyer_001', 'seller_001']],
+    )
+
+  def test_listing_match_hands_off_to_negotiation_next_week(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001', 'buyer_002', 'seller_002'},
+    )
+    listing_module.transfer_payloads = [{
+        'buyer_id': 'buyer_002',
+        'seller_id': 'seller_002',
+        'buyer_state': {'id': 'buyer_002'},
+        'seller_state': {'id': 'seller_002'},
+    }]
+    negotiation_module = _FakeNegotiationModule(open_pairs=[])
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001', 'buyer_002', 'seller_002'),
+        player_names=('Buyer 1', 'Seller 1', 'Buyer 2', 'Seller 2'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+
+    listing_outcome = type('ListingOutcome', (), {
+        'matched_pairs': [],
+        'model_dump': lambda self, mode='json': {
+            'week_number': 1,
+            'matched_pairs': [],
+        },
+    })()
+    summary = coordinator.complete_week(
+        listing_outcome=listing_outcome,
+        negotiation_outcome=None,
+    )
+    next_week = coordinator.prepare_week()
+
+    self.assertEqual(
+        summary['pending_matches_for_next_week'],
+        listing_module.transfer_payloads,
+    )
+    self.assertEqual(
+        next_week['new_negotiation_pairs'],
+        listing_module.transfer_payloads,
+    )
+    self.assertEqual(
+        next_week['open_negotiation_pairs'],
+        [['buyer_002', 'seller_002']],
+    )
+    self.assertNotIn('buyer_002', next_week['listing_player_ids'])
+    self.assertNotIn('seller_002', next_week['listing_player_ids'])
+
+  def test_failed_negotiation_reopens_into_listing(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001'},
+    )
+    negotiation_module = _FakeNegotiationModule(
+        open_pairs=[('buyer_001', 'seller_001')],
+    )
+    negotiation_module.relisting_payloads = [{
+        'buyer_id': 'buyer_001',
+        'seller_id': 'seller_001',
+        'buyer_state': {'buyer_id': 'buyer_001'},
+        'seller_state': {'seller_id': 'seller_001'},
+        'negotiation_history': {
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'start_week': 1,
+            'end_week': 1,
+            'offer_history': [],
+        },
+    }]
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001'),
+        player_names=('Buyer 1', 'Seller 1'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+
+    negotiation_outcome = {
+        'week_number': 1,
+        'number_of_pairs_negotiated': 1,
+        'events': [],
+        'closed_pairs': [{
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'buyer_name': 'Buyer 1',
+            'seller_name': 'Seller 1',
+            'outcome': 'CLOSED_WITHOUT_SUCCESS',
+        }],
+        'successful_pairs': [],
+        'failed_pairs': [{
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'buyer_name': 'Buyer 1',
+            'seller_name': 'Seller 1',
+            'outcome': 'CLOSED_WITHOUT_SUCCESS',
+        }],
+    }
+
+    summary = coordinator.complete_week(
+        listing_outcome=None,
+        negotiation_outcome=negotiation_outcome,
+    )
+
+    self.assertEqual(
+        listing_module.reopened_payloads,
+        [negotiation_module.relisting_payloads],
+    )
+    self.assertEqual(
+        summary['reopened_listing_pairs'],
+        negotiation_module.relisting_payloads,
     )
 
 
