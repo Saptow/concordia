@@ -1373,7 +1373,59 @@ def _retain_feasible_buyers(
     return retained
 
 
+def _validate_negotiating_seller_seedability(
+    sellers: list[dict[str, Any]],
+    buyers: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    """Checks whether each negotiating seller can be assigned a unique buyer."""
+    negotiating_sellers = [
+        seller
+        for seller in sellers
+        if str(seller.get("initial_market_state", "")).strip().casefold()
+        == "negotiating"
+    ]
+    if not negotiating_sellers:
+        return True, []
+
+    ordered_sellers = sorted(
+        negotiating_sellers,
+        key=lambda seller: int(seller.get("initialization_order", 0)),
+    )
+    available_buyers = sorted(
+        buyers,
+        key=lambda buyer: (
+            -float(buyer.get("budget", {}).get("max_price", 0.0)),
+            str(buyer.get("buyer_id", "")),
+        ),
+    )
+
+    used_buyer_ids: set[str] = set()
+    unmatched_seller_ids: list[str] = []
+
+    for seller in ordered_sellers:
+        listing_price = float(seller["expectations"]["max_price"])
+        matched_buyer = next(
+            (
+                buyer
+                for buyer in available_buyers
+                if (
+                    str(buyer.get("buyer_id", "")) not in used_buyer_ids
+                    and float(buyer.get("budget", {}).get("max_price", 0.0))
+                    >= listing_price
+                )
+            ),
+            None,
+        )
+        if matched_buyer is None:
+            unmatched_seller_ids.append(str(seller["seller_id"]))
+            continue
+        used_buyer_ids.add(str(matched_buyer["buyer_id"]))
+
+    return not unmatched_seller_ids, unmatched_seller_ids
+
+
 def _build_buyer_pools_with_regeneration(
+    sellers: list[dict[str, Any]],
     flats: list[dict[str, Any]],
     hedonic_training_flats: list[dict[str, Any]],
     donors: pd.DataFrame,
@@ -1385,10 +1437,11 @@ def _build_buyer_pools_with_regeneration(
     income_prior: pd.DataFrame,
     distribution_tables: dict[str, pd.DataFrame],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Regenerate broad buyers until retained buyers cover sellers or retries are exhausted."""
+    """Regenerate buyers until coverage and week-1 seedability pass or retries exhaust."""
     target_retained_count = len(flats)
     best_broad_buyers: list[dict[str, Any]] = []
     best_retained_buyers: list[dict[str, Any]] = []
+    best_unmatched_seller_ids: list[str] = []
 
     for attempt in range(1, MAX_BUYER_POOL_REGEN_ATTEMPTS + 1):
         broad_buyers = _build_broad_buyers(
@@ -1402,27 +1455,39 @@ def _build_buyer_pools_with_regeneration(
             distribution_tables=distribution_tables,
         )
         retained_buyers = _retain_feasible_buyers(broad_buyers, flats, archetypes)
+        seedable, unmatched_seller_ids = _validate_negotiating_seller_seedability(
+            sellers,
+            retained_buyers,
+        )
         logging.info(
-            "Buyer-pool attempt %s/%s retained %s feasible buyers for %s sellers.",
+            "Buyer-pool attempt %s/%s retained %s feasible buyers for %s sellers; unmatched negotiating sellers=%s.",
             attempt,
             MAX_BUYER_POOL_REGEN_ATTEMPTS,
             len(retained_buyers),
             target_retained_count,
+            len(unmatched_seller_ids),
         )
 
         if len(retained_buyers) > len(best_retained_buyers):
             best_broad_buyers = broad_buyers
             best_retained_buyers = retained_buyers
+            best_unmatched_seller_ids = unmatched_seller_ids
 
-        if len(retained_buyers) >= target_retained_count:
+        if len(retained_buyers) >= target_retained_count and seedable:
             return broad_buyers, retained_buyers
 
     logging.warning(
-        "Retained buyer pool remained below seller count after %s attempts; using best attempt with %s retained buyers for %s sellers.",
+        "Buyer-pool regeneration ended after %s attempts; using best attempt with %s retained buyers for %s sellers and %s unmatched negotiating sellers.",
         MAX_BUYER_POOL_REGEN_ATTEMPTS,
         len(best_retained_buyers),
         target_retained_count,
+        len(best_unmatched_seller_ids),
     )
+    if best_unmatched_seller_ids:
+        logging.warning(
+            "Unmatched negotiating sellers in best buyer-pool attempt: %s",
+            ", ".join(best_unmatched_seller_ids),
+        )
     return best_broad_buyers, best_retained_buyers
 
 
@@ -1521,6 +1586,7 @@ def build_transaction_conditioned_segment(
         rng=rng,
     )
     broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
+        sellers,
         flats,
         hedonic_training_flats,
         donors,

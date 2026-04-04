@@ -375,7 +375,9 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         self._format_week_summary_for_log(summary),
         '+' + '-' * 54 + '+',
     ]
-    logging.info('\n%s', '\n'.join(lines))
+    rendered = '\n'.join(lines)
+    print(rendered, flush=True)
+    logging.info('\n%s', rendered)
 
   def complete_week(
       self,
