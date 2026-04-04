@@ -1426,6 +1426,77 @@ def _validate_negotiating_seller_seedability(
     return not unmatched_seller_ids, unmatched_seller_ids, match_assignments
 
 
+def _cap_retained_buyers(
+    sellers: list[dict[str, Any]],
+    buyers: list[dict[str, Any]],
+    *,
+    cap: int,
+) -> list[dict[str, Any]]:
+    """Trim retained buyers to the configured cap while preserving seeding coverage."""
+    if len(buyers) <= cap:
+        return buyers
+
+    negotiating_seller_order = {
+        str(seller.get("seller_id", "")).strip(): index
+        for index, seller in enumerate(
+            sorted(
+                sellers,
+                key=lambda item: int(item.get("initialization_order", 0)),
+            )
+        )
+        if str(seller.get("initial_market_state", "")).strip().casefold()
+        == "negotiating"
+    }
+    match_assignments = _match_negotiating_sellers_to_buyers(sellers, buyers)
+    buyer_by_id = {
+        str(buyer.get("buyer_id", "")).strip(): buyer
+        for buyer in buyers
+        if str(buyer.get("buyer_id", "")).strip()
+    }
+
+    seeded_buyers: list[dict[str, Any]] = []
+    for seller_id, buyer_id in sorted(
+        match_assignments.items(),
+        key=lambda item: negotiating_seller_order.get(item[0], math.inf),
+    ):
+        buyer = buyer_by_id.get(buyer_id)
+        if buyer is not None:
+            seeded_buyers.append(buyer)
+
+    if len(seeded_buyers) > cap:
+        logging.warning(
+            "Retained buyer cap %s is below the %s buyers needed to seed negotiating sellers; truncating seeded buyers.",
+            cap,
+            len(seeded_buyers),
+        )
+        seeded_buyers = seeded_buyers[:cap]
+
+    selected_ids = {
+        str(buyer.get("buyer_id", "")).strip() for buyer in seeded_buyers
+    }
+    remaining_candidates = [
+        buyer
+        for buyer in buyers
+        if str(buyer.get("buyer_id", "")).strip() not in selected_ids
+    ]
+    remaining_candidates.sort(
+        key=lambda buyer: (
+            len(buyer.get("feasible_flat_ids", ())),
+            float(buyer.get("budget", {}).get("max_price", 0.0)),
+            str(buyer.get("buyer_id", "")).strip(),
+        ),
+        reverse=True,
+    )
+
+    capped_buyers = seeded_buyers + remaining_candidates[: max(0, cap - len(seeded_buyers))]
+    capped_ids = {str(buyer.get("buyer_id", "")).strip() for buyer in capped_buyers}
+    return [
+        buyer
+        for buyer in buyers
+        if str(buyer.get("buyer_id", "")).strip() in capped_ids
+    ]
+
+
 def _rank_candidate_buyer_ids_for_seller(
     seller: dict[str, Any],
     buyers: list[dict[str, Any]],
@@ -1625,7 +1696,11 @@ def _build_buyer_pools_with_regeneration(
             )
             continue
 
-        retained_buyers = oversampled_retained_buyers
+        retained_buyers = _cap_retained_buyers(
+            sellers,
+            oversampled_retained_buyers,
+            cap=target_retained_buyer_count,
+        )
         (
             seedable,
             unmatched_seller_ids,
