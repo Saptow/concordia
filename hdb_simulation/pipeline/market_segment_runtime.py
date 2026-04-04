@@ -151,6 +151,9 @@ def ensure_market_segment_listing_index(
             year=segment_config.year,
             restrained_seller_count=segment_config.restrained_seller_count,
             buyer_pool_multiplier=segment_config.buyer_pool_multiplier,
+            retained_buyer_pool_multiplier=(
+                segment_config.retained_buyer_pool_multiplier
+            ),
         )
     )
 

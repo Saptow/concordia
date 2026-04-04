@@ -1550,7 +1550,10 @@ def _build_buyer_pools_with_regeneration(
     distribution_tables: dict[str, pd.DataFrame],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Retry buyer generation against a fixed seller market until constraints pass."""
-    target_retained_count = len(flats)
+    target_retained_count = max(
+        1,
+        math.ceil(len(flats) * config.retained_buyer_pool_multiplier),
+    )
     last_unmatched_seller_ids: list[str] = []
 
     for broad_attempt in range(1, MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS + 1):
@@ -1706,9 +1709,10 @@ def build_transaction_conditioned_segment(
     )
     if config.restrained_seller_count is not None:
         logging.info(
-            "Restrained seller pool to %s transaction(s); buyer pool multiplier remains %s.",
+            "Restrained seller pool to %s transaction(s); oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
             len(transactions),
             config.buyer_pool_multiplier,
+            config.retained_buyer_pool_multiplier,
         )
     flats = _build_flat_universe(transactions, town_transactions, config)
     sellers = _build_sellers(
