@@ -1522,18 +1522,37 @@ def _annotate_seller_potential_matches(
         )
 
     match_assignments = _match_negotiating_sellers_to_buyers(sellers, buyers)
+    downgraded_seller_ids: list[str] = []
     for seller in sorted(
         sellers,
         key=lambda item: int(item.get("initialization_order", 0)),
     ):
         seller_id = str(seller.get("seller_id", "")).strip()
+        intended_state = str(
+            seller.get("initial_market_state_intended", seller.get("initial_market_state", ""))
+        ).strip()
+        seller["initial_market_state_intended"] = intended_state
         if (
-            str(seller.get("initial_market_state", "")).strip().casefold()
+            intended_state.casefold()
             != "negotiating"
         ):
+            seller["initial_market_state"] = intended_state
             seller["seeded_buyer_id"] = ""
             continue
-        seller["seeded_buyer_id"] = match_assignments.get(seller_id, "")
+        seeded_buyer_id = match_assignments.get(seller_id, "")
+        seller["seeded_buyer_id"] = seeded_buyer_id
+        if seeded_buyer_id:
+            seller["initial_market_state"] = "negotiating"
+        else:
+            seller["initial_market_state"] = "listed"
+            downgraded_seller_ids.append(seller_id)
+
+    if downgraded_seller_ids:
+        logging.info(
+            "Downgraded %s intended negotiating sellers to listed after feasible matching: %s",
+            len(downgraded_seller_ids),
+            ", ".join(downgraded_seller_ids),
+        )
 
 
 def _build_buyer_pools_with_regeneration(
@@ -1554,6 +1573,10 @@ def _build_buyer_pools_with_regeneration(
         1,
         math.ceil(len(flats) * config.retained_buyer_pool_multiplier),
     )
+    best_broad_buyers: list[dict[str, Any]] = []
+    best_retained_buyers: list[dict[str, Any]] = []
+    best_matched_count = -1
+    best_unmatched_seller_ids: list[str] = []
     last_unmatched_seller_ids: list[str] = []
 
     for broad_attempt in range(1, MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS + 1):
@@ -1615,15 +1638,37 @@ def _build_buyer_pools_with_regeneration(
             len(unmatched_seller_ids),
         )
         last_unmatched_seller_ids = unmatched_seller_ids
+        matched_count = len(match_assignments)
+
+        if matched_count > best_matched_count:
+            best_broad_buyers = broad_buyers
+            best_retained_buyers = retained_buyers
+            best_matched_count = matched_count
+            best_unmatched_seller_ids = unmatched_seller_ids
 
         if len(retained_buyers) >= target_retained_count and seedable:
             return broad_buyers, retained_buyers
+
+    if best_retained_buyers:
+        unmatched_text = (
+            ", ".join(best_unmatched_seller_ids)
+            if best_unmatched_seller_ids
+            else "none"
+        )
+        logging.warning(
+            "Unable to fully seed all negotiating sellers after %s oversampled-pool attempts; using best pool with %s retained buyers, %s matched negotiating sellers, and unmatched sellers: %s.",
+            MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
+            len(best_retained_buyers),
+            best_matched_count,
+            unmatched_text,
+        )
+        return best_broad_buyers, best_retained_buyers
 
     unmatched_text = (
         ", ".join(last_unmatched_seller_ids) if last_unmatched_seller_ids else "unknown"
     )
     raise ValueError(
-        "Unable to build a seedable buyer pool after "
+        "Unable to build a buyer pool with enough retained buyers after "
         f"{MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS} oversampled-pool attempts; "
         f"unmatched negotiating sellers: {unmatched_text}."
     )
