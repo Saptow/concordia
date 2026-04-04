@@ -16,6 +16,7 @@ from concordia.hdb_simulation.models.schemas.common import (
     ActionReasoningFields,
     BaseBuyer,
     BaseSeller,
+    BuyerPreferencePrior,
     NegotiationHistoryRecord,
     NegotiationOutcome,
     NormalDistribution,
@@ -70,6 +71,7 @@ class NegotiationToListingPayload(BaseModel):
 class BuyerMarketBeliefState(BaseModel):
     buyer_id: str
     base_reservation_price: float = Field(ge=0.0)
+    preference_prior: BuyerPreferencePrior
     effective_reservation: NormalDistribution
     latest_market_feedback: str = 'No market feedback yet.'
     feedback_history: list[str] = Field(default_factory=list)
@@ -85,6 +87,7 @@ class SellerMarketBeliefState(BaseModel):
 
 
 class ListingBuyerState(PortalBuyer):
+    preference_prior: BuyerPreferencePrior
     effective_reservation: NormalDistribution
     latest_search_results: list[PortalSearchResult] = Field(default_factory=list)
     latest_market_feedback: str = 'No market feedback yet.'

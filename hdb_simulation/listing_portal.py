@@ -16,6 +16,7 @@ from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
+from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
@@ -297,6 +298,10 @@ class ListingPortal:
             state = negotiation_schemas.BuyerMarketBeliefState(
                 buyer_id=buyer.id,
                 base_reservation_price=base_reservation_price,
+                preference_prior=common_schemas.build_buyer_preference_prior(
+                    buyer.preferences,
+                    buyer.budget,
+                ),
                 effective_reservation=uncertain_helper.NormalDistribution(
                     name='Effective reservation price',
                     mean=base_reservation_price,
@@ -416,6 +421,10 @@ class ListingPortal:
         belief.mean = max(
             float(buyer.budget.min_price),
             min(float(buyer.budget.max_price), belief.mean),
+        )
+        state.preference_prior.update_intercept(
+            belief.mean,
+            max(1.0, belief.std ** 2),
         )
         return state
 

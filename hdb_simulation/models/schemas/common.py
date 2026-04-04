@@ -185,6 +185,17 @@ PREFERENCE_CATEGORY_LABELS: dict[str, str] = {
     'other': 'Other Priorities',
 }
 
+PREFERENCE_PRIOR_DIMENSIONS: tuple[str, ...] = (
+    'intercept',
+    'flat_type_match',
+    'town_match',
+    'transport_access',
+    'school_access',
+    'shopping_access',
+    'dining_access',
+    'other_match',
+)
+
 
 class BuyerPreferenceItem(BaseModel):
     category: Literal[
@@ -197,6 +208,7 @@ class BuyerPreferenceItem(BaseModel):
         'other',
     ]
     description: str = Field(min_length=1)
+    strength: float = Field(ge=0.0, le=1.0, description='Relative importance of this preference, between 0 and 1, with 0 indicating no importance and 1 indicating maximum importance.')
 
 
 class BuyerPreferenceProfile(BaseModel):
@@ -217,6 +229,19 @@ class BuyerPreferenceProfile(BaseModel):
             if preference.category == category and preference.description.strip()
         ]
 
+    def items_for(self, category: str) -> list[BuyerPreferenceItem]:
+        return [
+            preference
+            for preference in self.preferences
+            if preference.category == category and preference.description.strip()
+        ]
+
+    def strongest_strength_for(self, category: str) -> float:
+        items = self.items_for(category)
+        if not items:
+            return 0.0
+        return max(float(item.strength) for item in items)
+
     def grouped_preferences(self) -> list[tuple[str, list[str]]]:
         grouped: list[tuple[str, list[str]]] = []
         for category, label in PREFERENCE_CATEGORY_LABELS.items():
@@ -231,6 +256,50 @@ class BuyerPreferenceProfile(BaseModel):
             for label, values in self.grouped_preferences()
             if label not in {'Flat Type', 'Town'}
         )
+
+
+class BuyerPreferencePrior(BaseModel):
+    dimension_names: List[str] = Field(
+        default_factory=lambda: list(PREFERENCE_PRIOR_DIMENSIONS)
+    )
+    mean_vector: List[float]
+    covariance_matrix: List[List[float]]
+
+    @model_validator(mode='after')
+    def _validate_shape(self) -> 'BuyerPreferencePrior':
+        size = len(self.dimension_names)
+        if len(self.mean_vector) != size:
+            raise ValueError('BuyerPreferencePrior mean_vector must match dimension_names.')
+        if len(self.covariance_matrix) != size:
+            raise ValueError('BuyerPreferencePrior covariance_matrix must match dimension_names.')
+        if any(len(row) != size for row in self.covariance_matrix):
+            raise ValueError('BuyerPreferencePrior covariance_matrix must be square.')
+        return self
+
+    def index_of(self, dimension_name: str) -> int:
+        return self.dimension_names.index(dimension_name)
+
+    def project(self, attribute_vector: List[float]) -> tuple[float, float]:
+        if len(attribute_vector) != len(self.mean_vector):
+            raise ValueError('Attribute vector must match preference-prior dimensions.')
+        projected_mean = sum(
+            value * weight
+            for value, weight in zip(attribute_vector, self.mean_vector, strict=True)
+        )
+        projected_variance = 0.0
+        for row_index, row in enumerate(self.covariance_matrix):
+            for col_index, covariance in enumerate(row):
+                projected_variance += (
+                    attribute_vector[row_index]
+                    * covariance
+                    * attribute_vector[col_index]
+                )
+        return (projected_mean, max(1e-9, projected_variance))
+
+    def update_intercept(self, mean: float, variance: float) -> None:
+        index = self.index_of('intercept')
+        self.mean_vector[index] = max(0.0, float(mean))
+        self.covariance_matrix[index][index] = max(1e-9, float(variance))
 
 
 def coerce_buyer_preferences(
@@ -256,9 +325,136 @@ def format_buyer_preferences(
     profile = coerce_buyer_preferences(preferences)
     if profile is None:
         return []
+    lines: list[str] = []
+    for category, label in PREFERENCE_CATEGORY_LABELS.items():
+        items = profile.items_for(category)
+        if not items:
+            continue
+        formatted_values = [
+            f'{item.description.strip()} ({float(item.strength):.2f})'
+            for item in items
+            if item.description.strip()
+        ]
+        if formatted_values:
+            lines.append(f'- {label}: {", ".join(formatted_values)}')
+    return lines
+
+
+def _budget_bounds(
+    budget: BuyerBudgetRange | Mapping[str, Any] | None,
+) -> tuple[float, float]:
+    if isinstance(budget, BuyerBudgetRange):
+        return (float(budget.min_price), float(budget.max_price))
+    if isinstance(budget, Mapping):
+        return (
+            max(0.0, float(budget.get('min_price', 0.0))),
+            max(0.0, float(budget.get('max_price', 0.0))),
+        )
+    return (0.0, 0.0)
+
+
+def build_buyer_preference_prior(
+    preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
+    budget: BuyerBudgetRange | Mapping[str, Any] | None,
+) -> BuyerPreferencePrior:
+    profile = coerce_buyer_preferences(preferences)
+    budget_min, budget_max = _budget_bounds(budget)
+    budget_midpoint = max(0.0, 0.5 * (budget_min + budget_max))
+    budget_span = max(0.0, budget_max - budget_min)
+    base_std = max(25000.0, 0.5 * budget_span, 0.04 * budget_midpoint)
+
+    def _strength(category: str) -> float:
+        return profile.strongest_strength_for(category) if profile is not None else 0.0
+
+    means = [
+        budget_midpoint,
+        0.02 * budget_midpoint * _strength('flat_type'),
+        0.015 * budget_midpoint * _strength('town'),
+        0.008 * budget_midpoint * _strength('transport'),
+        0.007 * budget_midpoint * _strength('schools'),
+        0.006 * budget_midpoint * _strength('shopping'),
+        0.006 * budget_midpoint * _strength('dining'),
+        0.006 * budget_midpoint * _strength('other'),
+    ]
+    stds = [
+        base_std,
+        0.45 * base_std,
+        0.40 * base_std,
+        0.25 * base_std,
+        0.25 * base_std,
+        0.20 * base_std,
+        0.20 * base_std,
+        0.30 * base_std,
+    ]
+    size = len(PREFERENCE_PRIOR_DIMENSIONS)
+    covariance = [[0.0 for _ in range(size)] for _ in range(size)]
+    for index, std in enumerate(stds):
+        covariance[index][index] = float(std ** 2)
+
+    def _set_covariance(left: str, right: str, correlation: float) -> None:
+        left_index = PREFERENCE_PRIOR_DIMENSIONS.index(left)
+        right_index = PREFERENCE_PRIOR_DIMENSIONS.index(right)
+        covariance_value = correlation * stds[left_index] * stds[right_index]
+        covariance[left_index][right_index] = covariance_value
+        covariance[right_index][left_index] = covariance_value
+
+    _set_covariance('transport_access', 'shopping_access', 0.20)
+    _set_covariance('transport_access', 'dining_access', 0.15)
+    _set_covariance('shopping_access', 'dining_access', 0.15)
+    _set_covariance('town_match', 'school_access', 0.10)
+
+    return BuyerPreferencePrior(
+        mean_vector=[float(value) for value in means],
+        covariance_matrix=covariance,
+    )
+
+
+def build_buyer_flat_attribute_vector(
+    preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
+    flat_payload: Flat | Mapping[str, Any],
+) -> List[float]:
+    profile = coerce_buyer_preferences(preferences)
+    payload = (
+        flat_payload.model_dump(mode='python')
+        if isinstance(flat_payload, Flat)
+        else dict(flat_payload)
+    )
+    nearby_amenities = payload.get('nearby_amenities') or []
+    amenity_types = {
+        str(item.type) if isinstance(item, Amenity) else str(item.get('type', ''))
+        for item in nearby_amenities
+    }
+
+    flat_description = ' '.join(
+        str(payload.get(field, ''))
+        for field in ('description', 'address', 'storey_range')
+    ).casefold()
+    other_match = 0.0
+    if profile is not None:
+        for description in profile.values_for('other'):
+            tokens = [
+                token for token in description.casefold().replace('/', ' ').split()
+                if len(token) > 3
+            ]
+            if tokens and any(token in flat_description for token in tokens):
+                other_match = 1.0
+                break
+
     return [
-        f'- {label}: {", ".join(values)}'
-        for label, values in profile.grouped_preferences()
+        1.0,
+        1.0
+        if profile is not None
+        and str(payload.get('flat_type', '')).strip() in profile.values_for('flat_type')
+        else 0.0,
+        1.0
+        if profile is not None
+        and str(payload.get('town', '')).strip() in profile.values_for('town')
+        else 0.0,
+        1.0 if str(AmenityType.MRT) in amenity_types else 0.0,
+        1.0 if str(AmenityType.SCHOOL) in amenity_types else 0.0,
+        1.0 if str(AmenityType.MALL) in amenity_types else 0.0,
+        1.0 if str(AmenityType.HAWKER) in amenity_types else 0.0,
+        other_match,
     ]
 
 class BaseBuyer(BaseModel):

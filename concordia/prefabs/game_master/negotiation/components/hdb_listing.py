@@ -470,6 +470,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         negotiation_history=[
             record.model_copy(deep=True) for record in buyer.negotiation_history
         ],
+        preference_prior=market_state.preference_prior.model_copy(deep=True),
         effective_reservation=market_state.effective_reservation,
         latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
         latest_market_feedback=portal.market_feedback_by_buyer.get(

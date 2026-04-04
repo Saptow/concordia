@@ -306,23 +306,19 @@ class UncertainBuyer(
     ) -> uncertain_helper.NormalInverseGamma:
         buyer_state = listing_payload.buyer_state
         listing_prior = buyer_state.effective_reservation
-        fit_score = self._estimate_preference_fit_score(
-            listing_payload.listing_record.flat.model_dump(mode='json')
+        attribute_vector = common_schemas.build_buyer_flat_attribute_vector(
+            buyer_state.preferences,
+            listing_payload.listing_record.flat,
         )
-        base_mean = max(0.0, float(listing_prior.mean))
-        base_std = max(1.0, float(listing_prior.std))
-        predictive_mean = max(
-            0.0,
-            base_mean + ((fit_score - 0.5) * 0.5 * base_std),
+        predictive_mean, preference_variance = buyer_state.preference_prior.project(
+            attribute_vector
         )
-        irreducible_noise_sq = max(1.0, (0.35 * base_std) ** 2)
-        predictive_variance = max(
-            1.0,
-            (base_std ** 2) * (1.0 + (1.0 - fit_score)) + irreducible_noise_sq,
-        )
+        irreducible_noise_sq = max(1.0, (0.35 * float(listing_prior.std)) ** 2)
+        predictive_variance = max(1.0, preference_variance + irreducible_noise_sq)
+        uncertainty_level = preference_variance / predictive_variance
         failed_negotiation_count = max(0, len(buyer_state.negotiation_history))
         kappa = self._kappa_from_failed_negotiations(failed_negotiation_count)
-        alpha = self._alpha_from_uncertainty_level(1.0 - own_confidence)
+        alpha = self._alpha_from_uncertainty_level(uncertainty_level)
         beta = self._beta_from_predictive_variance(
             predictive_variance,
             kappa=kappa,
@@ -331,14 +327,16 @@ class UncertainBuyer(
         uncertain_helper.append_debug_trace(
             self._debug_trace,
             (
-                'Initialized flat-specific buyer NIG prior from listing-stage '
-                f'mean={base_mean:.2f}, std={base_std:.2f}, fit={fit_score:.2f}, '
+                'Initialized flat-specific buyer NIG prior from preference prior '
+                f'with predictive_mean={predictive_mean:.2f}, '
+                f'preference_var={preference_variance:.2f}, '
+                f'noise_var={irreducible_noise_sq:.2f}, '
                 f'kappa={kappa:.2f}, alpha={alpha:.2f}, beta={beta:.2f}.'
             ),
         )
         return uncertain_helper.NormalInverseGamma(
             name='Your Reservation Value For This Flat',
-            mu=predictive_mean,
+            mu=max(0.0, predictive_mean),
             lambda_=kappa,
             a=alpha,
             b=beta,
@@ -346,41 +344,6 @@ class UncertainBuyer(
             evidence_count=int(listing_prior.evidence_count),
             last_updated=listing_prior.last_updated,
         )
-
-    def _estimate_preference_fit_score(
-        self,
-        flat_listing: dict[str, Any],
-    ) -> float:
-        profile = common_schemas.coerce_buyer_preferences(self._preferences)
-        if profile is None:
-            return 0.5
-
-        checks: list[float] = []
-        flat_type = str(flat_listing.get('flat_type', '')).strip()
-        preferred_flat_types = profile.values_for('flat_type')
-        if preferred_flat_types:
-            checks.append(1.0 if flat_type in preferred_flat_types else 0.0)
-
-        town = str(flat_listing.get('town', '')).strip()
-        preferred_towns = profile.values_for('town')
-        if preferred_towns:
-            checks.append(1.0 if town in preferred_towns else 0.0)
-
-        amenities = flat_listing.get('amenities', {})
-        amenities = amenities if isinstance(amenities, dict) else {}
-        amenity_matches = {
-            'transport': int(amenities.get('mrt', {}).get('count', 0)) > 0,
-            'schools': int(amenities.get('primary_schools', {}).get('count', 0)) > 0,
-            'shopping': int(amenities.get('malls', {}).get('count', 0)) > 0,
-            'dining': int(amenities.get('hawker_centres', {}).get('count', 0)) > 0,
-        }
-        for category, is_match in amenity_matches.items():
-            if profile.values_for(category):
-                checks.append(1.0 if is_match else 0.0)
-
-        if not checks:
-            return 0.5
-        return sum(checks) / len(checks)
 
     @staticmethod
     def _kappa_from_failed_negotiations(failed_negotiation_count: int) -> float:
