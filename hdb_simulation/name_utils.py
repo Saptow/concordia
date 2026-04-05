@@ -101,10 +101,68 @@ def _extract_name_from_persona(persona: str) -> str:
     return _extract_name_from_leading_tokens(text)
 
 
+def _normalize_generated_name(text: str) -> str:
+    candidate = re.sub(r"\s+", " ", str(text).strip())
+    if not candidate:
+        return ""
+    candidate = candidate.splitlines()[0].strip().strip("\"'`")
+    if ":" in candidate:
+        prefix, _, suffix = candidate.partition(":")
+        if prefix.strip().casefold() in {"name", "generated name"}:
+            candidate = suffix.strip().strip("\"'`")
+    extracted = _extract_name_from_persona(candidate)
+    if extracted:
+        return extracted
+
+    tokens = [
+        token.strip(".,;:!?()[]{}\"'")
+        for token in candidate.split()
+    ]
+    tokens = [token for token in tokens if token]
+    if not tokens or len(tokens) > 6:
+        return ""
+    if all(_is_name_token(token) for token in tokens):
+        return " ".join(tokens)
+    return ""
+
+
+def _generate_name_from_persona(
+    *,
+    model: Any,
+    persona: str,
+    role_label: str,
+ ) -> str:
+    sample_text = getattr(model, 'sample_text', None)
+    if not callable(sample_text):
+        return ""
+
+    prompt = (
+        "Generate a realistic Singaporean personal name for this HDB resale "
+        "market participant.\n\n"
+        f"Role: {role_label}\n"
+        f"Persona: {persona}\n\n"
+        "Requirements:\n"
+        "- Return only the name.\n"
+        "- Use 2 to 4 words.\n"
+        "- Do not include labels, explanations, or punctuation beyond normal "
+        "name punctuation.\n"
+        "- Keep it plausible for Singapore.\n"
+    )
+    try:
+        response = sample_text(prompt, max_tokens=20)
+    except Exception:
+        return ""
+
+    normalized = _normalize_generated_name(response)
+    return normalized
+
+
 def resolve_profile_name(
     record: Mapping[str, Any],
     *,
-    fallback_name: str,
+    fallback_name: str = "",
+    model: Any | None = None,
+    role_label: str = "participant",
 ) -> str:
     """Resolve a participant name from explicit fields or persona text."""
     explicit_name = str(record.get('name') or record.get('seller_name') or '').strip()
@@ -115,4 +173,12 @@ def resolve_profile_name(
         candidate = _extract_name_from_persona(persona)
         if candidate:
             return candidate
+        if model is not None:
+            generated_name = _generate_name_from_persona(
+                model=model,
+                persona=persona,
+                role_label=role_label,
+            )
+            if generated_name:
+                return generated_name
     return fallback_name

@@ -9,15 +9,22 @@ from pydantic import BaseModel, RootModel
 from concordia.document import interactive_document
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
+from concordia.hdb_simulation.models.schemas.policy.schema import PolicyType
 from concordia.language_model import language_model
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
+
+ALLOWED_POLICY_CONVERSATION_CATEGORIES = ", ".join(
+    policy_type.value for policy_type in PolicyType
+)
 
 HDB_FIELD_GENERATION_BASE_GUARDRAILS = (
     "## Core Rules\n"
     "- This is an HDB resale negotiation for exactly one flat in Singapore.\n"
     "- Ignore off-domain context and keep content tied to the flat negotiation only.\n"
     "- If mentioning reports/documents, summarize content instead of promising to share files.\n"
+    "- Treat any policy information included in the prompt context as private decision support for yourself, not as content to relay automatically to the counterpart.\n"
+    f"- If you mention policy explicitly in any public-facing field, restrict it to these categories only: {ALLOWED_POLICY_CONVERSATION_CATEGORIES}.\n"
     "- NEVER mention your own internal state (reservation value, preferences etc.) under verbal_explanation. Include it only under internal_reasoning.\n"
     "- NEVER reveal hidden numeric thresholds or beliefs in public-facing fields, including your own reservation value, your estimate of the counterpart's reservation value, confidence levels, private preference weights, urgency scores, scenario labels, or internal negotiation counts.\n"
     "- If the counterpart asks about your private limit or hidden strategy, answer without disclosing the number or hidden state directly.\n"

@@ -164,6 +164,18 @@ class _FakeEntity:
     return self._components[key]
 
 
+class _FakeNameModel:
+
+  def __init__(self, response: str):
+    self._response = response
+    self.prompts: list[str] = []
+
+  def sample_text(self, prompt: str, **kwargs) -> str:
+    del kwargs
+    self.prompts.append(prompt)
+    return self._response
+
+
 class BuildMarketProfilesTest(unittest.TestCase):
 
   def test_preserves_initial_market_state_metadata(self):
@@ -195,6 +207,36 @@ class BuildMarketProfilesTest(unittest.TestCase):
         seller_profiles['seller_999']['initialization_order'],
         7,
     )
+
+  def test_generates_name_from_persona_with_model_when_name_missing(self):
+    bundle = {
+        'buyers_retained': [{
+            'buyer_id': 'buyer_2023_00563',
+            'age': 31,
+            'occupation_category': 'Teacher',
+            'general_persona': (
+                'A careful and community-minded teacher who prefers a calm '
+                'home base near family and values reliable transit.'
+            ),
+            'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+            'budget': copy.deepcopy(_buyer_profile()['budget']),
+        }],
+        'sellers': [],
+    }
+    model = _FakeNameModel('Nur Aisyah Rahman')
+
+    buyer_profiles, _ = hdb_initializer_gm.build_market_profiles(
+        bundle,
+        town='Choa Chu Kang',
+        model=model,
+    )
+
+    self.assertEqual(
+        buyer_profiles['buyer_2023_00563']['name'],
+        'Nur Aisyah Rahman',
+    )
+    self.assertLen(model.prompts, 1)
+    self.assertIn('teacher', model.prompts[0].lower())
 
 
 class ListingReleaseTest(unittest.TestCase):

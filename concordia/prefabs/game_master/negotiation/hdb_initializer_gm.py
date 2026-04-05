@@ -62,6 +62,7 @@ def build_market_profiles(
     bundle: Mapping[str, Any],
     *,
     town: str,
+    model: language_model.LanguageModel | None = None,
 ) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
   """Build listing/negotiation profiles from a market-segment bundle."""
   buyer_profiles: dict[str, dict[str, object]] = {}
@@ -70,7 +71,8 @@ def build_market_profiles(
     buyer_id = str(buyer['buyer_id'])
     buyer_name = resolve_profile_name(
         buyer,
-        fallback_name=f"{town} Buyer {buyer_id.rsplit('_', 1)[-1]}",
+        model=model,
+        role_label='buyer',
     )
     buyer_name = _unique_market_display_name(
         participant_id=buyer_id,
@@ -105,7 +107,8 @@ def build_market_profiles(
     seller_id = str(seller['seller_id'])
     seller_name = resolve_profile_name(
         seller,
-        fallback_name=f"{town} Seller {seller_id.rsplit('_', 1)[-1]}",
+        model=model,
+        role_label='seller',
     )
     seller_name = _unique_market_display_name(
         participant_id=seller_id,
@@ -226,6 +229,7 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
   def __init__(
       self,
       *,
+      model: language_model.LanguageModel | None,
       bundle: Mapping[str, Any],
       town: str,
       next_game_master_name: str,
@@ -233,6 +237,7 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
       pre_act_label: str = 'HDB market initializer',
   ):
     super().__init__(pre_act_label=pre_act_label)
+    self._model = model
     self._bundle = dict(bundle)
     self._town = str(town)
     self._next_game_master_name = str(next_game_master_name)
@@ -457,6 +462,7 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
     buyer_profiles, seller_profiles = build_market_profiles(
         self._bundle,
         town=self._town,
+        model=self._model,
     )
     listing_module = coordinator.get_component('listing_module')
     weekly_coordinator = coordinator.get_component('weekly_coordinator')
@@ -568,6 +574,7 @@ class InitialiserGameMaster(prefab_lib.Prefab):
     player_names = [entity.name for entity in self.entities]
     initializer_key = 'market_initializer'
     initializer = HDBMarketInitialiser(
+        model=model,
         bundle=self.params.get('bundle', {}),
         town=str(self.params.get('town', '')),
         next_game_master_name=str(

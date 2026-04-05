@@ -21,6 +21,7 @@ from concordia.prefabs.entity.negotiation.config import StrategyConfig
 AVG_NEGOTIATION_LENGTH = 12  # average number of rounds in HDB resale negotiation (in weeks)
 MIN_ROUNDS = 8
 MAX_ROUNDS = 15
+SELF_ACTION_TAG = '[self_action]'
 
 class UrgencyLevel(BaseModel):
     """Schema for urgency level output."""
@@ -247,9 +248,10 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
     def _parse_observed_action(self, memory_text: str) -> tuple[str, Dict[str, Any]] | None:
         text = memory_text.strip()
-        obs_tag = observation_component.OBSERVATION_TAG
-        if text.startswith(f'{obs_tag} '):
-            text = text[len(obs_tag) + 1:].strip()
+        for tag in (observation_component.OBSERVATION_TAG, SELF_ACTION_TAG):
+            if text.startswith(f'{tag} '):
+                text = text[len(tag) + 1:].strip()
+                break
 
         actor, sep, payload = text.partition(':')
         if not sep:
@@ -264,6 +266,20 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         if not isinstance(action, dict):
             return None
         return actor.strip(), action
+
+    @staticmethod
+    def _normalize_self_action_payload(action_attempt: str) -> str:
+        """Normalize self-action payload while preserving internal fields."""
+        text = str(action_attempt).strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if not isinstance(payload, dict):
+            return text
+        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _format_money(value: float | None) -> str:
@@ -582,6 +598,18 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         """Update strategy state after each action."""
         # Simple parsing to update rounds elapsed
         self._state.rounds_elapsed += 1
+        action_text = self._normalize_self_action_payload(action_attempt)
+        if action_text:
+            try:
+                memory = self.get_entity().get_component(
+                    self._memory_component_key, type_=memory_component.Memory
+                )
+                memory.add(f'{SELF_ACTION_TAG} {self._agent_name}: {action_text}')
+            except Exception:
+                if self._verbose:
+                    print(
+                        f'[{self._agent_name}] Failed to persist self action to memory.'
+                    )
         return ""
     
     def _max_rounds_from_urgency(self, urgency: float) -> int:

@@ -38,7 +38,8 @@ HDB_ACTION_CHOICE_GUARDRAILS = (
     "ACTION-CHOICE GUARDRAILS:\n"
     "- Follow **Negotiation Strategy State and Numeric Facts** guidance on action choice.\n"
     "- If **Strategy Summary** indicates information gathering and you have budget for it, but there is an ACTIVE OFFER, DO NOT MAKE_COUNTEROFFER; choose REJECT_OFFER and then proceed with information gathering.\n"
-    "- If **Strategy Summary** has [IMPORTANT] tag, priortise following that guidance over ALL other strategy guidance."
+    "- If **Strategy Summary** has [IMPORTANT] tag, priortise following that guidance over ALL other strategy guidance.\n"
+    "- Check recent memory for `[self_action]` entries before deciding, including the stored `decision_rationale` and `internal_reasoning` when present. Avoid repeating your own most recent action unless a new observation, offer-state change, or strategy update clearly justifies repeating it."
 )
 HDB_CONTEXT_ANCHOR = (
     "NOTE:\n"

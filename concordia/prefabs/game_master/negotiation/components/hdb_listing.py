@@ -5,6 +5,7 @@ from typing import Any
 
 from absl import logging
 from concordia.components.agent import action_spec_ignored
+from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation import listing_portal as listing_portal_lib
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
@@ -262,6 +263,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._last_run_week = 0
     self._stage_exhausted = False
     self._last_outcome = listing_schemas.ListingWeeklyBatchOutcome(week_number=1)
+    self._entities_by_id: dict[str, Any] = {}
+    self._canonical_entities: tuple[entity_component.EntityWithComponents, ...] = ()
+    self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
     self._active_seller_ids: set[str] = set()
     self._inactive_seller_queue: list[str] = []
     self._target_active_seller_count = 0
@@ -317,6 +321,138 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     if not self._enabled:
       return
     self._ensure_portal()
+
+  def set_entity(self, entity: entity_component.EntityWithComponents) -> None:
+    super().set_entity(entity)
+    self._bind_known_entities()
+
+  def set_canonical_entities(
+      self,
+      entities: Sequence[entity_component.EntityWithComponents],
+  ) -> None:
+    """Registers the simulation-owned entities available to listing."""
+    self._canonical_entities = tuple(entities)
+    self._canonical_entities_by_name = {
+        entity.name: entity for entity in self._canonical_entities
+    }
+    self._bind_known_entities()
+
+  def _bind_known_entities(self) -> None:
+    """Binds canonical entities to player ids using id first, then name."""
+    if not self._canonical_entities:
+      return
+    for player_id in self._player_ids:
+      self._bind_entity_for_player(player_id)
+
+  def _bind_entity_for_player(self, player_id: str) -> bool:
+    """Resolves a player id to its canonical simulation entity."""
+    if player_id in self._entities_by_id:
+      return True
+
+    for entity in self._canonical_entities:
+      entity_player_id = str(getattr(entity, '_hdb_player_id', '')).strip()
+      if entity_player_id == player_id:
+        self._entities_by_id[player_id] = entity
+        return True
+
+    expected_name = self._id_to_name.get(str(player_id), '')
+    if expected_name:
+      matching_entity = self._canonical_entities_by_name.get(expected_name)
+      if matching_entity is not None:
+        current_player_id = str(getattr(matching_entity, '_hdb_player_id', '')).strip()
+        if current_player_id and current_player_id != player_id:
+          logging.error(
+              'Canonical entity %s is already bound to %s, cannot bind to %s.',
+              matching_entity.name,
+              current_player_id,
+              player_id,
+          )
+          return False
+        matching_entity._hdb_player_id = player_id
+        self._entities_by_id[player_id] = matching_entity
+        return True
+
+    return False
+
+  def _remember_listing_event(self, player_id: str, memory_text: str) -> None:
+    """Adds a listing-stage memory entry for an active participant."""
+    entity = self._entities_by_id.get(str(player_id))
+    if entity is None and not self._bind_entity_for_player(str(player_id)):
+      return
+    entity = self._entities_by_id.get(str(player_id))
+    if entity is None:
+      return
+    try:
+      memory = entity.get_component(
+          memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
+          type_=memory_component.Memory,
+      )
+    except Exception:
+      return
+    memory.add(memory_text)
+
+  def _buyer_listing_memory(
+      self,
+      *,
+      buyer: listing_schemas.PortalBuyer,
+      buyer_id: str,
+      week_number: int,
+      portal: listing_portal_lib.ListingPortal,
+  ) -> str:
+    results = list(portal.search_results_by_buyer.get(buyer_id, ()))
+    top_result = results[0] if results else None
+    requested_seller_id = str(top_result.seller_id) if top_result is not None else ''
+    requested_seller_name = (
+        self._id_to_name.get(requested_seller_id, requested_seller_id)
+        if requested_seller_id
+        else 'none'
+    )
+    listing_price = (
+        f'SGD {float(top_result.listing_price):.2f}'
+        if top_result is not None
+        else 'NA'
+    )
+    return (
+        f'[listing_action] Week {int(week_number)}: {buyer.name} searched the '
+        f'listing portal as a buyer. Search results considered: {len(results)}. '
+        f'Request submitted to seller: {requested_seller_name}. '
+        f'Top matched listing price: {listing_price}.'
+    )
+
+  def _seller_listing_memory(
+      self,
+      *,
+      seller: listing_schemas.PortalSeller,
+      seller_id: str,
+      week_number: int,
+      portal: listing_portal_lib.ListingPortal,
+      listed_this_week: bool,
+      reviewed_this_week: bool,
+  ) -> str:
+    listing_record = portal.get_listing_record(seller_id)
+    listing_price = (
+        f'SGD {float(listing_record.listing_price):.2f}'
+        if listing_record is not None
+        else 'NA'
+    )
+    open_requests = portal.pending_request_count(seller_id)
+    if listed_this_week:
+      return (
+          f'[listing_action] Week {int(week_number)}: {seller.name} listed their '
+          f'flat on the portal as a seller. Listing price: {listing_price}. '
+          f'Open buyer requests after listing: {open_requests}.'
+      )
+    if reviewed_this_week:
+      return (
+          f'[listing_action] Week {int(week_number)}: {seller.name} kept their '
+          f'flat listed on the portal and reviewed buyer requests as a seller. '
+          f'Current listing price: {listing_price}. '
+          f'Remaining open requests after review: {open_requests}.'
+      )
+    return (
+        f'[listing_action] Week {int(week_number)}: {seller.name} remained active '
+        f'in the listing portal as a seller. Current listing price: {listing_price}.'
+    )
 
   def _ensure_portal(self) -> listing_portal_lib.ListingPortal:
     """Lazily constructs or restores the backing `ListingPortal` instance."""
@@ -564,6 +700,37 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         active_player_ids=active_player_ids,
         active_player_names=active_player_names,
     )
+    newly_listed_ids = set(outcome.newly_listed_listing_ids)
+    reviewed_seller_names = set(outcome.sellers_reviewed)
+    processed_buyer_names = set(outcome.buyers_processed)
+    for player_id in active_player_ids:
+      if player_id in self._buyers:
+        buyer = self._buyers[player_id]
+        if buyer.name in processed_buyer_names:
+          self._remember_listing_event(
+              player_id,
+              self._buyer_listing_memory(
+                  buyer=buyer,
+                  buyer_id=player_id,
+                  week_number=week_number,
+                  portal=portal,
+              ),
+          )
+        continue
+      if player_id in self._sellers:
+        seller = self._sellers[player_id]
+        listing_id = portal.listing_id_for_seller(player_id)
+        self._remember_listing_event(
+            player_id,
+            self._seller_listing_memory(
+                seller=seller,
+                seller_id=player_id,
+                week_number=week_number,
+                portal=portal,
+                listed_this_week=bool(listing_id and listing_id in newly_listed_ids),
+                reviewed_this_week=seller.name in reviewed_seller_names,
+            ),
+        )
     self._completed_weeks += 1
     self._last_run_week = week_number
     if self._max_rounds is not None and week_number >= self._max_rounds:

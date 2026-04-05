@@ -108,6 +108,7 @@ class GameMaster(prefab_lib.Prefab):
         max_rounds=int(listing_params.get('max_rounds', 0) or 0) or None,
         enabled=bool(listing_params.get('enabled', True)),
     )
+    listing_module.set_canonical_entities(self.entities)
 
     negotiation_module_key = 'negotiation_module'
     negotiation_module = hdb_negotiation.NegotiationModule(
