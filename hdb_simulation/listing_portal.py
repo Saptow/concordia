@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 import dataclasses
 import random
 import re
+import threading
 import numpy as np
 from typing import Any
 from absl import logging
@@ -53,9 +54,12 @@ class ListingPortalRetriever:
         self._sparse_embedder = sparse_embedding_model
         self._collection_name = collection_name
         self._client = client
+        self._client_lock = threading.RLock()
         self._rrf_weights = [1.0, 1.5]  # Relative Weights for BM25 and dense retrieval in RRF scoring
         # Ensure collection exists
-        if not self._client.collection_exists(collection_name):
+        with self._client_lock:
+            collection_exists = self._client.collection_exists(collection_name)
+        if not collection_exists:
             logging.exception(f"Qdrant collection '{collection_name}' does not exist. Please create it before using the retriever.")
 
     def _embed_dense_text(self, text: str) -> np.ndarray:
@@ -84,31 +88,34 @@ class ListingPortalRetriever:
         document = record.to_document()
         embedding = self._embed_dense_text(document)
         sparse_embedding = self._embed_sparse_text(document)
-        self._client.upsert(
-            collection_name=self._collection_name,
-            points=[record.to_qdrant_point(embedding, sparse_embedding=sparse_embedding)],
-        )
+        with self._client_lock:
+            self._client.upsert(
+                collection_name=self._collection_name,
+                points=[record.to_qdrant_point(embedding, sparse_embedding=sparse_embedding)],
+            )
 
     def update_listing_payload(self, record: qdrant_schemas.ListingRecord) -> None:
         """Updates stored payload fields without recomputing embeddings."""
-        self._client.set_payload(
-            collection_name=self._collection_name,
-            payload=record.qdrant_payload(),
-            points=qdrant_schemas.seller_filter(record.seller_id),
-        )
+        with self._client_lock:
+            self._client.set_payload(
+                collection_name=self._collection_name,
+                payload=record.qdrant_payload(),
+                points=qdrant_schemas.seller_filter(record.seller_id),
+            )
 
     def get_listing_record(
         self,
         seller_id: str,
     ) -> qdrant_schemas.ListingRecord | None:
         """Fetches a seller listing record directly from Qdrant payload."""
-        points, _ = self._client.scroll(
-            collection_name=self._collection_name,
-            scroll_filter=qdrant_schemas.seller_filter(seller_id),
-            with_payload=True,
-            with_vectors=False,
-            limit=1,
-        )
+        with self._client_lock:
+            points, _ = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=qdrant_schemas.seller_filter(seller_id),
+                with_payload=True,
+                with_vectors=False,
+                limit=1,
+            )
         if not points:
             return None
         payload = points[0].payload or {}
@@ -116,11 +123,12 @@ class ListingPortalRetriever:
 
     def deactivate_listing(self, seller_id: str) -> None:
         """Marks a seller listing inactive without re-embedding."""
-        self._client.set_payload(
-            collection_name=self._collection_name,
-            payload={'active': False},
-            points=qdrant_schemas.seller_filter(seller_id),
-        )
+        with self._client_lock:
+            self._client.set_payload(
+                collection_name=self._collection_name,
+                payload={'active': False},
+                points=qdrant_schemas.seller_filter(seller_id),
+            )
 
     def search(
         self,
@@ -136,35 +144,36 @@ class ListingPortalRetriever:
         dense_query = self._embed_dense_text(query)
         sparse_query = self._embed_sparse_text(query)
         search_limit = max(10, 3 * limit)
-        if sparse_query is None:
-            results = self._client.query_points(
-                collection_name=self._collection_name,
-                query=dense_query,
-                using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
-                limit=search_limit,
-                with_payload=True,
-            )
-        else:
-            results = self._client.query_points(
-                collection_name=self._collection_name,
-                prefetch=[
-                    qdrant_models.Prefetch(
-                        query=qdrant_schemas.sparse_embedding_to_vector(sparse_query),
-                        using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
-                        limit=2 * limit,
+        with self._client_lock:
+            if sparse_query is None:
+                results = self._client.query_points(
+                    collection_name=self._collection_name,
+                    query=dense_query,
+                    using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                    limit=search_limit,
+                    with_payload=True,
+                )
+            else:
+                results = self._client.query_points(
+                    collection_name=self._collection_name,
+                    prefetch=[
+                        qdrant_models.Prefetch(
+                            query=qdrant_schemas.sparse_embedding_to_vector(sparse_query),
+                            using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
+                            limit=2 * limit,
+                        ),
+                        qdrant_models.Prefetch(
+                            query=dense_query,
+                            using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                            limit=2 * limit,
+                        ),
+                    ],
+                    query=qdrant_models.RrfQuery(
+                        rrf=self._rrf_ranker()
                     ),
-                    qdrant_models.Prefetch(
-                        query=dense_query,
-                        using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
-                        limit=2 * limit,
-                    ),
-                ],
-                query=qdrant_models.RrfQuery(
-                    rrf=self._rrf_ranker()
-                ),
-                limit=search_limit,
-                with_payload=True,
-            )
+                    limit=search_limit,
+                    with_payload=True,
+                )
 
         filtered_results: list[listing_schemas.PortalSearchResult] = []
         for point in results.points:
