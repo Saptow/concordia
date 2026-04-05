@@ -1367,13 +1367,11 @@ def _sample_overall_distribution(
     return str(_weighted_choice(subset, value_column, "count", rng))
 
 
-def _draw_buyer_value_prior(
+def _estimate_buyer_hedonic_anchor(
     buyer: dict[str, Any],
     hedonic_training_flats: list[dict[str, Any]],
-    *,
-    rng: random.Random,
-) -> float:
-    """Draw a buyer's private valuation prior from the relevant hedonic market."""
+) -> tuple[float, float]:
+    """Estimate the buyer-specific hedonic anchor and spread."""
     preference_payload = buyer.get("preferences", {})
     preferred_flat_types: list[str] = []
     if preference_payload.get("preferences"):
@@ -1385,7 +1383,20 @@ def _draw_buyer_value_prior(
         town=buyer["town"],
         preferred_flat_types=preferred_flat_types,
     )
-    anchor_log_price, sigma_log_price = _estimate_hedonic_price(training_flats)
+    return _estimate_hedonic_price(training_flats)
+
+
+def _draw_buyer_value_prior(
+    buyer: dict[str, Any],
+    hedonic_training_flats: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+) -> float:
+    """Draw a buyer's private valuation prior from the relevant hedonic market."""
+    anchor_log_price, sigma_log_price = _estimate_buyer_hedonic_anchor(
+        buyer,
+        hedonic_training_flats,
+    )
     return float(np.exp(rng.normalvariate(anchor_log_price, sigma_log_price)))
 
 
@@ -1394,27 +1405,13 @@ def _build_buyer_budget(
     hedonic_training_flats: list[dict[str, Any]],
     *,
     rng: random.Random,
-    reservation_price_prior: float | None = None,
 ) -> dict[str, Any]:
     """Build hard buyer budget bounds from financial feasibility."""
-    preference_payload = buyer.get("preferences", {})
-    preferred_flat_types: list[str] = []
-    if preference_payload.get("preferences"):
-        preferred_flat_types = BuyerPreferenceProfile.model_validate(
-            preference_payload
-        ).values_for("flat_type")
-    training_flats = _select_hedonic_training_flats(
+    del rng  # Budget bounds are deterministic once buyer features are fixed.
+    anchor_log_price, sigma_log_price = _estimate_buyer_hedonic_anchor(
+        buyer,
         hedonic_training_flats,
-        town=buyer["town"],
-        preferred_flat_types=preferred_flat_types,
     )
-    anchor_log_price, sigma_log_price = _estimate_hedonic_price(training_flats)
-    if reservation_price_prior is None:
-        reservation_price_prior = _draw_buyer_value_prior(
-            buyer,
-            hedonic_training_flats,
-            rng=rng,
-        )
     max_price = float(buyer["financials"]["effective_ceiling"])
     min_price = max(0.0, float(np.exp(anchor_log_price - sigma_log_price)))
     if max_price < min_price:
@@ -1553,7 +1550,6 @@ def _build_broad_buyers(
             buyer_record,
             hedonic_training_flats,
             rng=rng,
-            reservation_price_prior=reservation_price_prior,
         )
         if not _annotate_buyer_market_feasibility(
             buyer_record,
@@ -1626,7 +1622,6 @@ def _populate_buyer_preferences(
             buyer,
             hedonic_training_flats,
             rng=rng,
-            reservation_price_prior=reservation_price_prior,
         )
 
 

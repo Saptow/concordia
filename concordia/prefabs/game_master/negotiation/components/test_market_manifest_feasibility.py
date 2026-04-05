@@ -90,10 +90,6 @@ def _candidate_buyer_ids_for_seller(
     buyers_by_id: dict[str, dict[str, object]],
 ) -> list[str]:
   linked_flat_id = str(seller.get('linked_flat_id', '')).strip()
-  expectations = seller.get('expectations', {})
-  if not isinstance(expectations, dict):
-    expectations = {}
-  listing_price = float(expectations.get('max_price', 0.0) or 0.0)
 
   candidate_buyer_ids: list[str] = []
   seeded_buyer_id = str(seller.get('seeded_buyer_id', '')).strip()
@@ -107,22 +103,11 @@ def _candidate_buyer_ids_for_seller(
 
   if not candidate_buyer_ids:
     for buyer_id, buyer in buyers_by_id.items():
-      financials = buyer.get('financials', {})
-      if not isinstance(financials, dict):
-        financials = {}
-      budget = buyer.get('budget', {})
-      if not isinstance(budget, dict):
-        budget = {}
-      effective_ceiling = float(
-          financials.get('effective_ceiling', budget.get('max_price', 0.0)) or 0.0
-      )
       feasible_flat_ids = {
           str(flat_id).strip()
           for flat_id in buyer.get('feasible_flat_ids', ())
           if str(flat_id).strip()
       }
-      if effective_ceiling < listing_price:
-        continue
       if linked_flat_id and linked_flat_id not in feasible_flat_ids:
         continue
       candidate_buyer_ids.append(buyer_id)
@@ -131,11 +116,6 @@ def _candidate_buyer_ids_for_seller(
   for buyer_id in _dedupe_preserving_order(candidate_buyer_ids):
     buyer = buyers_by_id.get(buyer_id)
     if buyer is None:
-      continue
-    budget = buyer.get('budget', {})
-    if not isinstance(budget, dict):
-      budget = {}
-    if float(budget.get('max_price', 0.0) or 0.0) < listing_price:
       continue
     feasible_flat_ids = {
         str(flat_id).strip()

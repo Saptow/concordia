@@ -426,25 +426,29 @@ def _budget_bounds(
 def build_buyer_preference_prior(
     preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
     budget: BuyerBudgetRange | Mapping[str, Any] | None,
+    reservation_price_prior: float | None = None,
 ) -> BuyerPreferencePrior:
     profile = coerce_buyer_preferences(preferences)
     budget_min, budget_max = _budget_bounds(budget)
-    budget_midpoint = max(0.0, 0.5 * (budget_min + budget_max))
-    budget_span = max(0.0, budget_max - budget_min)
-    base_std = max(25000.0, 0.5 * budget_span, 0.04 * budget_midpoint)
+    anchor_price = (
+        max(0.0, float(reservation_price_prior))
+        if reservation_price_prior is not None
+        else max(0.0, 0.5 * (budget_min + budget_max))
+    )
+    base_std = max(25000.0, 0.1 * anchor_price)
 
     def _strength(category: str) -> float:
         return profile.strongest_strength_for(category) if profile is not None else 0.0
 
     means = [
-        budget_midpoint,
-        0.02 * budget_midpoint * _strength('flat_type'),
-        0.015 * budget_midpoint * _strength('town'),
-        0.008 * budget_midpoint * _strength('transport'),
-        0.007 * budget_midpoint * _strength('schools'),
-        0.006 * budget_midpoint * _strength('shopping'),
-        0.006 * budget_midpoint * _strength('dining'),
-        0.006 * budget_midpoint * _strength('other'),
+        anchor_price,
+        0.02 * anchor_price * _strength('flat_type'),
+        0.015 * anchor_price * _strength('town'),
+        0.008 * anchor_price * _strength('transport'),
+        0.007 * anchor_price * _strength('schools'),
+        0.006 * anchor_price * _strength('shopping'),
+        0.006 * anchor_price * _strength('dining'),
+        0.006 * anchor_price * _strength('other'),
     ]
     stds = [
         base_std,

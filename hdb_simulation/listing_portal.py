@@ -309,6 +309,7 @@ class ListingPortal:
                 preference_prior=common_schemas.build_buyer_preference_prior(
                     buyer.preferences,
                     buyer.budget,
+                    reservation_price_prior=reservation_price_prior,
                 ),
                 effective_reservation=uncertain_helper.NormalDistribution(
                     name='Effective reservation price',
