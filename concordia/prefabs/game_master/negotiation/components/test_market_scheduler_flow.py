@@ -284,6 +284,55 @@ class ListingReleaseTest(unittest.TestCase):
     self.assertIn('seller_002', listing_module.get_open_player_ids())
     self.assertNotIn('seller_003', listing_module.get_open_player_ids())
 
+  def test_late_released_seller_registers_in_market_snapshot(self):
+    listing_module = self._build_listing_module((
+        ('seller_001', 'Seller 1', 'listed', 1, 500000.0, 530000.0),
+        ('seller_002', 'Seller 2', 'not_yet_listed', 2, 620000.0, 660000.0),
+    ))
+
+    for week_number in range(2, 10):
+      self.assertEqual(
+          listing_module.prepare_weekly_market(week_number=week_number),
+          [],
+      )
+
+    late_snapshot_before_release = listing_module.get_market_snapshot()
+    self.assertEqual(
+        late_snapshot_before_release['released_seller_ids'],
+        [],
+    )
+    self.assertIn(
+        'seller_002',
+        late_snapshot_before_release['inactive_seller_ids'],
+    )
+    self.assertNotIn(
+        'seller_002',
+        late_snapshot_before_release['active_seller_ids'],
+    )
+    self.assertNotIn('seller_002', listing_module.get_open_player_ids())
+
+    portal = listing_module._ensure_portal()
+    portal.closed_sellers.add('seller_001')
+
+    released = listing_module.prepare_weekly_market(week_number=10)
+    late_snapshot_after_release = listing_module.get_market_snapshot()
+
+    self.assertEqual(released, ['seller_002'])
+    self.assertEqual(
+        late_snapshot_after_release['released_seller_ids'],
+        ['seller_002'],
+    )
+    self.assertIn(
+        'seller_002',
+        late_snapshot_after_release['active_seller_ids'],
+    )
+    self.assertNotIn(
+        'seller_002',
+        late_snapshot_after_release['inactive_seller_ids'],
+    )
+    self.assertIn('seller_002', listing_module.get_open_player_ids())
+    self.assertNotIn('seller_001', listing_module.get_open_player_ids())
+
   def test_state_round_trip_preserves_delayed_release_queue(self):
     seller_specs = (
         ('seller_001', 'Seller 1', 'listed', 1, 500000.0, 530000.0),
