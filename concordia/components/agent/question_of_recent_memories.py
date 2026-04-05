@@ -129,7 +129,11 @@ class QuestionOfRecentMemories(
     prompt = interactive_document.InteractiveDocument(self._model)
 
     component_states = '\n'.join(
-        [self._component_pre_act_display(key) for key in self._components]
+        [
+            self._component_pre_act_display(key)
+            for key in self._components
+            if key not in ('situation_perception', 'self_perception')
+        ]
     )
     prompt.statement(component_states)
 
@@ -312,7 +316,11 @@ class QuestionOfRecentMemoriesStructured(
     ])
     prompt = interactive_document.InteractiveDocument(self._model)
     component_states = '\n'.join(
-        [self._component_pre_act_display(key) for key in self._components]
+        [
+            self._component_pre_act_display(key)
+            for key in self._components
+            if key not in ('situation_perception', 'self_perception')
+        ]
     )
     prompt.statement(component_states)
     perception_keys = tuple(

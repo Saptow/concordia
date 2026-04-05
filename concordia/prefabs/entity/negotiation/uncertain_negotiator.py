@@ -230,7 +230,6 @@ class Entity(prefab_lib.Prefab):
         instructions = hdb_negotiation_instructions.HDBNegotiationInstructions(
             agent_name=agent_name,
             role = role,
-            description=description,
             flat_listing=flat_listing,
             preferences=buyer_preferences if role == common_schemas.RoleType.BUYER else None,
             reservation_value=reservation,
@@ -322,20 +321,12 @@ class Entity(prefab_lib.Prefab):
             )
         # Build a formatting-safe self-description prompt block.
         safe_description = _escape_format_braces(description)
-        preferences_block = ''
-        if role == common_schemas.RoleType.BUYER and buyer_preferences:
-            preference_lines = common_schemas.format_buyer_preferences(
-                buyer_preferences
-            )
-            preferences_block = 'Buyer preferences:\n' + '\n'.join(preference_lines) + '\n'
-            preferences_block = _escape_format_braces(preferences_block)
         question_about_self = agent_components.question_of_recent_memories.QuestionOfRecentMemories(
             model=model,
             pre_act_label=f'Who is {agent_name}?',
             question=(
             f'Given the agent description, what kind of {role} is {agent_name}?\n'
             f'Agent description: {safe_description}\n'
-            f'{preferences_block}'
             ),
             answer_prefix=f'{agent_name} is a {role} who',
             add_to_memory=False,
@@ -391,6 +382,8 @@ class Entity(prefab_lib.Prefab):
                 f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
             )
         action_components = [
+            'situation_perception',
+            'self_perception',
             instructions.name,
             policy_tool_prompt.name,
             strategy_key

@@ -377,6 +377,10 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             retrieval_decision=retrieval_decision,
         )
 
+    @staticmethod
+    def _no_relevant_policy_summary() -> str:
+        return "No relevant HDB resale policy summary for the current context."
+
     def _normalize_relevant_paths(
         self,
         relevant_paths: list[str],
@@ -485,11 +489,11 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
     ) -> str:
         chat = getattr(self._model, "chat", None)
         if not callable(chat):
-            return ""
+            return self._no_relevant_policy_summary()
 
         relevant_paths = path_selection.relevant_paths
         if not relevant_paths:
-            return ""
+            return self._no_relevant_policy_summary()
 
         full_page_tool_call = ""
         full_page_tool_result = ""
@@ -521,7 +525,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             pages=pages,
         )
         if not full_page_tool_call or not full_page_tool_result:
-            return ""
+            return self._no_relevant_policy_summary()
 
         final_prompt = (
             "# Role\n"
@@ -579,7 +583,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
     ) -> str:
         chat = getattr(self._model, "chat", None)
         if not callable(chat):
-            return ""
+            return self._no_relevant_policy_summary()
 
         path_selection, directory_tool_call, directory_tool_result = (
             self._screen_relevant_policies_from_directory(
@@ -589,10 +593,10 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             )
         )
         if not directory_tool_call or not directory_tool_result:
-            return ""
+            return self._no_relevant_policy_summary()
 
         if not path_selection.relevant_paths:
-            return ""
+            return self._no_relevant_policy_summary()
 
         return self._summarize_relevant_policies_from_full_pages(
             observation=observation,
@@ -627,14 +631,20 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         try:
             pages = self._load_policy_directory()
         except Exception:
-            return self._cache_result(cache_key=cache_key, result="")
+            return self._cache_result(
+                cache_key=cache_key,
+                result=self._no_relevant_policy_summary(),
+            )
 
         tool_result = self._run_required_hdb_policy_tool_workflow(
             observation=observation,
             recent_memories=recent_memories,
             pages=pages,
         )
-        return self._cache_result(cache_key=cache_key, result=tool_result or "")
+        return self._cache_result(
+            cache_key=cache_key,
+            result=tool_result or self._no_relevant_policy_summary(),
+        )
 
     def update(self) -> None:
         super().update()

@@ -14,6 +14,44 @@ from pydantic import BaseModel, Field, ValidationError
 from scipy import stats
 
 
+def build_compact_listing_context(listing_record: Any) -> str:
+    """Render a compact listing snapshot for model prompts."""
+    if listing_record is None:
+        return 'Listing unavailable.'
+
+    flat = getattr(listing_record, 'flat', None)
+    if flat is None:
+        return 'Listing unavailable.'
+
+    nearby_amenities = getattr(flat, 'nearby_amenities', None) or []
+    amenity_bits: list[str] = []
+    for amenity in nearby_amenities[:4]:
+        amenity_type = str(getattr(amenity, 'type', '')).strip()
+        amenity_name = str(getattr(amenity, 'name', '')).strip()
+        if amenity_type and amenity_name:
+            amenity_bits.append(f'{amenity_type}:{amenity_name}')
+        elif amenity_name:
+            amenity_bits.append(amenity_name)
+
+    amenity_text = ', '.join(amenity_bits) if amenity_bits else 'unknown'
+
+    trend_text = 'unknown'
+    past_price_trends = getattr(flat, 'past_price_trends', None)
+    if past_price_trends is not None:
+        trend_text = (
+            f'{int(past_price_trends.transactions_6m)} txns in 6m, '
+            f'${float(past_price_trends.min_price_6m):,.0f}-${float(past_price_trends.max_price_6m):,.0f}'
+        )
+
+    return '\n'.join([
+        f'Price: SGD {float(getattr(listing_record, "listing_price", 0.0)):,.0f}',
+        f'Flat: {flat.to_compact_description()}',
+        f'Extension of stay: {"yes" if bool(getattr(flat, "extension_of_stay", False)) else "no"}',
+        f'Amenities: {amenity_text}',
+        f'Price trends: {trend_text}',
+    ])
+
+
 @dataclasses.dataclass
 class NormalInverseGamma:
     """Normal-Inverse-Gamma belief used for reservation-value uncertainty."""

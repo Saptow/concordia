@@ -636,6 +636,7 @@ def render_dynamic_html(
     entity_memories: dict[str, list[str]] | None = None,
     game_master_memories: list[str] | None = None,
     player_scores: dict[str, Any] | None = None,
+    summary_sections_html: list[str] | None = None,
     title: str = 'Simulation Log',
 ) -> str:
   """Render the log to HTML with JavaScript-based content composition.
@@ -645,6 +646,7 @@ def render_dynamic_html(
     entity_memories: Dict mapping entity names to lists of memory strings.
     game_master_memories: List of game master memory strings.
     player_scores: Optional dict of player scores to display.
+    summary_sections_html: Optional pre-rendered HTML summary sections.
     title: Title for the HTML page.
 
   Returns:
@@ -655,6 +657,7 @@ def render_dynamic_html(
       entity_memories=entity_memories,
       game_master_memories=game_master_memories,
       player_scores=player_scores,
+      summary_sections_html=summary_sections_html,
       title=title,
   )
 

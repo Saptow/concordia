@@ -100,7 +100,10 @@ def _pair_summary(pair_state: Mapping[str, Any]) -> str:
   )
   round_number = pair_state.get('pair_round_number', '?')
   outcome = pair_state.get('outcome', 'OPEN')
-  return f'{buyer_name} <-> {seller_name} | {outcome} | round {round_number}'
+  return (
+      f'{buyer_name} <-> {seller_name} | {outcome} | '
+      f'Pair Negotiation Week {round_number}'
+  )
 
 
 def _matched_pair_summary(match: Mapping[str, Any]) -> str:
@@ -358,6 +361,7 @@ def render_dynamic_html(
     entity_memories: dict[str, list[str]] | None = None,
     game_master_memories: list[str] | None = None,
     player_scores: dict[str, Any] | None = None,
+    summary_sections_html: list[str] | None = None,
     title: str = 'Simulation Log',
 ) -> str:
   """Render the log into a weekly, single-page HTML view."""
@@ -414,6 +418,8 @@ summary::-webkit-details-marker { display: none; }
         + _json_block(player_scores)
         + '</section>'
     )
+  if summary_sections_html:
+    html_parts.extend(section for section in summary_sections_html if section)
 
   if week_views:
     html_parts.extend(_render_week_view(week_view) for week_view in week_views)
