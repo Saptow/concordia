@@ -4,6 +4,8 @@ from pathlib import Path
 import unittest
 
 from configs import REPO_ROOT, SegmentConfig
+from concordia.prefabs.game_master.negotiation import hdb_initializer_gm
+from concordia.prefabs.game_master.negotiation.components import hdb_listing
 
 
 def _default_manifest_path() -> Path:
@@ -220,6 +222,79 @@ class MarketManifestFeasibilityTest(unittest.TestCase):
       )
 
     self.assertEqual(len(matching), len(self.sellers_by_id))
+
+  def test_manifest_late_seller_registers_when_released(self):
+    buyer_profiles, seller_profiles = hdb_initializer_gm.build_market_profiles(
+        self.bundle,
+        town=SegmentConfig().town,
+    )
+    delayed_seller_ids = [
+        seller_id
+        for seller_id, payload in sorted(
+            seller_profiles.items(),
+            key=lambda item: (
+                int(item[1].get('initialization_order', 0) or 0),
+                item[0],
+            ),
+        )
+        if str(payload.get('initial_market_state', '')).strip() == 'not_yet_listed'
+    ]
+    if len(delayed_seller_ids) < 2:
+      raise unittest.SkipTest(
+          f'Manifest {self.manifest_path} does not contain a sufficiently late '
+          'not_yet_listed seller to exercise delayed registration.'
+      )
+
+    late_seller_id = delayed_seller_ids[-1]
+    player_ids = tuple(list(buyer_profiles) + list(seller_profiles))
+    player_names = tuple(
+        [str(payload['name']) for payload in buyer_profiles.values()]
+        + [str(payload['name']) for payload in seller_profiles.values()]
+    )
+    listing_module = hdb_listing.ListingModule(
+        player_names=player_names,
+        player_ids=player_ids,
+        buyer_profiles=buyer_profiles,
+        seller_profiles=seller_profiles,
+        enabled=True,
+    )
+    portal = listing_module._ensure_portal()
+
+    snapshot = listing_module.get_market_snapshot()
+    self.assertIn(late_seller_id, snapshot['inactive_seller_ids'])
+    self.assertNotIn(late_seller_id, snapshot['active_seller_ids'])
+    self.assertNotIn(late_seller_id, listing_module.get_open_player_ids())
+
+    released = []
+    for week_number in range(2, 2 + len(delayed_seller_ids)):
+      active_open_seller_ids = [
+          seller_id
+          for seller_id in listing_module.get_market_snapshot()['active_seller_ids']
+          if seller_id in seller_profiles and not portal.is_player_closed(seller_id)
+      ]
+      seller_to_close = next(iter(active_open_seller_ids), '')
+      if not seller_to_close:
+        self.fail(
+            f'Unable to create release capacity for late seller {late_seller_id} '
+            f'from manifest {self.manifest_path}.'
+        )
+      portal.closed_sellers.add(seller_to_close)
+      released = listing_module.prepare_weekly_market(week_number=week_number)
+      if late_seller_id in released:
+        break
+
+    self.assertIn(
+        late_seller_id,
+        released,
+        (
+            f'Late manifest seller {late_seller_id} never registered after '
+            f'repeated release attempts from {self.manifest_path}.'
+        ),
+    )
+    final_snapshot = listing_module.get_market_snapshot()
+    self.assertIn(late_seller_id, final_snapshot['active_seller_ids'])
+    self.assertNotIn(late_seller_id, final_snapshot['inactive_seller_ids'])
+    self.assertIn(late_seller_id, listing_module.get_open_player_ids())
 
 
 if __name__ == '__main__':
