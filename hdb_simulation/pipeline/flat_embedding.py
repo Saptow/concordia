@@ -17,6 +17,18 @@ from concordia.hdb_simulation.models.schemas.common import (
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
 
 
+def _clean_amenity_name(value: Any) -> str:
+  if value is None:
+    return ''
+  if isinstance(value, float) and value != value:
+    return ''
+
+  text = str(value).strip()
+  if text.casefold() in {'', 'nan', 'none', 'null', '[]'}:
+    return ''
+  return text
+
+
 def build_listing_summary(
     flat_payload: dict[str, Any],
     *,
@@ -26,24 +38,24 @@ def build_listing_summary(
   amenities = flat_payload.get('amenities', {})
   amenities = amenities if isinstance(amenities, dict) else {}
   mrt_names = [
-      str(name).strip()
+      cleaned
       for name in amenities.get('mrt', {}).get('station_names', [])
-      if str(name).strip()
+      if (cleaned := _clean_amenity_name(name))
   ]
   school_names = [
-      str(name).strip()
+      cleaned
       for name in amenities.get('primary_schools', {}).get('school_names', [])
-      if str(name).strip()
+      if (cleaned := _clean_amenity_name(name))
   ]
   hawker_names = [
-      str(name).strip()
+      cleaned
       for name in amenities.get('hawker_centres', {}).get('hawker_names', [])
-      if str(name).strip()
+      if (cleaned := _clean_amenity_name(name))
   ]
   mall_names = [
-      str(name).strip()
+      cleaned
       for name in amenities.get('malls', {}).get('mall_names', [])
-      if str(name).strip()
+      if (cleaned := _clean_amenity_name(name))
   ]
 
   address = str(flat_payload.get('address', '')).strip() or 'Not shown'
@@ -181,25 +193,25 @@ def build_listing_record(
   amenities = amenities if isinstance(amenities, dict) else {}
   nearby_amenities: list[Amenity] = []
   for name in amenities.get('mrt', {}).get('station_names', []):
-    text = str(name).strip()
+    text = _clean_amenity_name(name)
     if text:
       nearby_amenities.append(
           Amenity(name=text, type=AmenityType.MRT, radius='Within 1km')
       )
   for name in amenities.get('primary_schools', {}).get('school_names', []):
-    text = str(name).strip()
+    text = _clean_amenity_name(name)
     if text:
       nearby_amenities.append(
           Amenity(name=text, type=AmenityType.SCHOOL, radius='Within 2km')
       )
   for name in amenities.get('hawker_centres', {}).get('hawker_names', []):
-    text = str(name).strip()
+    text = _clean_amenity_name(name)
     if text:
       nearby_amenities.append(
           Amenity(name=text, type=AmenityType.HAWKER, radius='Within 1km')
       )
   for name in amenities.get('malls', {}).get('mall_names', []):
-    text = str(name).strip()
+    text = _clean_amenity_name(name)
     if text:
       nearby_amenities.append(
           Amenity(name=text, type=AmenityType.MALL, radius='Within 1km')

@@ -116,6 +116,22 @@ DEFAULT_SELLER_ARCHETYPES = [ # Dummy ones for now until the real data is plugge
     },
 ]
 
+
+def _clean_amenity_name(value: Any) -> str:
+    """Normalize amenity names and drop placeholder/null-like values."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+
+    text = str(value).strip()
+    if text.casefold() in {"", "nan", "none", "null", "[]"}:
+        return ""
+    return text
+
 class SellerMotivationProfile(BaseModel):
     seller_archetype_type: str = ""
     motivation_summary: str = ""
@@ -1055,7 +1071,7 @@ def _build_flat_universe(
             else:
                 mall_items = []
         for item in mall_items:
-            cleaned = str(item).strip()
+            cleaned = _clean_amenity_name(item)
             if cleaned:
                 mall_names.append(cleaned)
 
@@ -1075,16 +1091,16 @@ def _build_flat_universe(
                 mrt_items = []
         for item in mrt_items:
             if isinstance(item, dict):
-                station_name = str(item.get("station_name", "")).strip()
+                station_name = _clean_amenity_name(item.get("station_name", ""))
             else:
-                station_name = str(item).strip()
+                station_name = _clean_amenity_name(item)
             if station_name and station_name not in mrt_names:
                 mrt_names.append(station_name)
 
-        school_text = str(row.pri_school_names_0_2km or "").strip()
+        school_text = _clean_amenity_name(row.pri_school_names_0_2km)
         school_names = [part.strip() for part in school_text.split("|") if part.strip()]
 
-        hawker_text = str(row.hawker_names_0_1km or "").strip()
+        hawker_text = _clean_amenity_name(row.hawker_names_0_1km)
         hawker_names = [part.strip() for part in hawker_text.split("|") if part.strip()]
         remaining_lease_years = round(float(row.remaining_lease) / 12.0, 2)
         observed_price = float(row.resale_price)
@@ -1183,23 +1199,27 @@ def _build_seller_flat(flat: dict[str, Any]) -> dict[str, Any]:
     """Map flat-universe fields into the shared Flat schema used by sellers."""
     nearby_amenities = [
         Amenity(name=name, type=AmenityType.MRT, radius="Within 1km").model_dump()
-        for name in flat["amenities"]["mrt"]["station_names"]
+        for raw_name in flat["amenities"]["mrt"]["station_names"]
+        if (name := _clean_amenity_name(raw_name))
     ]
     nearby_amenities.extend(
         Amenity(
             name=name, type=AmenityType.SCHOOL, radius="Within 2km"
         ).model_dump()
-        for name in flat["amenities"]["primary_schools"]["school_names"]
+        for raw_name in flat["amenities"]["primary_schools"]["school_names"]
+        if (name := _clean_amenity_name(raw_name))
     )
     nearby_amenities.extend(
         Amenity(name=name, type=AmenityType.MALL, radius="Within 1km").model_dump()
-        for name in flat["amenities"]["malls"]["mall_names"]
+        for raw_name in flat["amenities"]["malls"]["mall_names"]
+        if (name := _clean_amenity_name(raw_name))
     )
     nearby_amenities.extend(
         Amenity(
             name=name, type=AmenityType.HAWKER, radius="Within 1km"
         ).model_dump()
-        for name in flat["amenities"]["hawker_centres"]["hawker_names"]
+        for raw_name in flat["amenities"]["hawker_centres"]["hawker_names"]
+        if (name := _clean_amenity_name(raw_name))
     )
 
     return Flat(
