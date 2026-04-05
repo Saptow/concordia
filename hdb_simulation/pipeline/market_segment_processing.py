@@ -44,7 +44,7 @@ DEFAULT_LLM_RETRIES = 3
 MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
-MARKET_QUANTILE_DOMINANCE_GRID = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+MARKET_QUANTILE_DOMINANCE_GRID = (0.2, 0.4, 0.6, 0.8)
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
@@ -1367,13 +1367,13 @@ def _sample_overall_distribution(
     return str(_weighted_choice(subset, value_column, "count", rng))
 
 
-def _build_buyer_budget(
+def _draw_buyer_value_prior(
     buyer: dict[str, Any],
     hedonic_training_flats: list[dict[str, Any]],
     *,
     rng: random.Random,
-) -> dict[str, Any]:
-    """Build a buyer budget using a hedonic value draw capped by financial feasibility."""
+) -> float:
+    """Draw a buyer's private valuation prior from the relevant hedonic market."""
     preference_payload = buyer.get("preferences", {})
     preferred_flat_types: list[str] = []
     if preference_payload.get("preferences"):
@@ -1386,10 +1386,36 @@ def _build_buyer_budget(
         preferred_flat_types=preferred_flat_types,
     )
     anchor_log_price, sigma_log_price = _estimate_hedonic_price(training_flats)
-    buyer_value_draw = float(
-        np.exp(rng.normalvariate(anchor_log_price, sigma_log_price))
+    return float(np.exp(rng.normalvariate(anchor_log_price, sigma_log_price)))
+
+
+def _build_buyer_budget(
+    buyer: dict[str, Any],
+    hedonic_training_flats: list[dict[str, Any]],
+    *,
+    rng: random.Random,
+    reservation_price_prior: float | None = None,
+) -> dict[str, Any]:
+    """Build hard buyer budget bounds from financial feasibility."""
+    preference_payload = buyer.get("preferences", {})
+    preferred_flat_types: list[str] = []
+    if preference_payload.get("preferences"):
+        preferred_flat_types = BuyerPreferenceProfile.model_validate(
+            preference_payload
+        ).values_for("flat_type")
+    training_flats = _select_hedonic_training_flats(
+        hedonic_training_flats,
+        town=buyer["town"],
+        preferred_flat_types=preferred_flat_types,
     )
-    max_price = min(float(buyer["financials"]["effective_ceiling"]), buyer_value_draw)
+    anchor_log_price, sigma_log_price = _estimate_hedonic_price(training_flats)
+    if reservation_price_prior is None:
+        reservation_price_prior = _draw_buyer_value_prior(
+            buyer,
+            hedonic_training_flats,
+            rng=rng,
+        )
+    max_price = float(buyer["financials"]["effective_ceiling"])
     min_price = max(0.0, float(np.exp(anchor_log_price - sigma_log_price)))
     if max_price < min_price:
         min_price = max(0.0, min(max_price, min_price))
@@ -1517,10 +1543,17 @@ def _build_broad_buyers(
             "feasible_flat_ids": [],
             "preferences": {"preferences": []},
         }
+        reservation_price_prior = _draw_buyer_value_prior(
+            buyer_record,
+            hedonic_training_flats,
+            rng=rng,
+        )
+        buyer_record["reservation_price_prior"] = round(reservation_price_prior, 2)
         buyer_record["budget"] = _build_buyer_budget(
             buyer_record,
             hedonic_training_flats,
             rng=rng,
+            reservation_price_prior=reservation_price_prior,
         )
         if not _annotate_buyer_market_feasibility(
             buyer_record,
@@ -1583,10 +1616,17 @@ def _populate_buyer_preferences(
             buyer,
             result,
         ).model_dump()
+        reservation_price_prior = _draw_buyer_value_prior(
+            buyer,
+            hedonic_training_flats,
+            rng=rng,
+        )
+        buyer["reservation_price_prior"] = round(reservation_price_prior, 2)
         buyer["budget"] = _build_buyer_budget(
             buyer,
             hedonic_training_flats,
             rng=rng,
+            reservation_price_prior=reservation_price_prior,
         )
 
 
@@ -1654,7 +1694,7 @@ def _validate_market_quantile_dominance(
     sellers: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
 ) -> tuple[bool, dict[str, Any]]:
-    """Checks strict market-level quantile dominance of buyer ceilings over listing prices."""
+    """Computes market-level quantile-dominance diagnostics for buyer ceilings."""
     listing_prices = np.array(
         [
             float(seller.get("expectations", {}).get("max_price", 0.0))
@@ -1861,9 +1901,6 @@ def _rank_candidate_buyer_ids_for_seller(
         buyer_id = str(buyer.get("buyer_id", "")).strip()
         if not buyer_id:
             continue
-        budget_max = float(buyer.get("budget", {}).get("max_price", 0.0))
-        if budget_max < listing_price:
-            continue
 
         preference_payload = buyer.get("preferences", {})
         preference_profile = (
@@ -1879,11 +1916,16 @@ def _rank_candidate_buyer_ids_for_seller(
         score = 0
         if linked_flat_id and linked_flat_id in feasible_flat_ids:
             score += 10
+        else:
+            continue
         if preference_profile and flat.get("flat_type") in preference_profile.values_for("flat_type"):
             score += 3
         if preference_profile and flat.get("town") in preference_profile.values_for("town"):
             score += 2
-        price_gap = abs(budget_max - listing_price)
+        price_gap = abs(
+            float(buyer.get("financials", {}).get("effective_ceiling", 0.0))
+            - listing_price
+        )
         ranked.append((score, -price_gap, buyer_id))
 
     ranked.sort(reverse=True)
@@ -2067,12 +2109,11 @@ def _build_buyer_pools_with_regeneration(
         )
         if not market_support_ok:
             logging.info(
-                "Rejecting oversampled buyer pool %s/%s because market quantile dominance failed: %s",
+                "Market quantile dominance diagnostic flagged oversampled buyer pool %s/%s: %s",
                 broad_attempt,
                 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
                 market_support_diagnostics,
             )
-            continue
 
         retained_buyers = _cap_retained_buyers(
             sellers,

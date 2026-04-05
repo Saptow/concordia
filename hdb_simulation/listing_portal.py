@@ -294,7 +294,15 @@ class ListingPortal:
     ) -> negotiation_schemas.BuyerMarketBeliefState:
         state = self.private_buyer_market_states.get(buyer.id)
         if state is None:
-            base_reservation_price = float(buyer.budget.max_price)
+            reservation_price_prior = (
+                float(buyer.reservation_price_prior)
+                if buyer.reservation_price_prior is not None
+                else float(buyer.budget.max_price)
+            )
+            base_reservation_price = max(
+                float(buyer.budget.min_price),
+                min(float(buyer.budget.max_price), reservation_price_prior),
+            )
             state = negotiation_schemas.BuyerMarketBeliefState(
                 buyer_id=buyer.id,
                 base_reservation_price=base_reservation_price,

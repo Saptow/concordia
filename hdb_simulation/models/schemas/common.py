@@ -535,6 +535,11 @@ class BaseBuyer(BaseModel):
     # Buyer-specific
     preferences: BuyerPreferenceProfile
     budget: BuyerBudgetRange
+    reservation_price_prior: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description='Initial private reservation-price prior before market feedback.',
+    )
 
 
 
@@ -568,4 +573,3 @@ class NegotiationOutcome(StrEnum):
     SUCCESS = 'SUCCESS'
     CLOSED = 'CLOSED'
     CLOSED_WITHOUT_SUCCESS = 'CLOSED_WITHOUT_SUCCESS'
-
