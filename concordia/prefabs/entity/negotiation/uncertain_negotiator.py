@@ -24,6 +24,7 @@ from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
+from pydantic import BaseModel, Field
 DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
     f'HDB RESALE ETHICAL CONSTRAINTS: \n'
     f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).\n'
@@ -49,6 +50,84 @@ HDB_CONTEXT_ANCHOR = (
     "- ALL pricing and monetary references in SGD.\n"
 )
 ACTION_REASONING_MEMORY_WINDOW = 6
+MIN_ACTION_REASONING_MEMORY_WINDOW = 4
+MAX_ACTION_REASONING_MEMORY_WINDOW = 12
+
+
+class PersonaMemoryWindow(BaseModel):
+    num_memories_to_retrieve: int = Field(
+        ...,
+        ge=MIN_ACTION_REASONING_MEMORY_WINDOW,
+        le=MAX_ACTION_REASONING_MEMORY_WINDOW,
+        description=(
+            'The number of recent memories to retrieve for negotiation '
+            'reasoning, between 4 and 12.'
+        ),
+    )
+
+
+def _clamp_memory_window(value: object) -> int:
+    """Clamp the estimated memory window to the supported range."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = ACTION_REASONING_MEMORY_WINDOW
+    return max(
+        MIN_ACTION_REASONING_MEMORY_WINDOW,
+        min(MAX_ACTION_REASONING_MEMORY_WINDOW, parsed),
+    )
+
+
+def _estimate_action_reasoning_memory_window(
+    *,
+    model: language_model.LanguageModel,
+    agent_name: str,
+    description: str,
+) -> int:
+    """Estimate a persona-specific memory window once at agent initialization."""
+    prompt = (
+        '# Role\n'
+        'You decide how many recent memories a negotiator should review before acting.\n\n'
+        '# Task\n'
+        'Return `num_memories_to_retrieve` as a single integer between 4 and 12.\n'
+        'The choice must be based only on the negotiator persona in the description.\n\n'
+        '# Heuristic\n'
+        '- Careful, reflective, analytical, detail-heavy, strategic, or cautious personas should get longer memory windows.\n'
+        '- Spontaneous, impulsive, present-focused, low-deliberation, or decisive personas should get shorter memory windows.\n'
+        '- Balanced or ambiguous personas should stay near 6.\n\n'
+        '# Few-shot examples\n'
+        'Example 1\n'
+        'Description: A careful planner who double-checks details, thinks through trade-offs, remembers prior conversations, and dislikes making rushed decisions.\n'
+        'Output: {"num_memories_to_retrieve": 10}\n\n'
+        'Example 2\n'
+        'Description: Lives in the moment, reacts quickly, dislikes overthinking, and prefers to decide based on the latest signal rather than long context.\n'
+        'Output: {"num_memories_to_retrieve": 4}\n\n'
+        'Example 3\n'
+        'Description: Generally practical and balanced. Reviews some recent context before acting, but does not dwell too long on the past.\n'
+        'Output: {"num_memories_to_retrieve": 6}\n\n'
+        'Example 4\n'
+        'Description: Highly strategic and methodical, tracks patterns across prior exchanges, and adjusts carefully based on accumulated context.\n'
+        'Output: {"num_memories_to_retrieve": 11}\n\n'
+        '# Rules\n'
+        '- Use only the description below.\n'
+        '- Return JSON only.\n'
+        '- Do not explain your reasoning.\n\n'
+        '# Negotiator\n'
+        f'Name: {agent_name}\n'
+        f'Description: {description or "No description provided."}\n\n'
+        '# Output\n'
+        'Return a JSON object matching the schema exactly.\n'
+    )
+    try:
+        response = model.sample_text(
+            prompt=prompt,
+            json_schema=PersonaMemoryWindow.model_json_schema(),
+            max_tokens=120,
+        )
+        parsed = PersonaMemoryWindow.model_validate_json(response)
+        return _clamp_memory_window(parsed.num_memories_to_retrieve)
+    except Exception:
+        return ACTION_REASONING_MEMORY_WINDOW
 
 
 def _escape_format_braces(text: str) -> str:
@@ -102,6 +181,16 @@ class Entity(prefab_lib.Prefab):
 
         agent_name = self.params.get('name', 'Negotiator')
         description = self.params.get('description', '')
+        action_reasoning_memory_window = _clamp_memory_window(
+            negotiation_config.get(
+                'action_reasoning_memory_window',
+                _estimate_action_reasoning_memory_window(
+                    model=model,
+                    agent_name=agent_name,
+                    description=description,
+                ),
+            )
+        )
         reservation = float(
             negotiation_config.get(
                 'reservation_value',
@@ -165,7 +254,7 @@ class Entity(prefab_lib.Prefab):
                 NegotiationComponentConfig.OBSERVATION_COMPONENT_KEY
             ),
             memory_component_key=agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
-            num_memories_to_retrieve=ACTION_REASONING_MEMORY_WINDOW,
+            num_memories_to_retrieve=action_reasoning_memory_window,
             policy_jsonl_filename=str(
                 negotiation_config.get(
                     'policy_jsonl_filename',
@@ -199,7 +288,7 @@ class Entity(prefab_lib.Prefab):
                 a=negotiation_config.get('a', 3.0),
                 b=negotiation_config.get('b', 5000.0),
                 emit_pre_act_context=False,
-                recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
+                recent_memory_window=action_reasoning_memory_window,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -232,7 +321,7 @@ class Entity(prefab_lib.Prefab):
                     0.9,
                 ),
                 emit_pre_act_context=False,
-                recent_memory_window=ACTION_REASONING_MEMORY_WINDOW,
+                recent_memory_window=action_reasoning_memory_window,
             )
             strategy = hdb_negotiation_strategy.HDBNegotiationStrategy(
                 model=model,
@@ -327,7 +416,7 @@ class Entity(prefab_lib.Prefab):
             components=action_components,
             output_schema=common_schemas.ActionChoiceWithRationale,
             choice_responses=role_action_types,
-            num_memories_to_retrieve=ACTION_REASONING_MEMORY_WINDOW # TODO: make this adaptive based on personality metadata and recency of relevant context, note that this is even number because this is in negotiation pairs
+            num_memories_to_retrieve=action_reasoning_memory_window
         )
         
         # TODO: look into more refined strategy integration on later stage
