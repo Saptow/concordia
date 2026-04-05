@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 
 from configs import REPO_ROOT, SegmentConfig
+from concordia.hdb_simulation import listing_portal as listing_portal_lib
 from concordia.prefabs.game_master.negotiation import hdb_initializer_gm
 from concordia.prefabs.game_master.negotiation.components import hdb_listing
 
@@ -160,6 +161,13 @@ def _maximum_bipartite_matching(
   }
 
 
+class _ManifestSnapshotStubRetriever:
+
+  def get_listing_record(self, seller_id: str):
+    del seller_id
+    return None
+
+
 class MarketManifestFeasibilityTest(unittest.TestCase):
 
   @classmethod
@@ -256,8 +264,12 @@ class MarketManifestFeasibilityTest(unittest.TestCase):
         player_ids=player_ids,
         buyer_profiles=buyer_profiles,
         seller_profiles=seller_profiles,
-        enabled=True,
+        enabled=False,
     )
+    listing_module._portal = listing_portal_lib.ListingPortal(
+        retriever=_ManifestSnapshotStubRetriever(),
+    )
+    listing_module.set_enabled(True)
     portal = listing_module._ensure_portal()
 
     snapshot = listing_module.get_market_snapshot()
