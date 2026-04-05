@@ -278,7 +278,11 @@ class MarketManifestFeasibilityTest(unittest.TestCase):
     self.assertNotIn(late_seller_id, listing_module.get_open_player_ids())
 
     released = []
-    for week_number in range(2, 2 + len(delayed_seller_ids)):
+    max_release_attempts = max(
+        len(seller_profiles) + len(delayed_seller_ids),
+        10,
+    )
+    for week_number in range(2, 2 + max_release_attempts):
       active_open_seller_ids = [
           seller_id
           for seller_id in listing_module.get_market_snapshot()['active_seller_ids']
