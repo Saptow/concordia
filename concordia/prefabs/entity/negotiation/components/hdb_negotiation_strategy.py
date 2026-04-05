@@ -21,6 +21,10 @@ from concordia.prefabs.entity.negotiation.config import StrategyConfig
 AVG_NEGOTIATION_LENGTH = 12  # average number of rounds in HDB resale negotiation (in weeks)
 MIN_ROUNDS = 8
 MAX_ROUNDS = 15
+# Calibrated threshold: literature supports a monotonic link between high time
+# pressure and impasse/exit risk, but not a specific numeric cutoff. We use 0.8
+# so only the upper tail of "high urgency" triggers WALK_AWAY directly.
+BUYER_WALK_AWAY_URGENCY_THRESHOLD = 0.8
 SELF_ACTION_TAG = '[self_action]'
 
 class UrgencyLevel(BaseModel):
@@ -508,7 +512,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         
         # Compute negotiation state
         numeric_fields = self._compute_deterministic_numeric_fields()
-        expected_horizon = AVG_NEGOTIATION_LENGTH
+        expected_horizon = self._max_rounds_from_urgency(self._urgency_level)
         rounds_elapsed = self._state.rounds_elapsed
         rounds_left = max(0, expected_horizon - rounds_elapsed)
         has_active_offer = self._coerce_bool(numeric_fields.get('HasActiveOffer'))
@@ -548,9 +552,11 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 f"- {information_focus}\n"
             )
             if self.should_walk_away():
-                urgency_rule = "[IMPORTANT] Patience horizon **exceeded**. Choose WALK_AWAY."
-
-            if rounds_left <= 1:
+                urgency_rule = (
+                    "[IMPORTANT] Your urgency level is now high enough that "
+                    "you should prefer WALK_AWAY instead of extending the negotiation."
+                )
+            elif rounds_left <= 1:
                 urgency_rule = (
                     "[IMPORTANT] If an offer is active, decide now with ACCEPT_OFFER or REJECT_OFFER. Do not MAKE_COUNTEROFFER or ask more questions.\n"
                 )
@@ -634,17 +640,13 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         
     def should_walk_away(self) -> bool:
         """
-        Walk away if we've exceeded our patience horizon, which is determined by:
-        - AVG_NEGOTIATION_LENGTH (baseline)
-        - urgency level (0..1), higher => fewer tolerated rounds
+        Buyers walk away based only on urgency.
         """
         if self._role != RoleType.BUYER:
             return False
 
-        horizon = self._max_rounds_from_urgency(self._urgency_level)
-
-        # Walk away when we've hit or exceeded the horizon
-        return self._state.rounds_elapsed >= horizon
+        bounded_urgency = max(0.0, min(1.0, float(self._urgency_level)))
+        return bounded_urgency >= BUYER_WALK_AWAY_URGENCY_THRESHOLD
 
     # TODO: implement once strategy evolution is being done.
     def pre_observe(self, observation: str) -> str:

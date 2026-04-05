@@ -61,6 +61,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._canonical_entities: tuple[entity_component.EntityWithComponents, ...] = ()
     self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
     self._pair_start_weeks: dict[str, int] = {}
+    self._conversation_replays: dict[str, dict[str, Any]] = {}
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=(),
         negotiation_pairs=None,
@@ -675,6 +676,119 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         })
     return records
 
+  @staticmethod
+  def _extract_public_action_from_event(event: str) -> dict[str, Any] | None:
+    """Parses the action payload while stripping private reasoning fields."""
+    _, sep, payload = event.partition(':')
+    if not sep:
+      return None
+    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
+        payload
+    )
+    if not payload_json:
+      return None
+    try:
+      action = json.loads(payload_json)
+    except json.JSONDecodeError:
+      return None
+    if not isinstance(action, dict):
+      return None
+    action.pop('internal_reasoning', None)
+    action.pop('decision_rationale', None)
+    return action
+
+  def _ensure_pair_replay_record(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+  ) -> dict[str, Any]:
+    """Creates the replay record for a pair if it does not exist yet."""
+    record = self._conversation_replays.get(pair_key)
+    if record is None:
+      record = {
+          'pair_key': pair_key,
+          'buyer_id': buyer_id,
+          'buyer_name': self._get_player_name(buyer_id),
+          'seller_id': seller_id,
+          'seller_name': self._get_player_name(seller_id),
+          'start_week': int(self._pair_start_weeks.get(pair_key, week_number)),
+          'end_week': None,
+          'closed': False,
+          'outcome': 'OPEN',
+          'events': [],
+      }
+      self._conversation_replays[pair_key] = record
+    return record
+
+  def _append_pair_replay_events(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+      pair_round_number: int,
+      pair_events: Sequence[Mapping[str, str]],
+  ) -> None:
+    """Appends sanitized public events for frontend replay."""
+    if not pair_events:
+      return
+    record = self._ensure_pair_replay_record(
+        pair_key=pair_key,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
+        week_number=week_number,
+    )
+    replay_events = record.setdefault('events', [])
+    for pair_event in pair_events:
+      actor_id = str(pair_event.get('actor_id', ''))
+      raw_event = str(pair_event.get('event', ''))
+      public_event = self._sanitize_event_for_counterparty(raw_event)
+      replay_events.append({
+          'sequence': len(replay_events) + 1,
+          'week_number': int(week_number),
+          'pair_round_number': int(pair_round_number),
+          'actor_id': actor_id,
+          'actor_name': self._get_player_name(actor_id),
+          'actor_role': (
+              negotiation_schemas.RoleType.BUYER.value
+              if actor_id == buyer_id
+              else negotiation_schemas.RoleType.SELLER.value
+          ),
+          'event': public_event,
+          'action': self._extract_public_action_from_event(public_event),
+      })
+
+  def _update_pair_replay_outcome(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+  ) -> None:
+    """Keeps replay metadata aligned with the latest pair status."""
+    record = self._ensure_pair_replay_record(
+        pair_key=pair_key,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
+        week_number=week_number,
+    )
+    is_closed = pair_key in self._offer_tracker._closed_pairs
+    record['closed'] = is_closed
+    record['outcome'] = (
+        self._offer_tracker._closed_pair_outcomes.get(
+            pair_key,
+            negotiation_schemas.NegotiationOutcome.CLOSED,
+        ).value
+        if is_closed
+        else 'OPEN'
+    )
+    record['end_week'] = int(week_number) if is_closed else None
+
   # Pair execution
   def _execute_player_turn(
       self,
@@ -889,10 +1003,27 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             seller_id,
             outcome=negotiation_schemas.NegotiationOutcome.CLOSED,
         )
+        self._update_pair_replay_outcome(
+            pair_key=pair_key,
+            buyer_id=buyer_id,
+            seller_id=seller_id,
+            week_number=week_number,
+        )
         continue
       pair_events = pair_result.get('events', [])
       if not pair_events:
         continue
+      self._append_pair_replay_events(
+          pair_key=pair_key,
+          buyer_id=buyer_id,
+          seller_id=seller_id,
+          week_number=week_number,
+          pair_round_number=self._scheduler.get_pair_round_number(
+              buyer_id,
+              seller_id,
+          ),
+          pair_events=pair_events,
+      )
       number_of_pairs_negotiated += 1
       negotiated_pairs.append((buyer_id, seller_id))
       for pair_event in pair_events:
@@ -910,6 +1041,12 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             week_number=week_number,
         )
         events.append(event)
+      self._update_pair_replay_outcome(
+          pair_key=pair_key,
+          buyer_id=buyer_id,
+          seller_id=seller_id,
+          week_number=week_number,
+      )
 
     self._scheduler.advance_week(negotiated_pairs)
 
@@ -962,6 +1099,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'scheduler_state': self._scheduler.get_state(),
         'offer_state': self._offer_tracker.get_state(),
         'pair_start_weeks': dict(self._pair_start_weeks),
+        'conversation_replays': {
+            key: dict(value, events=list(value.get('events', ())))
+            for key, value in self._conversation_replays.items()
+        },
         'action_prompt': self._action_prompt,
         'make_observation_component_key': self._make_observation_component_key,
         'enabled': int(self._enabled),
@@ -972,6 +1113,14 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'action_prompt': self._action_prompt,
         'enabled': int(self._enabled),
     }
+
+  def get_conversation_replay_records(self) -> list[dict[str, Any]]:
+    """Returns sanitized per-pair transcripts for external replay consumers."""
+    records: list[dict[str, Any]] = []
+    for pair_key in sorted(self._conversation_replays):
+      value = self._conversation_replays[pair_key]
+      records.append(dict(value, events=list(value.get('events', ()))))
+    return records
 
   def set_state(self, state: entity_component.ComponentState) -> None:
     """Restores module state and re-binds canonical entities for tracked pairs."""
@@ -997,6 +1146,18 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           str(key): int(value)
           for key, value in state['pair_start_weeks'].items()
       }
+    if 'conversation_replays' in state:
+      restored_replays: dict[str, dict[str, Any]] = {}
+      for key, value in state['conversation_replays'].items():
+        if not isinstance(value, Mapping):
+          continue
+        restored_replays[str(key)] = dict(
+            value,
+            events=list(value.get('events', ())),
+        )
+      self._conversation_replays = restored_replays
+    else:
+      self._conversation_replays = {}
     if 'action_prompt' in state:
       self._action_prompt = str(state['action_prompt'])
     if 'make_observation_component_key' in state:

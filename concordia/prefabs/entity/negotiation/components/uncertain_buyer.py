@@ -224,11 +224,12 @@ class UncertainBuyer(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> float:
-        listing_record = listing_payload.listing_record
         buyer_state = listing_payload.buyer_state
         observation_count = len(buyer_state.latest_search_results)
         negotiation_count = len(buyer_state.negotiation_history)
-        if str(buyer_state.latest_market_feedback).strip():
+        if self._has_substantive_market_feedback(
+            buyer_state.latest_market_feedback
+        ):
             observation_count += 1
 
         prompt = (
@@ -282,12 +283,56 @@ class UncertainBuyer(
             return self._base_own_confidence
         return max(0.0, min(1.0, float(estimate.own_confidence)))
 
+    @staticmethod
+    def _has_substantive_market_feedback(feedback: str) -> bool:
+        normalized = ' '.join(str(feedback).split()).strip().casefold()
+        return bool(normalized and normalized != 'no market feedback yet.')
+
+    @staticmethod
+    def _format_failed_negotiation_history(
+        buyer_state: negotiation_schemas.ListingBuyerState,
+        *,
+        limit: int = 3,
+    ) -> str:
+        history = list(buyer_state.negotiation_history)
+        if not history:
+            return '- None'
+
+        lines: list[str] = []
+        for record in history[-max(1, int(limit)):]:
+            offer_count = len(record.offer_history)
+            if record.offer_history:
+                first_offer = min(
+                    int(offer.offer_price) for offer in record.offer_history
+                )
+                last_offer = int(record.offer_history[-1].offer_price)
+                offer_summary = (
+                    f'offer_count={offer_count}, '
+                    f'first_offer={first_offer}, '
+                    f'last_offer={last_offer}'
+                )
+            else:
+                offer_summary = 'offer_count=0'
+            end_week = (
+                str(record.end_week)
+                if record.end_week is not None
+                else 'ongoing/unknown'
+            )
+            lines.append(
+                f'- seller_id={record.seller_id}, start_week={record.start_week}, '
+                f'end_week={end_week}, {offer_summary}'
+            )
+        return '\n'.join(lines)
+
     def _estimate_counterpart_confidence(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> float:
         listing_record = listing_payload.listing_record
         buyer_state = listing_payload.buyer_state
+        failed_history_summary = self._format_failed_negotiation_history(
+            buyer_state
+        )
 
         prompt = (
             "# Role\n"
@@ -301,7 +346,8 @@ class UncertainBuyer(
             "## Buyer Preference Prior\n"
             f"{buyer_state.preference_prior.model_dump(mode='json')}\n\n"
             "## Failed Negotiation Snapshot\n"
-            f"- failed_negotiation_count: {len(buyer_state.negotiation_history)}\n\n"
+            f"- failed_negotiation_count: {len(buyer_state.negotiation_history)}\n"
+            f"{failed_history_summary}\n\n"
             "## Flat Description\n"
             f"{listing_record.model_dump(mode='json')}\n\n"
             "# Rubric\n"
@@ -379,7 +425,7 @@ class UncertainBuyer(
             confidence=max(0.0, min(1.0, own_confidence)),
             # Fresh pair-local belief rebuild for this matched flat.
             evidence_count=0,
-            last_updated=listing_prior.last_updated,
+            last_updated=None,
         )
 
     def _build_observed_seller_signal(
@@ -393,7 +439,9 @@ class UncertainBuyer(
             default=float(listing_prior.mean),
         )
         observation_count = len(buyer_state.latest_search_results)
-        if str(buyer_state.latest_market_feedback).strip():
+        if self._has_substantive_market_feedback(
+            buyer_state.latest_market_feedback
+        ):
             observation_count += 1
         observed_std = max(
             1.0,
@@ -409,7 +457,7 @@ class UncertainBuyer(
             std=observed_std,
             confidence=max(0.0, min(1.0, float(listing_prior.confidence))),
             evidence_count=observation_count,
-            last_updated=listing_prior.last_updated,
+            last_updated=None,
         )
 
     def _build_belief_summary_for_strategy(self) -> str:

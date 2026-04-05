@@ -203,7 +203,7 @@ class UncertainSeller(
             confidence=max(0.0, min(1.0, own_confidence)),
             # Fresh pair-local belief rebuild for this matched buyer.
             evidence_count=0,
-            last_updated=seller_distribution.last_updated,
+            last_updated=None,
         )
         self._beliefs['counterpart_reservation'] = (
             uncertain_helper.build_counterpart_reservation_prior(
@@ -347,7 +347,7 @@ class UncertainSeller(
                 min(1.0, float(self._beliefs['own_reservation'].confidence)),
             ),
             evidence_count=request_count,
-            last_updated=self._beliefs['own_reservation'].last_updated,
+            last_updated=None,
         )
 
     def _build_belief_summary_for_strategy(self) -> str:

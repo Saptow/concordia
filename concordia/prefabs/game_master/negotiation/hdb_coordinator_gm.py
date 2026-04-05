@@ -120,7 +120,9 @@ class GameMaster(prefab_lib.Prefab):
         action_prompt=str(
             negotiation_params.get('action_prompt', 'What should {name} do next?')
         ),
-        max_rounds=int(negotiation_params.get('max_rounds', 0) or 0),
+        # The main HDB workflow does not use a scheduler-level negotiation cap.
+        # Pairs should exit through explicit outcomes, especially buyer WALK_AWAY.
+        max_rounds=0,
         enabled=bool(negotiation_params.get('enabled', True)),
         make_observation_component_key=make_observation_key,
     )

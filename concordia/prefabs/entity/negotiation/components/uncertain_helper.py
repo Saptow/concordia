@@ -164,7 +164,7 @@ def build_counterpart_reservation_prior(
         # evidence even if the listing-stage source signal already aggregated
         # earlier market observations.
         evidence_count=1,
-        last_updated=source_distribution.last_updated,
+        last_updated=None,
     )
 
 
