@@ -10,11 +10,7 @@ from concordia.hdb_simulation.models.schemas import negotiation as negotiation_s
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
-from pydantic import BaseModel, Field, ValidationError
-
-class InitialSellerPairingPriors(BaseModel):
-    """Initial seller-side priors to set once a real buyer/listing pair forms."""
-    counterpart_confidence: float = Field(ge=0.0, le=1.0)
+from pydantic import ValidationError
 
 class UncertainSeller(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
@@ -60,6 +56,10 @@ class UncertainSeller(
         self._emit_pre_act_context = emit_pre_act_context
         self._memory_component_key = memory_component_key
         self._recent_memory_window = max(1, int(recent_memory_window))
+        self._base_own_confidence = max(0.0, min(1.0, float(own_confidence)))
+        self._base_counterpart_confidence = max(
+            0.0, min(1.0, float(counterpart_confidence))
+        )
         self._last_observation_hash: int | None = None
         self._debug_trace: List[str] = []
 
@@ -172,8 +172,14 @@ class UncertainSeller(
     ) -> None:
         seller_state = listing_payload.seller_state
         negotiation_count = max(0, len(seller_state.negotiation_history))
+        # Each new listing-to-negotiation handoff starts a fresh pair, so we
+        # clear pair-local uncertainty artifacts instead of carrying them over.
+        self._issue_bank = []
+        self._last_observation_hash = None
+        self._debug_trace = []
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
-        own_reservation = self._beliefs['own_reservation'].mean
+        seller_distribution = seller_state.effective_reservation
+        own_reservation = seller_distribution.mean
         listing_price = uncertain_helper.coerce_positive_float(
             listing_payload.listing_record.listing_price
         )
@@ -182,12 +188,22 @@ class UncertainSeller(
                 'Own reservation equals listing price; seller expectation spread is absent.'
             )
         priors = self._calibrate_initial_pairing_priors(listing_payload)
-        counterpart_confidence = float(self._beliefs['counterpart_reservation'].confidence)
-        if priors is not None:
-            counterpart_confidence = float(priors.counterpart_confidence)
-        counterpart_confidence = uncertain_helper.adjust_confidence_for_negotiation_count(
-            counterpart_confidence,
-            negotiation_count,
+        # Seller own-confidence is reset to a fixed baseline each new pair,
+        # while counterpart confidence is re-estimated from the new handoff.
+        own_confidence = 1.0
+        counterpart_confidence = (
+            float(priors.counterpart_confidence)
+            if priors is not None
+            else self._base_counterpart_confidence
+        )
+        self._beliefs['own_reservation'] = uncertain_helper.NormalDistribution(
+            name='Your Own Reservation Value',
+            mean=max(0.0, float(seller_distribution.mean)),
+            std=max(0.0, float(seller_distribution.std)),
+            confidence=max(0.0, min(1.0, own_confidence)),
+            # Fresh pair-local belief rebuild for this matched buyer.
+            evidence_count=0,
+            last_updated=seller_distribution.last_updated,
         )
         self._beliefs['counterpart_reservation'] = (
             uncertain_helper.build_counterpart_reservation_prior(
@@ -244,15 +260,15 @@ class UncertainSeller(
     def _calibrate_initial_pairing_priors(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> Optional[InitialSellerPairingPriors]:
+    ) -> Optional[negotiation_schemas.InitialSellerPairingPriors]:
         negotiation_count = len(listing_payload.seller_state.negotiation_history)
         prompt = (
             "# Role\n"
             "You are calibrating initial uncertainty priors for a seller who has "
             "just been paired to a buyer for an HDB resale negotiation.\n\n"
             "# Task\n"
-            "Estimate counterpart_confidence between 0 and 1: how confident the "
-            "seller is in their initial estimate of the buyer's reservation value.\n\n"
+            "Estimate counterpart_confidence between 0 and 1.\n"
+            "This reflects how confident the seller is in their initial estimate of the buyer's reservation value, based on how informative versus ambiguous the flat listing is.\n\n"
             "# Input\n"
             "## Seller Description / Persona\n"
             f"{self._agent_description}\n\n"
@@ -261,41 +277,43 @@ class UncertainSeller(
             "## Seller State\n"
             f"{listing_payload.seller_state.model_dump(mode='json')}\n\n"
             "## Seller Experience\n"
-            f"- prior_negotiation_count: {negotiation_count}\n\n"
+            f"- failed_negotiation_count: {negotiation_count}\n\n"
             "# Rubric\n"
-            "- 0.20-0.40: seller persona seems unsure, reactive, or inexperienced in reading buyers.\n"
-            "- 0.45-0.65: seller persona seems somewhat informed but still uncertain about buyer limits.\n"
-            "- 0.70-0.90: seller persona seems experienced, assertive, market-aware, or confident in reading counterpart signals.\n\n"
+            "- 0.20-0.40: listing details are sparse or ambiguous, giving a weak basis for inferring buyer willingness.\n"
+            "- 0.45-0.65: listing details are partially informative but mixed.\n"
+            "- 0.70-0.90: listing details are specific, coherent, and low-ambiguity.\n\n"
             "# Few-Shot Examples\n"
             "Example 1:\n"
-            "- Seller persona: seasoned, pragmatic, knows the area well, comfortable pricing strategically.\n"
-            "- Interpretation: likely more confident in estimating what buyers can pay.\n"
+            "- Listing description: clear and specific.\n"
             '- Output: {"counterpart_confidence": 0.78}\n\n'
             "Example 2:\n"
-            "- Seller persona: emotionally attached, conflicted about selling, not clearly market-savvy.\n"
-            "- Interpretation: likely less confident in estimating buyer reservation value.\n"
+            "- Listing description: partial and ambiguous.\n"
             '- Output: {"counterpart_confidence": 0.36}\n\n'
             "# Rules\n"
             "- Return JSON only.\n"
             "- Keep the value within [0, 1].\n"
-            "- Base the estimate primarily on the seller persona and how many negotiations they have already gone through.\n"
-            "- Higher values should reflect personas that seem experienced, assertive, "
-            "or market-aware.\n"
+            "- Base the estimate primarily on how informative versus ambiguous the flat listing is.\n"
             "- Use the examples as anchors, not as fixed templates.\n"
         )
 
         try:
             response = self._model.sample_text(
                 prompt,
-                json_schema=InitialSellerPairingPriors.model_json_schema(),
+                json_schema=(
+                    negotiation_schemas.InitialSellerPairingPriors
+                    .model_json_schema()
+                ),
                 max_tokens=120,
             )
-            priors = InitialSellerPairingPriors.model_validate_json(response)
+            priors = (
+                negotiation_schemas.InitialSellerPairingPriors
+                .model_validate_json(response)
+            )
         except ValidationError:
             return None
         except Exception:
             return None
-        return InitialSellerPairingPriors(
+        return negotiation_schemas.InitialSellerPairingPriors(
             counterpart_confidence=max(
                 0.0,
                 min(1.0, priors.counterpart_confidence),

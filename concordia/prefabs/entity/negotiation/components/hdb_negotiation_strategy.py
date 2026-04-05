@@ -596,8 +596,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
     def post_act(self, action_attempt: str) -> str:
         """Update strategy state after each action."""
-        # Simple parsing to update rounds elapsed
-        self._state.rounds_elapsed += 1
         action_text = self._normalize_self_action_payload(action_attempt)
         if action_text:
             try:
@@ -611,6 +609,10 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                         f'[{self._agent_name}] Failed to persist self action to memory.'
                     )
         return ""
+
+    def advance_pair_round(self) -> None:
+        """Advance elapsed negotiation time once per completed pair-week."""
+        self._state.rounds_elapsed += 1
     
     def _max_rounds_from_urgency(self, urgency: float) -> int:
         """

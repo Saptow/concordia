@@ -160,7 +160,10 @@ def build_counterpart_reservation_prior(
         a=alpha,
         b=beta,
         confidence=max(0.0, min(1.0, float(confidence))),
-        evidence_count=int(source_distribution.evidence_count),
+        # Fresh pair-level priors should start with zero direct negotiation
+        # evidence even if the listing-stage source signal already aggregated
+        # earlier market observations.
+        evidence_count=1,
         last_updated=source_distribution.last_updated,
     )
 

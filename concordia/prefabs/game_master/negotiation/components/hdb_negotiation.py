@@ -641,6 +641,19 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return
     entity.observe(self._sanitize_event_for_counterparty(event))
 
+  def _advance_pair_round_for_entity(self, player_id: str) -> None:
+    """Advance pair-local elapsed time once for the entity after a full week."""
+    entity = self._entities_by_id.get(player_id)
+    if entity is None:
+      return
+    try:
+      strategy = entity.get_component('NegotiationStrategy')
+    except Exception:  # pylint: disable=broad-exception-caught
+      return
+    advance_pair_round = getattr(strategy, 'advance_pair_round', None)
+    if callable(advance_pair_round):
+      advance_pair_round()
+
   def _closed_pair_records(
       self,
       pair_keys: Sequence[str],
@@ -804,6 +817,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       if seller_event is not None:
         pair_events.append({'actor_id': seller_id, 'event': seller_event})
         self._observe_event(buyer_id, seller_event)
+
+    if pair_events:
+      self._advance_pair_round_for_entity(buyer_id)
+      self._advance_pair_round_for_entity(seller_id)
 
     return {
         'buyer_id': buyer_id,

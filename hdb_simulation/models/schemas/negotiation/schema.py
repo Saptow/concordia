@@ -164,9 +164,33 @@ class UpdateOpposingBeliefInfo(BaseModel):
     trust_info: Optional[UpdateOpposingBeliefTrustMetadata] = None
 
 
+class PersonaMemoryWindow(BaseModel):
+    """Structured LLM output for persona-conditioned memory retrieval size."""
+
+    num_memories_to_retrieve: int = Field(ge=4, le=12)
+
+
+class BuyerOwnConfidenceEstimate(BaseModel):
+    """Structured LLM output for buyer self-confidence at pair initialization."""
+
+    own_confidence: float = Field(ge=0.0, le=1.0)
+
+
+class BuyerCounterpartConfidenceEstimate(BaseModel):
+    """Structured LLM output for buyer counterpart-confidence at pair initialization."""
+
+    counterpart_confidence: float = Field(ge=0.0, le=1.0)
+
+
 class InitialBuyerPairingPriors(BaseModel):
     """Initial belief priors to set once a buyer is paired to a real listing."""
     own_confidence: float = Field(ge=0.0, le=1.0)
+    counterpart_confidence: float = Field(ge=0.0, le=1.0)
+
+
+class InitialSellerPairingPriors(BaseModel):
+    """Initial seller-side priors to set once a real buyer/listing pair forms."""
+
     counterpart_confidence: float = Field(ge=0.0, le=1.0)
 
 

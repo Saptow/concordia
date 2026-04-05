@@ -24,7 +24,7 @@ from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
-from pydantic import BaseModel, Field
+
 DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
     f'HDB RESALE ETHICAL CONSTRAINTS: \n'
     f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).\n'
@@ -52,18 +52,6 @@ HDB_CONTEXT_ANCHOR = (
 ACTION_REASONING_MEMORY_WINDOW = 6
 MIN_ACTION_REASONING_MEMORY_WINDOW = 4
 MAX_ACTION_REASONING_MEMORY_WINDOW = 12
-
-
-class PersonaMemoryWindow(BaseModel):
-    num_memories_to_retrieve: int = Field(
-        ...,
-        ge=MIN_ACTION_REASONING_MEMORY_WINDOW,
-        le=MAX_ACTION_REASONING_MEMORY_WINDOW,
-        description=(
-            'The number of recent memories to retrieve for negotiation '
-            'reasoning, between 4 and 12.'
-        ),
-    )
 
 
 def _clamp_memory_window(value: object) -> int:
@@ -121,10 +109,12 @@ def _estimate_action_reasoning_memory_window(
     try:
         response = model.sample_text(
             prompt=prompt,
-            json_schema=PersonaMemoryWindow.model_json_schema(),
+            json_schema=negotiation_schemas.PersonaMemoryWindow.model_json_schema(),
             max_tokens=120,
         )
-        parsed = PersonaMemoryWindow.model_validate_json(response)
+        parsed = negotiation_schemas.PersonaMemoryWindow.model_validate_json(
+            response
+        )
         return _clamp_memory_window(parsed.num_memories_to_retrieve)
     except Exception:
         return ACTION_REASONING_MEMORY_WINDOW
