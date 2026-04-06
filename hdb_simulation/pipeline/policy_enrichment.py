@@ -10,11 +10,16 @@ from bs4 import BeautifulSoup
 from PIL import Image
 from pydantic import BaseModel, Field
 from vllm import SamplingParams
+import yaml
 
 from concordia.concordia.contrib.language_models.vllm.vllm_model import (
     VLLMLanguageModel,
 )
+from concordia.hdb_simulation.models.schemas.policy.schema import (
+    PolicyAnnouncementConfig,
+)
 from concordia.hdb_simulation.models.schemas.policy.schema import PolicyPage
+from concordia.hdb_simulation.models.schemas.policy.schema import PolicyStateEntry
 from concordia.hdb_simulation.models.schemas.policy.schema import PolicyType
 
 
@@ -48,6 +53,10 @@ class ClassificationAuditRecord(BaseModel):
     reasoning_steps: list[str] = Field(default_factory=list)
     text_characters: int = 0
     error: str | None = None
+
+
+class PolicySourceSelection(BaseModel):
+    sources: list[str] = Field(default_factory=list)
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,6 +103,37 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_PDF_MAX_PAGES,
         help="Maximum PDF pages to extract. Use 0 or a negative value to extract all pages.",
+    )
+    parser.add_argument(
+        "--fill-policy-yaml-sources",
+        action="store_true",
+        help="Populate `sources` in the policy YAML from summarized policy JSONLs.",
+    )
+    parser.add_argument(
+        "--policy-yaml-path",
+        type=Path,
+        default=REPO_ROOT / "policy_2023.yaml",
+        help="Policy YAML to update when --fill-policy-yaml-sources is used.",
+    )
+    parser.add_argument(
+        "--initial-state-summary-jsonl-path",
+        action="append",
+        dest="initial_state_summary_jsonl_paths",
+        default=[],
+        help="Summarized policy JSONL(s) used only for `initial_state` source filling. Can be repeated.",
+    )
+    parser.add_argument(
+        "--policy-injection-summary-jsonl-path",
+        action="append",
+        dest="policy_injection_summary_jsonl_paths",
+        default=[],
+        help="Summarized policy JSONL(s) used only for scheduled policy injection source filling. Can be repeated.",
+    )
+    parser.add_argument(
+        "--policy-yaml-output-path",
+        type=Path,
+        default=None,
+        help="Optional output YAML path for the filled policy YAML.",
     )
     return parser.parse_args()
 
@@ -714,6 +754,181 @@ def load_policy_pages(input_path: Path) -> list[PolicyPage]:
     return pages
 
 
+def dump_yaml(payload: dict[str, Any], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        yaml.safe_dump(
+            payload,
+            handle,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+
+
+def normalize_markdown_path(path: str) -> str:
+    return str(path).strip().replace("\\", "/")
+
+
+def normalize_policy_type(policy_type: str) -> str:
+    return str(policy_type).strip()
+
+
+def build_policy_source_selection_prompt(
+    *,
+    policy: PolicyStateEntry,
+    candidate_pages: list[PolicyPage],
+) -> str:
+    rendered_candidates = [
+        {
+            "path": normalize_markdown_path(page.path),
+            "summary": str(page.summary or "").strip(),
+            "tags": [tag.value if hasattr(tag, "value") else str(tag) for tag in page.tags],
+        }
+        for page in candidate_pages
+    ]
+    return (
+        "You are matching a simulation policy entry to the exact summarized "
+        "markdown policy documents that ground it.\n"
+        "Return ONLY valid JSON with this schema:\n"
+        '{"sources":["path/to/file.extracted.md"]}\n'
+        "Rules:\n"
+        "- Return only exact `path` values from the candidate list.\n"
+        "- Select every candidate that materially supports the policy text.\n"
+        "- If none match, return an empty list.\n"
+        "- Do not invent or paraphrase paths.\n\n"
+        "Policy entry:\n"
+        f"{json.dumps(policy.model_dump(mode='json'), ensure_ascii=False, indent=2)}\n\n"
+        "Candidate summarized markdown pages:\n"
+        f"{json.dumps(rendered_candidates, ensure_ascii=False, indent=2)}\n"
+    )
+
+
+def select_policy_sources(
+    *,
+    model: VLLMLanguageModel,
+    policy: PolicyStateEntry,
+    candidate_pages: list[PolicyPage],
+) -> list[str]:
+    if not candidate_pages:
+        return []
+    selection = call_model_for_json(
+        model,
+        build_policy_source_selection_prompt(
+            policy=policy,
+            candidate_pages=candidate_pages,
+        ),
+        PolicySourceSelection,
+        max_tokens=900,
+    )
+    valid_paths = {
+        normalize_markdown_path(page.path)
+        for page in candidate_pages
+    }
+    selected_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for path in selection.sources:
+        normalized_path = normalize_markdown_path(path)
+        if normalized_path not in valid_paths or normalized_path in seen_paths:
+            continue
+        seen_paths.add(normalized_path)
+        selected_paths.append(normalized_path)
+    return selected_paths
+
+
+def pages_for_policy_type(
+    *,
+    pages: list[PolicyPage],
+    policy_type: str,
+) -> list[PolicyPage]:
+    normalized_type = normalize_policy_type(policy_type)
+    matched_pages: list[PolicyPage] = []
+    for page in pages:
+        page_tags = [
+            tag.value if hasattr(tag, "value") else str(tag)
+            for tag in page.tags
+        ]
+        if normalized_type in page_tags:
+            matched_pages.append(page)
+    return matched_pages
+
+
+def fill_policy_yaml_sources(
+    *,
+    model: VLLMLanguageModel,
+    policy_yaml_path: Path,
+    initial_state_summary_jsonl_paths: list[Path],
+    policy_injection_summary_jsonl_paths: list[Path],
+    output_path: Path,
+) -> None:
+    initial_state_pages: list[PolicyPage] = []
+    for summary_path in initial_state_summary_jsonl_paths:
+        initial_state_pages.extend(load_policy_pages(summary_path))
+
+    policy_injection_pages: list[PolicyPage] = []
+    for summary_path in policy_injection_summary_jsonl_paths:
+        policy_injection_pages.extend(load_policy_pages(summary_path))
+
+    raw_payload = yaml.safe_load(policy_yaml_path.read_text(encoding="utf-8"))
+    normalized_payload = PolicyAnnouncementConfig.model_validate(raw_payload)
+
+    filled_initial_state: list[PolicyStateEntry] = []
+    for policy in normalized_payload.initial_state:
+        filled_initial_state.append(
+            PolicyStateEntry(
+                policy_type=policy.policy_type,
+                policy_text=policy.policy_text,
+                sources=select_policy_sources(
+                    model=model,
+                    policy=policy,
+                    candidate_pages=pages_for_policy_type(
+                        pages=initial_state_pages,
+                        policy_type=policy.policy_type,
+                    ),
+                ),
+            )
+        )
+
+    filled_schedules = []
+    for schedule in normalized_payload.policies:
+        filled_policies: list[PolicyStateEntry] = []
+        for policy in schedule.policies:
+            filled_policies.append(
+                PolicyStateEntry(
+                    policy_type=policy.policy_type,
+                    policy_text=policy.policy_text,
+                    sources=select_policy_sources(
+                    model=model,
+                    policy=policy,
+                    candidate_pages=pages_for_policy_type(
+                            pages=policy_injection_pages,
+                            policy_type=policy.policy_type,
+                        ),
+                    ),
+                )
+            )
+        filled_schedules.append(
+            {
+                "week": int(schedule.week),
+                "policies": [
+                    policy.model_dump(mode="json")
+                    for policy in filled_policies
+                ],
+                "overwrite": bool(schedule.overwrite),
+            }
+        )
+
+    dump_yaml(
+        {
+            "initial_state": [
+                policy.model_dump(mode="json")
+                for policy in filled_initial_state
+            ],
+            "policies": filled_schedules,
+        },
+        output_path,
+    )
+
+
 def dump_jsonl(records: list[BaseModel], output_path: Path) -> None:
     with output_path.open("w", encoding="utf-8", newline="\n") as handle:
         for record in records:
@@ -784,6 +999,60 @@ def should_process(page: PolicyPage, overwrite_existing: bool) -> bool:
 
 def main() -> None:
     args = parse_args()
+
+    if args.fill_policy_yaml_sources:
+        model = initialise_model(args)
+        policy_yaml_path = args.policy_yaml_path.resolve()
+        configured_initial_state_paths = [
+            Path(path).resolve() for path in args.initial_state_summary_jsonl_paths
+        ]
+        if configured_initial_state_paths:
+            initial_state_summary_jsonl_paths = configured_initial_state_paths
+        else:
+            initial_state_summary_jsonl_paths = [
+                (
+                    REPO_ROOT
+                    / "data"
+                    / "policies"
+                    / "hdb_resale_policy_2022_and_before.jsonl"
+                ).resolve(),
+            ]
+        configured_policy_injection_paths = [
+            Path(path).resolve() for path in args.policy_injection_summary_jsonl_paths
+        ]
+        if configured_policy_injection_paths:
+            policy_injection_summary_jsonl_paths = configured_policy_injection_paths
+        else:
+            policy_injection_summary_jsonl_paths = [
+                (
+                    REPO_ROOT
+                    / "data"
+                    / "policies"
+                    / "hdb_resale_policy_2023.jsonl"
+                ).resolve(),
+            ]
+        output_path = (
+            args.policy_yaml_output_path.resolve()
+            if args.policy_yaml_output_path is not None
+            else policy_yaml_path
+        )
+        fill_policy_yaml_sources(
+            model=model,
+            policy_yaml_path=policy_yaml_path,
+            initial_state_summary_jsonl_paths=initial_state_summary_jsonl_paths,
+            policy_injection_summary_jsonl_paths=policy_injection_summary_jsonl_paths,
+            output_path=output_path,
+        )
+        print(
+            "Filled initial_state sources using: "
+            + ", ".join(str(path) for path in initial_state_summary_jsonl_paths)
+        )
+        print(
+            "Filled scheduled policy injection sources using: "
+            + ", ".join(str(path) for path in policy_injection_summary_jsonl_paths)
+        )
+        print(f"Wrote updated policy YAML to {output_path}")
+        return
 
     input_path = args.input_path.resolve()
     output_path = args.output_path.resolve()

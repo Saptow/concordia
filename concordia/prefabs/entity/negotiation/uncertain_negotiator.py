@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 from configs import NegotiationComponentConfig
+from configs import PolicyToolConfig
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
 from concordia.components import agent as agent_components
@@ -244,11 +245,13 @@ class Entity(prefab_lib.Prefab):
             ),
             memory_component_key=agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
             num_memories_to_retrieve=action_reasoning_memory_window,
-            policy_jsonl_filename=str(
-                negotiation_config.get(
-                    'policy_jsonl_filename',
-                    'hdb_resale_policy_2022_and_before.jsonl',
+            policy_jsonl_filenames=tuple(
+                str(filename)
+                for filename in negotiation_config.get(
+                    'policy_jsonl_filenames',
+                    PolicyToolConfig.DEFAULT_POLICY_JSONL_FILENAMES,
                 )
+                if str(filename).strip()
             ),
             pre_act_label='# POLICY SEARCH TOOL',
         )

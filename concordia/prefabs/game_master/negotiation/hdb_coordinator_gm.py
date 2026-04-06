@@ -138,6 +138,7 @@ class GameMaster(prefab_lib.Prefab):
     policy_layer_key = 'policy_layer'
     gm_policy_layer = policy_layer.PolicyLayerComponent(
         policy_yaml_path=str(policy_layer_params.get('policy_yaml_path', '')),
+        model=model,
         enabled=bool(policy_layer_params.get('enabled', False)),
     )
 

@@ -20,6 +20,8 @@ from concordia.typing import entity_component
 
 
 TEXT_PAGE_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
+ACTIVE_POLICY_SOURCES_BLOCK_PREFIX = '[[POLICY_ACTIVE_SOURCES_JSON]]'
+ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX = '[[/POLICY_ACTIVE_SOURCES_JSON]]'
 
 
 class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
@@ -34,7 +36,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         ),
         memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
         num_memories_to_retrieve: int = 6,
-        policy_jsonl_filename: str = PolicyToolConfig.DEFAULT_POLICY_JSONL_FILENAME,
+        policy_jsonl_filenames: tuple[str, ...] = (
+            PolicyToolConfig.DEFAULT_POLICY_JSONL_FILENAMES
+        ),
         policy_directory: str | Path = PolicyToolConfig.DEFAULT_POLICY_DIRECTORY,
         max_directory_candidates: int = (
             PolicyToolConfig.DEFAULT_MAX_DIRECTORY_CANDIDATES
@@ -49,16 +53,19 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._memory_component_key = memory_component_key
         self._num_memories_to_retrieve = max(1, int(num_memories_to_retrieve))
         self._policy_directory = Path(policy_directory)
-        self._policy_jsonl_filename = str(policy_jsonl_filename)
-        self._policy_index_path = self._resolve_policy_index_path()
+        self._policy_jsonl_filenames = tuple(
+            str(filename).strip()
+            for filename in policy_jsonl_filenames
+            if str(filename).strip()
+        )
+        self._policy_index_paths = self._resolve_policy_index_paths()
         self._max_directory_candidates = max(1, int(max_directory_candidates))
         self._max_page_chars = max(1000, max_page_chars) if max_page_chars > 0 else 0
         self._tool_call_retries = max(1, int(tool_call_retries))
         self._last_cache_key: str | None = None
         self._last_cache_value: str | None = None
         self._policy_pages_cache: list[PolicyPage] | None = None
-        self._policy_pages_cache_path: Path | None = None
-        self._policy_pages_cache_mtime_ns: int | None = None
+        self._policy_pages_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._tool_schemas = self._build_vllm_tools()
         self._tool_schema_by_name = {
             tool["function"]["name"]: tool for tool in self._tool_schemas
@@ -68,11 +75,15 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
     def name(self) -> str:
         return NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY
 
-    def _resolve_policy_index_path(self) -> Path:
-        candidate = Path(self._policy_jsonl_filename)
-        if candidate.is_absolute():
-            return candidate
-        return self._policy_directory / candidate
+    def _resolve_policy_index_paths(self) -> tuple[Path, ...]:
+        resolved_paths: list[Path] = []
+        for filename in self._policy_jsonl_filenames:
+            candidate = Path(filename)
+            if candidate.is_absolute():
+                resolved_paths.append(candidate)
+            else:
+                resolved_paths.append(self._policy_directory / candidate)
+        return tuple(resolved_paths)
 
     def _display_path(self, path: Path) -> str:
         try:
@@ -96,69 +107,112 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             records.append(record)
         return records
 
+    @staticmethod
+    def _normalize_page_path(path: str) -> str:
+        return str(path).strip().replace("\\", "/")
+
     def _load_policy_directory(self) -> list[PolicyPage]:
-        policy_index_path = self._policy_index_path
-        stat = policy_index_path.stat()
+        signatures: list[tuple[str, int]] = []
+        for policy_index_path in self._policy_index_paths:
+            if not policy_index_path.exists():
+                continue
+            stat = policy_index_path.stat()
+            signatures.append((str(policy_index_path), stat.st_mtime_ns))
+        if not signatures:
+            raise FileNotFoundError(
+                "No policy summary JSONL files were found for policy retrieval."
+            )
+        signature = tuple(signatures)
         if (
             self._policy_pages_cache is not None
-            and self._policy_pages_cache_path == policy_index_path
-            and self._policy_pages_cache_mtime_ns == stat.st_mtime_ns
+            and self._policy_pages_cache_signature == signature
         ):
             return self._policy_pages_cache
 
-        pages: list[PolicyPage] = []
-        with policy_index_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                for record in self._decode_jsonl_line(stripped):
-                    pages.append(PolicyPage.model_validate(record))
+        pages_by_path: dict[str, PolicyPage] = {}
+        for policy_index_path in self._policy_index_paths:
+            if not policy_index_path.exists():
+                continue
+            with policy_index_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    for record in self._decode_jsonl_line(stripped):
+                        page = PolicyPage.model_validate(record)
+                        pages_by_path[self._normalize_page_path(page.path)] = page
 
-        self._policy_pages_cache = pages
-        self._policy_pages_cache_path = policy_index_path
-        self._policy_pages_cache_mtime_ns = stat.st_mtime_ns
-        return pages
+        self._policy_pages_cache = list(pages_by_path.values())
+        self._policy_pages_cache_signature = signature
+        return self._policy_pages_cache
 
-    # Policy records point to extracted markdown pages using a few historical
-    # path conventions, so normalize those variants before reading content.
+    def _active_source_paths(
+        self,
+        *,
+        observation: str,
+        recent_memories: list[str],
+    ) -> list[str] | None:
+        latest_match: list[str] | None = None
+        for candidate_text in (observation, *recent_memories):
+            parsed = self._extract_active_source_paths(candidate_text)
+            if parsed is not None:
+                latest_match = parsed
+        return latest_match
+
+    @classmethod
+    def _extract_active_source_paths(cls, text: str) -> list[str] | None:
+        raw_text = str(text or "")
+        start = raw_text.rfind(ACTIVE_POLICY_SOURCES_BLOCK_PREFIX)
+        if start == -1:
+            return None
+        start += len(ACTIVE_POLICY_SOURCES_BLOCK_PREFIX)
+        end = raw_text.find(ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX, start)
+        if end == -1:
+            return None
+        try:
+            payload = json.loads(raw_text[start:end].strip())
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, list):
+            return None
+        normalized_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for item in payload:
+            normalized = cls._normalize_page_path(str(item))
+            if not normalized or normalized in seen_paths:
+                continue
+            seen_paths.add(normalized)
+            normalized_paths.append(normalized)
+        return normalized_paths
+
+    def _filter_pages_to_active_sources(
+        self,
+        *,
+        pages: list[PolicyPage],
+        active_source_paths: list[str] | None,
+    ) -> list[PolicyPage]:
+        if active_source_paths is None:
+            return pages
+        allowed_paths = {
+            self._normalize_page_path(path) for path in active_source_paths
+        }
+        return [
+            page for page in pages
+            if self._normalize_page_path(page.path) in allowed_paths
+        ]
+
     def _resolve_local_path(self, record_path: str) -> Path | None:
         path = Path(record_path)
-        candidate_paths: list[Path] = []
-
-        if "/raw_html/" in record_path:
-            candidate_paths.append(
-                Path(record_path.replace("/raw_html/", "/page/")).with_suffix(".extracted.md")
-            )
-        elif "/raw_pdf/" in record_path:
-            candidate_paths.append(
-                Path(record_path.replace("/raw_pdf/", "/page/")).with_suffix(".extracted.md")
-            )
-        elif "/page/" in record_path:
-            if path.suffix.lower() in TEXT_PAGE_SUFFIXES:
-                candidate_paths.append(path)
-            else:
-                candidate_paths.append(path.with_suffix(".extracted.md"))
-        elif path.suffix.lower() in TEXT_PAGE_SUFFIXES:
-            candidate_paths.append(path)
-        else:
-            candidate_paths.append(path.with_suffix(".extracted.md"))
-
-        for path in candidate_paths:
-            resolved = path if path.is_absolute() else REPO_ROOT / path
-            if resolved.exists():
-                return resolved
-        return None
+        if path.suffix.lower() not in TEXT_PAGE_SUFFIXES:
+            return None
+        resolved = path if path.is_absolute() else REPO_ROOT / path
+        return resolved if resolved.exists() else None
 
     def _load_page_text(self, record_path: str) -> str:
         resolved = self._resolve_local_path(record_path)
         if resolved is None:
             return ""
-
-        if resolved.suffix.lower() in TEXT_PAGE_SUFFIXES:
-            return resolved.read_text(encoding="utf-8", errors="ignore")
-
-        return ""
+        return resolved.read_text(encoding="utf-8", errors="ignore")
 
     def _current_observation(self) -> str:
         try:
@@ -615,12 +669,19 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
     def _make_pre_act_value(self) -> str:
         observation = self._current_observation()
         recent_memories = self._recent_memories()
+        active_source_paths = self._active_source_paths(
+            observation=observation,
+            recent_memories=recent_memories,
+        )
         cache_key = json.dumps(
             {
                 "observation": observation,
                 "recent_memories": recent_memories,
-                "policy_index_path": self._display_path(self._policy_index_path),
-                "policy_jsonl_filename": self._policy_jsonl_filename,
+                "policy_index_paths": [
+                    self._display_path(path) for path in self._policy_index_paths
+                ],
+                "active_source_paths": active_source_paths,
+                "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -629,7 +690,10 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return self._last_cache_value
 
         try:
-            pages = self._load_policy_directory()
+            pages = self._filter_pages_to_active_sources(
+                pages=self._load_policy_directory(),
+                active_source_paths=active_source_paths,
+            )
         except Exception:
             return self._cache_result(
                 cache_key=cache_key,
@@ -656,7 +720,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             "observation_component_key": self._observation_component_key,
             "memory_component_key": self._memory_component_key,
             "num_memories_to_retrieve": self._num_memories_to_retrieve,
-            "policy_jsonl_filename": self._policy_jsonl_filename,
+            "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
             "policy_directory": str(self._policy_directory),
             "max_directory_candidates": self._max_directory_candidates,
             "max_page_chars": self._max_page_chars,
@@ -673,14 +737,17 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                 1,
                 int(state["num_memories_to_retrieve"]),
             )
-        if "policy_jsonl_filename" in state:
-            self._policy_jsonl_filename = str(state["policy_jsonl_filename"])
+        if "policy_jsonl_filenames" in state:
+            self._policy_jsonl_filenames = tuple(
+                str(filename).strip()
+                for filename in state["policy_jsonl_filenames"]
+                if str(filename).strip()
+            )
         if "policy_directory" in state:
             self._policy_directory = Path(str(state["policy_directory"]))
-        self._policy_index_path = self._resolve_policy_index_path()
+        self._policy_index_paths = self._resolve_policy_index_paths()
         self._policy_pages_cache = None
-        self._policy_pages_cache_path = None
-        self._policy_pages_cache_mtime_ns = None
+        self._policy_pages_cache_signature = None
         if "max_directory_candidates" in state:
             self._max_directory_candidates = max(
                 1,

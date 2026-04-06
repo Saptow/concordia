@@ -39,15 +39,24 @@ class RelevantPolicyPathSelection(BaseModel):
     )
 
 
-class PolicyAnnouncement(BaseModel):
-    """Single scheduled policy announcement loaded from `policy.yaml`."""
+class PolicyStateEntry(BaseModel):
+    """Single policy entry that can be active in the simulation."""
 
     policy_type: str = Field(min_length=1)
     policy_text: str = Field(min_length=1)
-    week_to_announce_policy: int = Field(ge=1)
+    sources: list[str] = Field(default_factory=list)
+
+
+class PolicyWeekSchedule(BaseModel):
+    """Policies that should become active starting from a specific week."""
+
+    week: int = Field(ge=1)
+    policies: list[PolicyStateEntry] = Field(default_factory=list)
+    overwrite: bool = False
 
 
 class PolicyAnnouncementConfig(BaseModel):
-    """Top-level YAML config for scheduled policy announcements."""
+    """Top-level YAML config for baseline and scheduled policy changes."""
 
-    policies: list[PolicyAnnouncement] = Field(default_factory=list)
+    initial_state: list[PolicyStateEntry] = Field(default_factory=list)
+    policies: list[PolicyWeekSchedule] = Field(default_factory=list)

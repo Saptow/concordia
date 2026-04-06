@@ -329,9 +329,19 @@ class HDBSimulationEngine(engine_lib.Engine):
     if policy_layer is None or not getattr(policy_layer, 'is_enabled', lambda: False)():
       return
 
-    normalized_player_ids = [
-        str(player_id).strip() for player_id in active_player_ids if str(player_id).strip()
-    ]
+    normalized_player_ids = sorted(
+        {
+            str(getattr(entity, '_hdb_player_id', '')).strip()
+            for entity in entities
+            if str(getattr(entity, '_hdb_player_id', '')).strip()
+        }
+    )
+    if not normalized_player_ids:
+      normalized_player_ids = [
+          str(player_id).strip()
+          for player_id in active_player_ids
+          if str(player_id).strip()
+      ]
     if not normalized_player_ids:
       return
 
