@@ -1,9 +1,13 @@
 import copy
 import unittest
 
+from concordia.hdb_simulation.models.schemas import common as common_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.hdb_simulation.pipeline import flat_embedding
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_coordinator_helper,
     hdb_listing,
+    hdb_negotiation,
     hdb_negotiation_helpers,
 )
 from concordia.prefabs.game_master.negotiation import hdb_initializer_gm
@@ -164,6 +168,17 @@ class _FakeEntity:
     return self._components[key]
 
 
+class _ObservedEntity:
+
+  def __init__(self, *, name: str, player_id: str):
+    self.name = name
+    self._hdb_player_id = player_id
+    self.observations: list[str] = []
+
+  def observe(self, observation: str) -> None:
+    self.observations.append(observation)
+
+
 class _FakeNameModel:
 
   def __init__(self, response: str):
@@ -237,6 +252,187 @@ class BuildMarketProfilesTest(unittest.TestCase):
     )
     self.assertLen(model.prompts, 1)
     self.assertIn('teacher', model.prompts[0].lower())
+
+
+class NegotiationListingObservationTest(unittest.TestCase):
+
+  def test_listing_handoff_uses_structured_listing_format(self):
+    buyer_profile = _buyer_profile(name='Jensen')
+    seller_profile = _seller_profile(name='Zulkifli Khair Juwahir', flat_type='4-Room')
+    raw_flat_payload = {
+        'flat_type': '4-Room',
+        'address': '809A CHOA CHU KANG AVE 1',
+        'town': 'Choa Chu Kang',
+        'floor_range': '10 TO 12',
+        'remaining_lease_years': 93.25,
+        'floor_area_sqm': 92.0,
+        'amenities': {
+            'mrt': {'station_names': ['Keat Hong', 'Teck Whye', 'South View']},
+            'primary_schools': {
+                'school_names': ['CHUA CHU KANG PRIMARY SCHOOL'],
+            },
+            'hawker_centres': {'hawker_names': []},
+            'malls': {
+                'mall_names': ['Keat Hong Shopping Centre', 'Sunshine Place'],
+            },
+        },
+        'past_price_trends': {
+            'transactions_6m': 275,
+            'min_price_6m': 388000.0,
+            'max_price_6m': 600000.0,
+        },
+    }
+    seller_profile['flat'].update({
+        'address': '809A CHOA CHU KANG AVE 1',
+        'description': (
+            'This 4-Room HDB flat is at 809A CHOA CHU KANG AVE 1 in Choa Chu Kang. '
+            'It offers about 92 sqm of space, in the 10 TO 12 storey range, and '
+            'with about 93.2 years of lease remaining.'
+        ),
+        'storey_range': '10 TO 12',
+        'remaining_lease': 93.25,
+        'floor_area_sqm': 92.0,
+        'nearby_amenities': [
+            {'name': 'Keat Hong', 'type': 'MRT', 'radius': 'Within 1km'},
+            {'name': 'Teck Whye', 'type': 'MRT', 'radius': 'Within 1km'},
+            {'name': 'South View', 'type': 'MRT', 'radius': 'Within 1km'},
+            {
+                'name': 'CHUA CHU KANG PRIMARY SCHOOL',
+                'type': 'Primary School',
+                'radius': 'Within 2km',
+            },
+            {
+                'name': 'Keat Hong Shopping Centre',
+                'type': 'Shopping Mall',
+                'radius': 'Within 1km',
+            },
+            {
+                'name': 'Sunshine Place',
+                'type': 'Shopping Mall',
+                'radius': 'Within 1km',
+            },
+        ],
+        'past_price_trends': {
+            'transactions_6m': 275,
+            'min_price_6m': 388000.0,
+            'max_price_6m': 600000.0,
+        },
+    })
+    listing_record = negotiation_schemas.ListingRecord(
+        listing_id='listing::seller_2023_00006',
+        seller_id='seller_2023_00006',
+        seller_name='Zulkifli Khair Juwahir',
+        listing_price=553356.98,
+        listing_summary=flat_embedding.build_listing_summary(
+            raw_flat_payload,
+            listing_price=553356.98,
+            extension_of_stay=False,
+        ),
+        flat=common_schemas.Flat.model_validate(seller_profile['flat']),
+        listed_week=1,
+        active=False,
+    )
+    buyer_state = negotiation_schemas.ListingBuyerState(
+        id='buyer_2023_00001',
+        name='Jensen',
+        description='Test buyer profile.',
+        preferences=buyer_profile['preferences'],
+        budget=buyer_profile['budget'],
+        preference_prior=common_schemas.build_buyer_preference_prior(
+            buyer_profile['preferences'],
+            buyer_profile['budget'],
+            reservation_price_prior=540000.0,
+        ),
+        effective_reservation=common_schemas.NormalDistribution(
+            name='buyer_effective_reservation',
+            mean=540000.0,
+            std=10000.0,
+            confidence=0.6,
+        ),
+        latest_search_results=[],
+        latest_market_feedback='No market feedback yet.',
+    )
+    seller_state = negotiation_schemas.ListingSellerState(
+        id='seller_2023_00006',
+        name='Zulkifli Khair Juwahir',
+        description='Test seller profile.',
+        flat=seller_profile['flat'],
+        expectations=seller_profile['expectations'],
+        effective_reservation=common_schemas.NormalDistribution(
+            name='seller_effective_reservation',
+            mean=525000.0,
+            std=10000.0,
+            confidence=0.6,
+        ),
+        listed=False,
+        current_listing_id='listing::seller_2023_00006',
+        current_listing_price=553356.98,
+        open_requests=0,
+    )
+    payload = negotiation_schemas.ListingNegotiationTransferPayload(
+        match_id='match::buyer_2023_00001::seller_2023_00006',
+        week_matched=1,
+        listing_record=listing_record,
+        buyer_state=buyer_state,
+        seller_state=seller_state,
+    )
+    buyer_entity = _ObservedEntity(name='Jensen', player_id='buyer_2023_00001')
+    seller_entity = _ObservedEntity(
+        name='Zulkifli Khair Juwahir',
+        player_id='seller_2023_00006',
+    )
+    participant_specs = {
+        'buyer_2023_00001': {
+            'id': 'buyer_2023_00001',
+            'name': 'Jensen',
+            'role': 'buyer',
+            'description': 'Test buyer profile.',
+            'preferences': buyer_profile['preferences'],
+            'budget': buyer_profile['budget'],
+        },
+        'seller_2023_00006': {
+            'id': 'seller_2023_00006',
+            'name': 'Zulkifli Khair Juwahir',
+            'role': 'seller',
+            'description': 'Test seller profile.',
+            'flat': seller_profile['flat'],
+            'expectations': seller_profile['expectations'],
+        },
+    }
+    module = hdb_negotiation.NegotiationModule(
+        entities=(buyer_entity, seller_entity),
+        participant_specs=participant_specs,
+        enabled=True,
+    )
+    original_update_agent = hdb_negotiation.update_agent_from_listing
+    hdb_negotiation.update_agent_from_listing = lambda entity, pair_payload: None
+    try:
+      module._apply_listing_transfer_payload(
+          payload,
+          buyer_id='buyer_2023_00001',
+          seller_id='seller_2023_00006',
+      )
+    finally:
+      hdb_negotiation.update_agent_from_listing = original_update_agent
+
+    self.assertLen(buyer_entity.observations, 1)
+    observation = buyer_entity.observations[0]
+    self.assertIn(listing_record.listing_summary, observation)
+    self.assertIn('## Key Details', listing_record.listing_summary)
+    self.assertIn('## Nearby Amenities', listing_record.listing_summary)
+    self.assertIn('## Price Trends', listing_record.listing_summary)
+    self.assertIn('**Listing Price:** $553,357', listing_record.listing_summary)
+    self.assertIn(
+        '- Block / Address: 809A CHOA CHU KANG AVE 1',
+        listing_record.listing_summary,
+    )
+    self.assertIn(
+        '- MRT / LRT: Keat Hong, Teck Whye, South View',
+        listing_record.listing_summary,
+    )
+    self.assertIn('Price Range: $388,000 to $600,000', listing_record.listing_summary)
+    self.assertNotIn('Full listing:', observation)
+    self.assertNotIn('"listing_id"', observation)
 
 
 class ListingReleaseTest(unittest.TestCase):

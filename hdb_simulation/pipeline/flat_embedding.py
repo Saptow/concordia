@@ -29,6 +29,12 @@ def _clean_amenity_name(value: Any) -> str:
   return text
 
 
+def _clean_text(value: Any) -> str:
+  if value is None:
+    return ''
+  return str(value).strip()
+
+
 def _join_natural(values: list[str]) -> str:
   if not values:
     return ''
@@ -83,6 +89,74 @@ def _extract_amenity_names(
   )
 
 
+def _value_or_unknown(
+    value: Any,
+    *,
+    unknown_text: str = 'None',
+) -> str:
+  text = _clean_text(value)
+  return text if text else unknown_text
+
+
+def _format_currency(value: float | None) -> str:
+  if value is None:
+    return 'Price not specified.'
+  return f'${float(value):,.0f}'
+
+
+def _format_floor_area(
+    value: Any,
+    *,
+    unknown_text: str = 'None',
+) -> str:
+  if value in (None, ''):
+    return unknown_text
+  return f'{float(value):.0f} sqm'
+
+
+def _format_remaining_lease(
+    value: Any,
+    *,
+    unknown_text: str = 'None',
+) -> str:
+  if value in (None, ''):
+    return unknown_text
+  return f'{float(value):.1f} years remaining'
+
+
+def _format_joined_list(values: list[str], *, empty_text: str) -> str:
+  return ', '.join(values) if values else empty_text
+
+
+def _extract_price_trends(flat_payload: dict[str, Any]) -> PriceTrend | None:
+  past_price_trends = flat_payload.get('past_price_trends', {})
+  if not isinstance(past_price_trends, dict) or not past_price_trends:
+    return None
+  return PriceTrend.model_validate(past_price_trends)
+
+
+def _build_nearby_amenities(flat_payload: dict[str, Any]) -> list[Amenity]:
+  amenities = flat_payload.get('amenities', {})
+  amenities = amenities if isinstance(amenities, dict) else {}
+  nearby_amenities: list[Amenity] = []
+
+  amenity_specs = (
+      ('mrt', 'station_names', AmenityType.MRT, 'Within 1km'),
+      ('primary_schools', 'school_names', AmenityType.SCHOOL, 'Within 2km'),
+      ('hawker_centres', 'hawker_names', AmenityType.HAWKER, 'Within 1km'),
+      ('malls', 'mall_names', AmenityType.MALL, 'Within 1km'),
+  )
+  for bucket_key, names_key, amenity_type, radius in amenity_specs:
+    for name in amenities.get(bucket_key, {}).get(names_key, []):
+      text = _clean_amenity_name(name)
+      if text:
+        nearby_amenities.append(
+            Amenity(name=text, type=amenity_type, radius=radius)
+        )
+
+  return nearby_amenities
+
+
 def _build_seller_description(
     *,
     address: str,
@@ -96,61 +170,69 @@ def _build_seller_description(
     hawker_names: list[str],
     mall_names: list[str],
 ) -> str:
-  intro = f'This {flat_type} HDB flat is at {address}'
-  if town and town != 'Not shown':
-    intro += f' in {town}'
+  clean_flat_type = _clean_text(flat_type)
+  clean_address = _clean_text(address)
+  clean_town = _clean_text(town)
+  clean_storey_range = _clean_text(storey_range)
+
+  if clean_flat_type:
+    intro = f'This {clean_flat_type} HDB flat'
+  else:
+    intro = 'This HDB flat'
+  if clean_address:
+    intro += f' is at {clean_address}'
+  if clean_town:
+    intro += f' in {clean_town}'
   intro += '.'
 
   detail_bits: list[str] = []
   if floor_area_sqm not in (None, ''):
-    detail_bits.append(f'about {float(floor_area_sqm):.0f} sqm of space')
-  if storey_range and storey_range != 'Not shown':
-    detail_bits.append(f'in the {storey_range} storey range')
+    detail_bits.append(f'about {_format_floor_area(floor_area_sqm)} of space')
+  if clean_storey_range:
+    detail_bits.append(f'in the {clean_storey_range} storey range')
   if remaining_lease_years not in (None, ''):
-    detail_bits.append(
-        f'with about {float(remaining_lease_years):.1f} years of lease remaining'
-    )
+    detail_bits.append(f'with about {_format_remaining_lease(remaining_lease_years)}')
 
   sentences = [intro]
   if detail_bits:
     sentences.append(f'It offers {_join_natural(detail_bits)}.')
-  sentences.append(
-      'Neighbourhood details are limited to amenities explicitly named in the '
-      'listing payload. If something is not listed here, treat it as unknown '
-      'rather than absent.'
-  )
+  else:
+    sentences.append(
+        'The listing does not clearly specify the floor area, storey range, or '
+        'remaining lease.'
+    )
 
   if mrt_names:
     sentences.append(
-        'The listing explicitly names these MRT/LRT stations within 1 km: '
-        f'{_join_natural(mrt_names)}.'
+        f'Nearby MRT/LRT access includes {_join_natural(mrt_names)}.'
     )
   else:
-    sentences.append('The listing does not name any MRT/LRT stations within 1 km.')
+    sentences.append('Nearby MRT/LRT options are not specified in the listing.')
 
   if mall_names:
     sentences.append(
-        'The listing explicitly names these shopping malls within 1 km: '
-        f'{_join_natural(mall_names)}.'
+        f'Nearby shopping options include {_join_natural(mall_names)}.'
     )
   else:
-    sentences.append('The listing does not name any shopping malls within 1 km.')
+    sentences.append('Nearby shopping options are not specified in the listing.')
 
   if hawker_names:
     sentences.append(
-        'The listing explicitly names these hawker centres within 1 km: '
-        f'{_join_natural(hawker_names)}.'
+        f'Nearby hawker centres include {_join_natural(hawker_names)}.'
     )
   else:
-    sentences.append('The listing does not name any hawker centres within 1 km.')
+    sentences.append('Nearby hawker centres are not specified in the listing.')
 
   if school_names:
     sentences.append(
-        'The listing explicitly names these primary schools within 2 km: '
+        'For families with young children, primary schools within 2 km include '
         f'{_join_natural(school_names)}.'
     )
   else:
-    sentences.append('The listing does not name any primary schools within 2 km.')
+    sentences.append(
+        'Nearby primary schools for families with young children are not '
+        'specified in the listing.'
+    )
 
   return ' '.join(sentences)
 
@@ -165,10 +247,10 @@ def build_listing_summary(
       flat_payload
   )
 
-  address = str(flat_payload.get('address', '')).strip() or 'Not shown'
-  flat_type = str(flat_payload.get('flat_type', '')).strip() or 'Not shown'
-  storey_range = str(flat_payload.get('floor_range', '')).strip() or 'Not shown'
-  town = str(flat_payload.get('town', '')).strip()
+  address = _clean_text(flat_payload.get('address'))
+  flat_type = _clean_text(flat_payload.get('flat_type'))
+  storey_range = _clean_text(flat_payload.get('floor_range'))
+  town = _clean_text(flat_payload.get('town'))
   seller_description = _build_seller_description(
       address=address,
       flat_type=flat_type,
@@ -182,48 +264,66 @@ def build_listing_summary(
       mall_names=mall_names,
   )
 
-  past_price_trends = flat_payload.get('past_price_trends', {})
-  past_price_trends = past_price_trends if isinstance(past_price_trends, dict) else {}
+  past_price_trends = _extract_price_trends(flat_payload)
   transactions_6m = (
-      str(int(past_price_trends['transactions_6m']))
-      if past_price_trends.get('transactions_6m') not in (None, '')
-      else 'Not shown'
+      str(int(past_price_trends.transactions_6m))
+      if past_price_trends is not None
+      else 'None'
   )
-  if (
-      past_price_trends.get('min_price_6m') is not None
-      and past_price_trends.get('max_price_6m') is not None
-  ):
+  price_range = 'None'
+  if past_price_trends is not None:
     price_range = (
-        f'${float(past_price_trends["min_price_6m"]):,.0f} to '
-        f'${float(past_price_trends["max_price_6m"]):,.0f}'
+        f'{_format_currency(past_price_trends.min_price_6m)} to '
+        f'{_format_currency(past_price_trends.max_price_6m)}'
     )
-  else:
-    price_range = 'Not shown'
 
-  summary_sentences = [
-      f'Listing price is SGD {float(listing_price):,.0f}.',
+  lines = [
+      f'**Listing Price:** {_format_currency(listing_price)}',
+      '',
+      '## Key Details',
+      f'- Block / Address: {_value_or_unknown(address)}',
+      (
+          '- Flat Type: '
+          f'{_value_or_unknown(flat_type, unknown_text="Flat type is not specified in the listing.")}'
+      ),
+      f'- Storey Range: {_value_or_unknown(storey_range)}',
+      f'- Floor Area: {_format_floor_area(flat_payload.get("floor_area_sqm"))}',
+      (
+          '- Lease Commencement / Remaining Lease: '
+          f'{_format_remaining_lease(flat_payload.get("remaining_lease_years"))}'
+      ),
+      '',
+      '## Seller Description',
       seller_description,
+      '',
+      '## Transaction / Price Information',
+      f'- Nearby transactions in past 6 months: {transactions_6m}',
+      '',
+      '## Nearby Amenities',
+      (
+          '- MRT / LRT: '
+          f'{_format_joined_list(mrt_names, empty_text="None")}'
+      ),
+      (
+          '- Primary Schools: '
+          f'{_format_joined_list(school_names, empty_text="None")}'
+      ),
+      (
+          '- Hawker centres: '
+          f'{_format_joined_list(hawker_names, empty_text="None")}'
+      ),
+      (
+          '- Malls: '
+          f'{_format_joined_list(mall_names, empty_text="None")}'
+      ),
+      '',
+      '## Price Trends',
+      f'Price Range: {price_range}',
+      '',
+      '## Other Listing Flags',
+      f'- Temporary Extension of Stay: {"Yes" if extension_of_stay else "No"}',
   ]
-  if transactions_6m != 'Not shown' and price_range != 'Not shown':
-    summary_sentences.append(
-        'Over the past 6 months, '
-        f'{transactions_6m} similar nearby transactions were recorded, with prices '
-        f'ranging from {price_range}.'
-    )
-  elif transactions_6m != 'Not shown':
-    summary_sentences.append(
-        'Over the past 6 months, '
-        f'{transactions_6m} similar nearby transactions were recorded.'
-    )
-  elif price_range != 'Not shown':
-    summary_sentences.append(
-        f'Recent similar nearby transactions ranged from {price_range}.'
-    )
-  summary_sentences.append(
-      'Temporary extension of stay is '
-      f'{"available" if extension_of_stay else "not requested"}.'
-  )
-  return ' '.join(summary_sentences)
+  return '\n'.join(lines)
 
 
 def build_listing_record(
@@ -256,10 +356,10 @@ def build_listing_record(
       flat_payload
   )
   seller_description = _build_seller_description(
-      address=str(flat_payload.get('address', '')).strip() or 'Not shown',
-      flat_type=str(flat_payload.get('flat_type', '')).strip() or 'Not shown',
-      town=str(flat_payload.get('town', '')).strip(),
-      storey_range=str(flat_payload.get('floor_range', '')).strip() or 'Not shown',
+      address=_clean_text(flat_payload.get('address')),
+      flat_type=_clean_text(flat_payload.get('flat_type')),
+      town=_clean_text(flat_payload.get('town')),
+      storey_range=_clean_text(flat_payload.get('floor_range')),
       floor_area_sqm=flat_payload.get('floor_area_sqm'),
       remaining_lease_years=flat_payload.get('remaining_lease_years'),
       mrt_names=mrt_names,
@@ -267,41 +367,8 @@ def build_listing_record(
       hawker_names=hawker_names,
       mall_names=mall_names,
   )
-
-  amenities = flat_payload.get('amenities', {})
-  amenities = amenities if isinstance(amenities, dict) else {}
-  nearby_amenities: list[Amenity] = []
-  for name in amenities.get('mrt', {}).get('station_names', []):
-    text = _clean_amenity_name(name)
-    if text:
-      nearby_amenities.append(
-          Amenity(name=text, type=AmenityType.MRT, radius='Within 1km')
-      )
-  for name in amenities.get('primary_schools', {}).get('school_names', []):
-    text = _clean_amenity_name(name)
-    if text:
-      nearby_amenities.append(
-          Amenity(name=text, type=AmenityType.SCHOOL, radius='Within 2km')
-      )
-  for name in amenities.get('hawker_centres', {}).get('hawker_names', []):
-    text = _clean_amenity_name(name)
-    if text:
-      nearby_amenities.append(
-          Amenity(name=text, type=AmenityType.HAWKER, radius='Within 1km')
-      )
-  for name in amenities.get('malls', {}).get('mall_names', []):
-    text = _clean_amenity_name(name)
-    if text:
-      nearby_amenities.append(
-          Amenity(name=text, type=AmenityType.MALL, radius='Within 1km')
-      )
-
-  past_price_trends = flat_payload.get('past_price_trends', {})
-  past_price_trends = (
-      PriceTrend.model_validate(past_price_trends)
-      if isinstance(past_price_trends, dict) and past_price_trends
-      else None
-  )
+  nearby_amenities = _build_nearby_amenities(flat_payload)
+  past_price_trends = _extract_price_trends(flat_payload)
 
   return qdrant_schemas.ListingRecord(
       listing_id=qdrant_schemas.listing_id_for_seller(seller_id),

@@ -269,13 +269,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._pair_start_weeks.setdefault(pair_key, int(pair_payload.week_matched))
     buyer_name = pair_payload.buyer_state.name
     seller_name = pair_payload.seller_state.name
-    listing_price = float(listing_record.listing_price)
     buyer_observation = (
         f"{buyer_name}, you submitted a negotiation request for {seller_name}'s flat, "
-        f"and {seller_name} accepted it. You are now negotiating directly as the buyer.\n"
-        f"Full listing:\n"
-        f"{json.dumps(listing_record.model_dump(mode='json'), ensure_ascii=False)}\n"
-        f"Listing price: SGD {listing_price:.2f}"
+        f"and {seller_name} accepted it. You are now negotiating directly as the buyer.\n\n"
+        f"{listing_record.listing_summary}"
     )
     seller_observation = (
         f"{seller_name}, you accepted {buyer_name}'s negotiation request for your flat. "
