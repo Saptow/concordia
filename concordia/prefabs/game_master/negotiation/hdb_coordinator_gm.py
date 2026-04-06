@@ -53,6 +53,7 @@ class GameMaster(prefab_lib.Prefab):
           'policy_layer': {
               'enabled': False,
               'policy_yaml_path': '',
+              'updates_enabled': True,
           },
       }
   )
@@ -139,6 +140,7 @@ class GameMaster(prefab_lib.Prefab):
     gm_policy_layer = policy_layer.PolicyLayerComponent(
         policy_yaml_path=str(policy_layer_params.get('policy_yaml_path', '')),
         model=model,
+        updates_enabled=bool(policy_layer_params.get('updates_enabled', True)),
         enabled=bool(policy_layer_params.get('enabled', False)),
     )
 

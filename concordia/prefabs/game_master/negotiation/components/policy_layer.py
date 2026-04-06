@@ -32,12 +32,14 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
       *,
       policy_yaml_path: str,
       model: language_model.LanguageModel | None = None,
+      updates_enabled: bool = True,
       enabled: bool = True,
       pre_act_label: str = 'Policy layer',
   ):
     super().__init__(pre_act_label=pre_act_label)
     self._policy_yaml_path = str(policy_yaml_path).strip()
     self._model = model
+    self._updates_enabled = bool(updates_enabled)
     self._enabled = bool(enabled and self._policy_yaml_path)
     config = (
         self._load_policy_config(self._policy_yaml_path)
@@ -361,6 +363,8 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
       *,
       week_number: int,
   ) -> list[PolicyWeekSchedule]:
+    if not self._updates_enabled:
+      return []
     if int(week_number) in self._applied_policy_weeks:
       return []
     due_schedules = [
@@ -489,9 +493,10 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
             'enabled': self._enabled,
             'policy_yaml_path': self._policy_yaml_path,
             'initial_policy_count': len(self._initial_state),
-            'scheduled_policy_weeks': pending_weeks,
+            'scheduled_policy_weeks': pending_weeks if self._updates_enabled else [],
             'current_policy_count': len(self._current_policies),
             'active_source_count': len(self._active_source_paths()),
+            'updates_enabled': self._updates_enabled,
             'announced_weeks': sorted(self._announced_weeks),
             'last_announcements': list(self._last_announcements),
         },
@@ -555,6 +560,7 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
     return {
         'policy_yaml_path': self._policy_yaml_path,
         'enabled': int(self._enabled),
+        'updates_enabled': int(self._updates_enabled),
         'initial_state': [
             policy.model_dump() for policy in self._initial_state
         ],
@@ -573,6 +579,7 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
     if 'policy_yaml_path' in state:
       self._policy_yaml_path = str(state.get('policy_yaml_path', '')).strip()
     self._enabled = bool(state.get('enabled', 1))
+    self._updates_enabled = bool(state.get('updates_enabled', 1))
     if 'initial_state' in state or 'policies' in state:
       raw_payload = {
           'initial_state': state.get('initial_state', []),
