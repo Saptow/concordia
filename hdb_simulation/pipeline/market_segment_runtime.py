@@ -81,7 +81,7 @@ def load_bundle_from_manifest(
             manifest_file,
             raw_value,
         )
-    optional_scalar_keys = ('qdrant_collection_name',)
+    optional_scalar_keys = ('qdrant_collection_name', 'market_segment_name')
     for key in optional_scalar_keys:
         raw_value = str(manifest.get(key, '')).strip()
         if raw_value:
@@ -141,29 +141,25 @@ def ensure_market_segment_listing_index(
     rebuild: bool = False,
 ) -> tuple[dict[str, object], int]:
     """Ensure the market-segment listing index exists and return an enriched manifest."""
+    market_segment_name = (
+        str(manifest.get('market_segment_name', '')).strip()
+        or segment_config.market_segment_name
+    )
     collection_name = (
         str(manifest.get('qdrant_collection_name', '')).strip()
-        or QdrantConfig.DEFAULT_COLLECTION_NAME
+        or QdrantConfig.market_collection_name(
+            market_segment_name=market_segment_name
+        )
     )
     persisted_qdrant_db_path = (
         str(manifest.get('qdrant_db_path', '')).strip()
         or QdrantConfig.market_db_path(
-            town=segment_config.town,
-            year=segment_config.year,
-            segment_label=(
-                None
-                if segment_config.is_full_year_segment
-                else segment_config.segment_label
-            ),
-            sampled_flat_ratio=segment_config.sampled_flat_ratio,
-            buyer_pool_multiplier=segment_config.buyer_pool_multiplier,
-            retained_buyer_pool_multiplier=(
-                segment_config.retained_buyer_pool_multiplier
-            ),
+            market_segment_name=market_segment_name,
         )
     )
 
     enriched_manifest = dict(manifest)
+    enriched_manifest['market_segment_name'] = market_segment_name
     enriched_manifest['qdrant_db_path'] = persisted_qdrant_db_path
     enriched_manifest['qdrant_collection_name'] = collection_name
 
