@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 import dataclasses
 import random
-import re
 import threading
 import numpy as np
 from typing import Any
@@ -22,21 +20,27 @@ from concordia.hdb_simulation.models.schemas import listing as listing_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_schemas
 
+
+PORTAL_SEARCH_LIMIT = 10
+
+
 @dataclasses.dataclass
 class SearchAndRequestResult:
+    """Return payload for a buyer's weekly portal search step."""
+
     results: list[listing_schemas.PortalSearchResult]
     market_feedback: str
 
+
 class ListingPortalRetriever:
-    # TODO: implement embed_text for upserting 
     """
-    ListingPortalRetriever manages interactions with Qdrant vector database for ListingPortal. 
-    This class helps with: 
+    ListingPortalRetriever manages Qdrant access for the shared listing portal.
+
+    The retriever is responsible for:
     - Upserting listings
     - Deactivating listings
     - Updating listing payloads without re-embedding (e.g. for price changes or active status updates)
     - Searching listings with BM25 and dense retrieval.
-
     """
 
     def __init__(
@@ -49,22 +53,28 @@ class ListingPortalRetriever:
     ):
         if client is None:
             client = qdrant_schemas.make_qdrant_client(db_path)
-        
+
         self._dense_embedder = dense_embedding_model
         self._sparse_embedder = sparse_embedding_model
         self._collection_name = collection_name
         self._client = client
         self._client_lock = threading.RLock()
-        self._rrf_weights = [1.0, 1.5]  # Relative Weights for BM25 and dense retrieval in RRF scoring
-        # Ensure collection exists
+        # Slightly favor sparse retrieval when fusing ranked candidate lists.
+        self._rrf_weights = [1.0, 1.5]
         with self._client_lock:
             collection_exists = self._client.collection_exists(collection_name)
         if not collection_exists:
-            logging.exception(f"Qdrant collection '{collection_name}' does not exist. Please create it before using the retriever.")
+            raise ValueError(
+                f"Qdrant collection '{collection_name}' does not exist. "
+                'Create or preload it before using ListingPortalRetriever.'
+            )
 
     def _embed_dense_text(self, text: str) -> np.ndarray:
         if self._dense_embedder is None:
-            logging.exception("Attempted to embed text but no dense embedding model was provided.")
+            raise RuntimeError(
+                'Attempted to embed listing-portal text without a dense '
+                'embedding model.'
+            )
         return self._dense_embedder.encode(text)
 
     def _embed_sparse_text(self, text: str) -> Any | None:
@@ -138,8 +148,10 @@ class ListingPortalRetriever:
         limit: int = 5,
     ) -> list[listing_schemas.PortalSearchResult]:
         """
-        Search active listings using Qdrant vector retrieval plus local BM25.
-        This method assumes that vector indices for both sparse and dense embeddings are implemented already.
+        Search active listings and apply portal-specific post-filters.
+
+        Retrieval happens in Qdrant, while active-state and budget filtering stay
+        local so the portal can evolve those rules without rebuilding the index.
         """
         dense_query = self._embed_dense_text(query)
         sparse_query = self._embed_sparse_text(query)
@@ -193,21 +205,12 @@ class ListingPortalRetriever:
   
 class ListingPortal:
     """
-    Listing Portal for HDB.
-    
-    This class implements the action space for both buyers and sellers within the listing portal workflow. 
-    The state of the players are also maintained within this class.
-    For buyers, 
-    1. They can search for listings based on their preferences and send negotiation requests to sellers. 
-    2. They can update their effective reservation price for their desired preferences to guide their search and request strategy in subsequent weeks.
-        - Based on market feedback from search results
-        - TODO: based on policy shocks injected throughout the simulation. 
+    Shared listing-portal state for the weekly market workflow.
 
-    For sellers, 
-    1. They can list their flats as active in the market. (to induct them into the market)
-    2. They review incoming negotiation requests and select one to start a bilateral negotiation, which temporarily deactivates the listing and other pending requests.
-    3. TODO: They can receive market feedback based on search results and policies to adjust their listing price throughout the simulation.
-    4. [NOT IMPLEMENTED FOR FYP] They can delist their listing to withdraw from the market. 
+    Buyers search listings, receive lightweight market feedback, and submit at
+    most one request at a time. Sellers activate listings and choose one inbound
+    request to move into bilateral negotiation. The portal keeps the transient
+    state needed to bridge those weekly listing and negotiation phases.
     """
 
     def __init__(
@@ -242,7 +245,6 @@ class ListingPortal:
     def _match_id(buyer_id: str, seller_id: str, week: int) -> str:
         return f'match::{buyer_id}::{seller_id}::{week}'
 
-    # Shared portal state helpers.
     def is_seller_listed(self, seller_id: str) -> bool:
         listing = self.retriever.get_listing_record(seller_id)
         return bool(listing and listing.active)
@@ -264,7 +266,6 @@ class ListingPortal:
     ) -> qdrant_schemas.ListingRecord | None:
         return self.retriever.get_listing_record(seller_id)
 
-    # Buyer-side helpers and actions.
     def has_buyer_negotiated_with_seller(
         self,
         buyer_id: str,
@@ -315,11 +316,6 @@ class ListingPortal:
             state = negotiation_schemas.BuyerMarketBeliefState(
                 buyer_id=buyer.id,
                 base_reservation_price=base_reservation_price,
-                preference_prior=common_schemas.build_buyer_preference_prior(
-                    buyer.preferences,
-                    buyer.budget,
-                    reservation_price_prior=reservation_price_prior,
-                ),
                 effective_reservation=uncertain_helper.NormalDistribution(
                     name='Effective reservation price',
                     mean=base_reservation_price,
@@ -374,39 +370,73 @@ class ListingPortal:
         ).strip()
 
     @staticmethod
+    def _listing_match_scores(
+        buyer: listing_schemas.PortalBuyer,
+        results: Sequence[listing_schemas.PortalSearchResult],
+    ) -> list[float]:
+        return [
+            common_schemas.build_buyer_flat_preference_match_score(
+                buyer.preferences,
+                result.flat,
+            )
+            for result in results
+        ]
+
+    @staticmethod
+    def _relevant_market_observations(
+        results: Sequence[listing_schemas.PortalSearchResult],
+        match_scores: Sequence[float],
+    ) -> tuple[list[tuple[float, float]], float, list[float]]:
+        relevant_pairs: list[tuple[float, float]] = [
+            (float(result.listing_price), float(match_score))
+            for result, match_score in zip(results, match_scores, strict=True)
+            if float(match_score) > 0.0
+        ]
+        if not relevant_pairs:
+            return ([], 0.0, [])
+        relevant_prices = [price for price, _ in relevant_pairs]
+        return (
+            relevant_pairs,
+            ListingPortal._market_signal_reliability(relevant_prices),
+            relevant_prices,
+        )
+
+    @staticmethod
     def _market_feedback(
         effective_reservation_price: float,
-        results: Sequence[listing_schemas.PortalSearchResult],
+        relevant_prices: Sequence[float],
     ) -> str:
-        if not results:
+        if not relevant_prices:
             return (
-                'Current portal search suggests supply is thin for your preferences. '
-                'Broaden town or flat-type filters if urgency rises.'
+                'Current portal search surfaced few listings that fit your '
+                'preferences closely enough to update your willingness-to-pay.'
             )
 
-        prices = [float(result.listing_price) for result in results]
-        avg_price = sum(prices) / len(prices)
-        min_price = min(prices)
-        max_price = max(prices)
+        avg_price = sum(relevant_prices) / len(relevant_prices)
+        min_price = min(relevant_prices)
+        max_price = max(relevant_prices)
         if avg_price <= effective_reservation_price:
-            affordability = 'Most matching listings remain within your effective reservation bound.'
+            affordability = (
+                'Most preference-relevant listings remain within your effective '
+                'reservation bound.'
+            )
         else:
             affordability = (
-                'Most matching listings are above your effective reservation bound, '
-                'so valuation pressure is increasing.'
+                'Most preference-relevant listings are above your effective '
+                'reservation bound, so valuation pressure is increasing.'
             )
         return (
-            f"Observed portal valuation band this week: SGD {min_price:.0f} to "
+            f"Observed preference-relevant portal valuation band this week: SGD "
+            f"{min_price:.0f} to "
             f"SGD {max_price:.0f}, average SGD {avg_price:.0f}. {affordability}"
         )
 
     @staticmethod
     def _market_signal_reliability(
-        results: Sequence[listing_schemas.PortalSearchResult],
+        prices: Sequence[float],
     ) -> float:
-        if not results:
+        if not prices:
             return 0.0
-        prices = [float(result.listing_price) for result in results]
         average_price = max(sum(prices) / len(prices), 1.0)
         relative_spread = (max(prices) - min(prices)) / average_price
         sample_factor = min(1.0, len(prices) / 5.0)
@@ -416,33 +446,37 @@ class ListingPortal:
     def _update_buyer_market_state(
         self,
         buyer: listing_schemas.PortalBuyer,
-        results: Sequence[listing_schemas.PortalSearchResult],
+        relevant_observations: Sequence[tuple[float, float]],
+        market_reliability: float,
+        relevant_prices: Sequence[float],
         feedback: str,
     ) -> negotiation_schemas.BuyerMarketBeliefState:
         state = self._buyer_market_state(buyer)
         state.latest_market_feedback = feedback
         if not state.feedback_history or state.feedback_history[-1] != feedback:
             state.feedback_history.append(feedback)
-        if not results:
+        if not relevant_observations or market_reliability <= 0.0:
             return state
 
-        prices = [float(result.listing_price) for result in results]
-        state.latest_observed_min_price = min(prices)
-        state.latest_observed_avg_price = sum(prices) / len(prices)
-        state.latest_observed_max_price = max(prices)
+        state.latest_observed_min_price = min(relevant_prices)
+        state.latest_observed_avg_price = sum(relevant_prices) / len(relevant_prices)
+        state.latest_observed_max_price = max(relevant_prices)
 
         belief = state.effective_reservation
-        belief.update_with_evidence(
-            state.latest_observed_avg_price,
-            reliability=self._market_signal_reliability(results),
-        )
+        for observed_price, match_score in relevant_observations:
+            reliability = max(
+                0.0,
+                min(1.0, float(market_reliability) * float(match_score)),
+            )
+            if reliability <= 0.0:
+                continue
+            belief.update_with_evidence(
+                observed_price,
+                reliability=reliability,
+            )
         belief.mean = max(
             float(buyer.budget.min_price),
             min(float(buyer.budget.max_price), belief.mean),
-        )
-        state.preference_prior.update_intercept(
-            belief.mean,
-            max(1.0, belief.std ** 2),
         )
         return state
 
@@ -464,11 +498,20 @@ class ListingPortal:
         results = self.retriever.search(
             effective_query,
             max_budget=max_budget,
-            limit=10,  # TODO: revise this as needed
+            # Keep a slightly broader candidate pool than the single request we
+            # currently send so market feedback can reflect nearby alternatives.
+            limit=PORTAL_SEARCH_LIMIT,
+        )
+        match_scores = self._listing_match_scores(
+            buyer,
+            results,
+        )
+        relevant_observations, market_reliability, relevant_prices = (
+            self._relevant_market_observations(results, match_scores)
         )
         feedback = self._market_feedback(
             self.effective_reservation_price_for_buyer(buyer),
-            results,
+            relevant_prices,
         )
         requested_listing_ids = self._top_valid_listing_ids_for_buyer(
             buyer,
@@ -476,7 +519,13 @@ class ListingPortal:
         )
         buyer_id = buyer.id
         self.search_results_by_buyer[buyer_id] = list(results)
-        self._update_buyer_market_state(buyer, results, feedback)
+        self._update_buyer_market_state(
+            buyer,
+            relevant_observations,
+            market_reliability,
+            relevant_prices,
+            feedback,
+        )
         self.market_feedback_by_buyer[buyer_id] = feedback
 
         results_by_listing_id = {
@@ -552,7 +601,6 @@ class ListingPortal:
         existing_requests.append(request)
         return request
 
-    # Seller-side actions.
     def list_flat(
         self,
         seller: listing_schemas.PortalSeller,
@@ -594,7 +642,9 @@ class ListingPortal:
         if not open_requests:
             return None
 
-        chosen_request = self._rng.choice(open_requests) # For now, randomly select a request to review.
+        # Seller-side request triage is intentionally simple for now; this keeps
+        # the portal deterministic apart from the configured RNG seed.
+        chosen_request = self._rng.choice(open_requests)
         match = listing_schemas.NegotiationMatch(
             match_id=self._match_id(chosen_request.buyer_id, seller_id, week),
             buyer_id=chosen_request.buyer_id,
@@ -611,7 +661,6 @@ class ListingPortal:
         self.retriever.deactivate_listing(seller_id)
         return match
 
-    # Persistence helpers.
     def export_state(self) -> dict[str, Any]:
         return {
             'requests_by_seller': {

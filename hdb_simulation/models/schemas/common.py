@@ -185,18 +185,6 @@ PREFERENCE_CATEGORY_LABELS: dict[str, str] = {
     'other': 'Other Priorities',
 }
 
-PREFERENCE_PRIOR_DIMENSIONS: tuple[str, ...] = (
-    'intercept',
-    'flat_type_match',
-    'town_match',
-    'transport_access',
-    'school_access',
-    'shopping_access',
-    'dining_access',
-    'other_match',
-)
-
-
 class BuyerPreferenceItem(BaseModel):
     category: Literal[
         'flat_type',
@@ -258,120 +246,6 @@ class BuyerPreferenceProfile(BaseModel):
         )
 
 
-class BuyerPreferencePrior(BaseModel):
-    dimension_names: List[str] = Field(
-        default_factory=lambda: list(PREFERENCE_PRIOR_DIMENSIONS)
-    )
-    mean_vector: List[float]
-    covariance_matrix: List[List[float]]
-
-    @model_validator(mode='after')
-    def _validate_shape(self) -> 'BuyerPreferencePrior':
-        size = len(self.dimension_names)
-        if len(self.mean_vector) != size:
-            raise ValueError('BuyerPreferencePrior mean_vector must match dimension_names.')
-        if len(self.covariance_matrix) != size:
-            raise ValueError('BuyerPreferencePrior covariance_matrix must match dimension_names.')
-        if any(len(row) != size for row in self.covariance_matrix):
-            raise ValueError('BuyerPreferencePrior covariance_matrix must be square.')
-        return self
-
-    def index_of(self, dimension_name: str) -> int:
-        return self.dimension_names.index(dimension_name)
-
-    def project(self, attribute_vector: List[float]) -> tuple[float, float]:
-        if len(attribute_vector) != len(self.mean_vector):
-            raise ValueError('Attribute vector must match preference-prior dimensions.')
-        projected_mean = sum(
-            value * weight
-            for value, weight in zip(attribute_vector, self.mean_vector, strict=True)
-        )
-        projected_variance = 0.0
-        for row_index, row in enumerate(self.covariance_matrix):
-            for col_index, covariance in enumerate(row):
-                projected_variance += (
-                    attribute_vector[row_index]
-                    * covariance
-                    * attribute_vector[col_index]
-                )
-        return (projected_mean, max(1e-9, projected_variance))
-
-    def update_intercept(self, mean: float, variance: float) -> None:
-        index = self.index_of('intercept')
-        self.mean_vector[index] = max(0.0, float(mean))
-        self.covariance_matrix[index][index] = max(1e-9, float(variance))
-
-    def update_from_pseudo_observation(
-        self,
-        attribute_vector: List[float],
-        target_value: float,
-        observation_variance: float,
-    ) -> None:
-        """Bayesian linear update from a pseudo-observed flat valuation target."""
-        if len(attribute_vector) != len(self.mean_vector):
-            raise ValueError('Attribute vector must match preference-prior dimensions.')
-
-        observation_variance = max(1e-9, float(observation_variance))
-        # Sigma x term used in the Bayesian linear-regression / Kalman-style gain.
-        covariance_times_attribute = [
-            sum(
-                covariance * attribute_value
-                for covariance, attribute_value in zip(
-                    row,
-                    attribute_vector,
-                    strict=True,
-                )
-            )
-            for row in self.covariance_matrix
-        ]
-        predicted_mean, predicted_variance = self.project(attribute_vector)
-        # x' Sigma x + sigma_obs^2
-        innovation_variance = max(1e-9, predicted_variance + observation_variance)
-        # K = Sigma x / (x' Sigma x + sigma_obs^2)
-        kalman_gain = [
-            covariance_value / innovation_variance
-            for covariance_value in covariance_times_attribute
-        ]
-        # y_fail - x' mu
-        residual = max(0.0, float(target_value)) - predicted_mean
-
-        # mu_new = mu + K (y_fail - x' mu)
-        self.mean_vector = [
-            float(mean + (gain * residual))
-            for mean, gain in zip(self.mean_vector, kalman_gain, strict=True)
-        ]
-
-        # Sigma_new = Sigma - K x' Sigma
-        updated_covariance = [
-            [
-                float(covariance - (kalman_gain[row_index] * covariance_times_attribute[col_index]))
-                for col_index, covariance in enumerate(row)
-            ]
-            for row_index, row in enumerate(self.covariance_matrix)
-        ]
-
-        size = len(updated_covariance)
-        for row_index in range(size):
-            updated_covariance[row_index][row_index] = max(
-                1e-9,
-                updated_covariance[row_index][row_index],
-            )
-            for col_index in range(row_index + 1, size):
-                symmetric_value = 0.5 * (
-                    updated_covariance[row_index][col_index]
-                    + updated_covariance[col_index][row_index]
-                )
-                updated_covariance[row_index][col_index] = symmetric_value
-                updated_covariance[col_index][row_index] = symmetric_value
-
-        intercept_index = self.index_of('intercept')
-        self.mean_vector[intercept_index] = max(
-            0.0,
-            float(self.mean_vector[intercept_index]),
-        )
-        self.covariance_matrix = updated_covariance
-
-
 def coerce_buyer_preferences(
     preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
 ) -> BuyerPreferenceProfile | None:
@@ -423,71 +297,15 @@ def _budget_bounds(
     return (0.0, 0.0)
 
 
-def build_buyer_preference_prior(
-    preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
-    budget: BuyerBudgetRange | Mapping[str, Any] | None,
-    reservation_price_prior: float | None = None,
-) -> BuyerPreferencePrior:
-    profile = coerce_buyer_preferences(preferences)
-    budget_min, budget_max = _budget_bounds(budget)
-    anchor_price = (
-        max(0.0, float(reservation_price_prior))
-        if reservation_price_prior is not None
-        else max(0.0, 0.5 * (budget_min + budget_max))
-    )
-    base_std = max(25000.0, 0.1 * anchor_price)
-
-    def _strength(category: str) -> float:
-        return profile.strongest_strength_for(category) if profile is not None else 0.0
-
-    means = [
-        anchor_price,
-        0.02 * anchor_price * _strength('flat_type'),
-        0.015 * anchor_price * _strength('town'),
-        0.008 * anchor_price * _strength('transport'),
-        0.007 * anchor_price * _strength('schools'),
-        0.006 * anchor_price * _strength('shopping'),
-        0.006 * anchor_price * _strength('dining'),
-        0.006 * anchor_price * _strength('other'),
-    ]
-    stds = [
-        base_std,
-        0.45 * base_std,
-        0.40 * base_std,
-        0.25 * base_std,
-        0.25 * base_std,
-        0.20 * base_std,
-        0.20 * base_std,
-        0.30 * base_std,
-    ]
-    size = len(PREFERENCE_PRIOR_DIMENSIONS)
-    covariance = [[0.0 for _ in range(size)] for _ in range(size)]
-    for index, std in enumerate(stds):
-        covariance[index][index] = float(std ** 2)
-
-    def _set_covariance(left: str, right: str, correlation: float) -> None:
-        left_index = PREFERENCE_PRIOR_DIMENSIONS.index(left)
-        right_index = PREFERENCE_PRIOR_DIMENSIONS.index(right)
-        covariance_value = correlation * stds[left_index] * stds[right_index]
-        covariance[left_index][right_index] = covariance_value
-        covariance[right_index][left_index] = covariance_value
-
-    _set_covariance('transport_access', 'shopping_access', 0.20)
-    _set_covariance('transport_access', 'dining_access', 0.15)
-    _set_covariance('shopping_access', 'dining_access', 0.15)
-    _set_covariance('town_match', 'school_access', 0.10)
-
-    return BuyerPreferencePrior(
-        mean_vector=[float(value) for value in means],
-        covariance_matrix=covariance,
-    )
-
-
-def build_buyer_flat_attribute_vector(
+def build_buyer_flat_preference_match_score(
     preferences: BuyerPreferenceProfile | Mapping[str, Any] | None,
     flat_payload: Flat | Mapping[str, Any],
-) -> List[float]:
+) -> float:
+    """Scores how well a flat matches the buyer's stated preferences in [0, 1]."""
     profile = coerce_buyer_preferences(preferences)
+    if profile is None:
+        return 0.5
+
     payload = (
         flat_payload.model_dump(mode='python')
         if isinstance(flat_payload, Flat)
@@ -498,38 +316,43 @@ def build_buyer_flat_attribute_vector(
         str(item.type) if isinstance(item, Amenity) else str(item.get('type', ''))
         for item in nearby_amenities
     }
-
+    flat_type = str(payload.get('flat_type', '')).strip()
+    town = str(payload.get('town', '')).strip()
     flat_description = ' '.join(
         str(payload.get(field, ''))
         for field in ('description', 'address', 'storey_range')
     ).casefold()
-    other_match = 0.0
-    if profile is not None:
-        for description in profile.values_for('other'):
-            tokens = [
-                token for token in description.casefold().replace('/', ' ').split()
-                if len(token) > 3
-            ]
-            if tokens and any(token in flat_description for token in tokens):
-                other_match = 1.0
-                break
 
-    return [
-        1.0,
-        1.0
-        if profile is not None
-        and str(payload.get('flat_type', '')).strip() in profile.values_for('flat_type')
-        else 0.0,
-        1.0
-        if profile is not None
-        and str(payload.get('town', '')).strip() in profile.values_for('town')
-        else 0.0,
-        1.0 if str(AmenityType.MRT) in amenity_types else 0.0,
-        1.0 if str(AmenityType.SCHOOL) in amenity_types else 0.0,
-        1.0 if str(AmenityType.MALL) in amenity_types else 0.0,
-        1.0 if str(AmenityType.HAWKER) in amenity_types else 0.0,
-        other_match,
-    ]
+    category_matches = {
+        'flat_type': 1.0 if flat_type in profile.values_for('flat_type') else 0.0,
+        'town': 1.0 if town in profile.values_for('town') else 0.0,
+        'transport': 1.0 if str(AmenityType.MRT) in amenity_types else 0.0,
+        'schools': 1.0 if str(AmenityType.SCHOOL) in amenity_types else 0.0,
+        'shopping': 1.0 if str(AmenityType.MALL) in amenity_types else 0.0,
+        'dining': 1.0 if str(AmenityType.HAWKER) in amenity_types else 0.0,
+        'other': 0.0,
+    }
+    for description in profile.values_for('other'):
+        tokens = [
+            token for token in description.casefold().replace('/', ' ').split()
+            if len(token) > 3
+        ]
+        if tokens and any(token in flat_description for token in tokens):
+            category_matches['other'] = 1.0
+            break
+
+    weighted_matches = 0.0
+    total_weight = 0.0
+    for category in PREFERENCE_CATEGORY_LABELS:
+        weight = profile.strongest_strength_for(category)
+        if weight <= 0.0:
+            continue
+        total_weight += weight
+        weighted_matches += weight * category_matches.get(category, 0.0)
+
+    if total_weight <= 0.0:
+        return 0.5
+    return max(0.0, min(1.0, weighted_matches / total_weight))
 
 class BaseBuyer(BaseModel):
     id: str

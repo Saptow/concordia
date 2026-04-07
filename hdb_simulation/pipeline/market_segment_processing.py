@@ -1044,17 +1044,46 @@ def _build_flat_universe(
     date_min = transactions["Date"].min()
     date_max = transactions["Date"].max()
     date_span_days = max(1, int((date_max - date_min).days))
+    transaction_months = [
+        pd.Timestamp(value).to_period("M")
+        for value in transactions["Date"].tolist()
+    ]
+    ordered_months = sorted(dict.fromkeys(transaction_months))
+    initial_window_month_count = min(
+        config.initial_window_months,
+        len(ordered_months),
+    )
+    initial_window_months = set(ordered_months[:initial_window_month_count])
+    month_index_by_period = {
+        month_period: index
+        for index, month_period in enumerate(ordered_months)
+    }
+    initial_window_transaction_count = sum(
+        1 for month_period in transaction_months if month_period in initial_window_months
+    )
+    negotiating_cutoff = initial_window_transaction_count // 2
 
     flats: list[dict[str, Any]] = []
+    initial_window_position = 0
     for order_index, row in enumerate(transactions.itertuples(index=False), start=1):
         transaction_date = pd.Timestamp(row.Date)
         relative_timing = round((transaction_date - date_min).days / date_span_days, 6)
-        if relative_timing < 0.4:
-            initial_state = "negotiating"
-        elif relative_timing < 0.8:
-            initial_state = "listed"
+        transaction_month = transaction_date.to_period("M")
+        month_index = month_index_by_period[transaction_month]
+        if transaction_month in initial_window_months:
+            initial_window_position += 1
+            if initial_window_position <= negotiating_cutoff:
+                initial_state = "negotiating"
+            else:
+                initial_state = "listed"
+            listing_release_week = 1
         else:
             initial_state = "not_yet_listed"
+            # Expand the active transaction window by one calendar month every
+            # four simulation weeks after the week-1 bootstrap window.
+            listing_release_week = (
+                1 + (4 * (month_index - initial_window_month_count + 1))
+            )
 
         mall_names: list[str] = []
         mall_value = row.nearby_mall_names
@@ -1120,12 +1149,15 @@ def _build_flat_universe(
                 "town": config.town,
                 "year": int(config.year),
                 "transaction_date": transaction_date.date().isoformat(),
+                "transaction_year_month": str(transaction_month),
                 "simulated_market_entry_date": (
-                    transaction_date - pd.DateOffset(months=config.lead_months)
+                    transaction_date
+                    - pd.DateOffset(months=config.effective_lead_months)
                 ).date().isoformat(),
                 "initialization_order": order_index,
                 "relative_transaction_timing": relative_timing,
                 "initial_market_state": initial_state,
+                "listing_release_week": int(max(1, listing_release_week)),
                 "address": str(row.address).strip(),
                 "flat_type": str(row.flat_type_label),
                 "floor_range": str(row.storey_range).strip(),
@@ -1297,6 +1329,8 @@ def _build_sellers(
             "linked_flat_id": flat["flat_id"],
             "initialization_order": flat["initialization_order"],
             "initial_market_state": flat["initial_market_state"],
+            "listing_release_week": int(flat.get("listing_release_week", 1) or 1),
+            "transaction_year_month": str(flat.get("transaction_year_month", "")).strip(),
             "age": demographics["age"],
             "marital_status": demographics["marital_status"],
             "education_level": demographics["education_level"],

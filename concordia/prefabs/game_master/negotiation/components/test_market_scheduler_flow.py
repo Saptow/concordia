@@ -372,11 +372,6 @@ class NegotiationListingObservationTest(unittest.TestCase):
         description='Test buyer profile.',
         preferences=buyer_profile['preferences'],
         budget=buyer_profile['budget'],
-        preference_prior=common_schemas.build_buyer_preference_prior(
-            buyer_profile['preferences'],
-            buyer_profile['budget'],
-            reservation_price_prior=540000.0,
-        ),
         effective_reservation=common_schemas.NormalDistribution(
             name='buyer_effective_reservation',
             mean=540000.0,

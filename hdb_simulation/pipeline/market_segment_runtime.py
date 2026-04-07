@@ -165,7 +165,8 @@ def ensure_market_segment_listing_index(
         existing_client = qdrant_schemas.make_qdrant_client(persisted_qdrant_db_path)
         if existing_client.collection_exists(collection_name):
             logging.info(
-                'Reusing existing market-segment Qdrant index from %s.',
+                'Reusing existing market-segment Qdrant index %s from %s.',
+                collection_name,
                 persisted_qdrant_db_path,
             )
             return enriched_manifest, 0
@@ -175,7 +176,10 @@ def ensure_market_segment_listing_index(
             collection_name,
         )
 
-    logging.info('Indexing generated flats into Qdrant listing portal.')
+    logging.info(
+        'Indexing generated flats into Qdrant collection %s.',
+        collection_name,
+    )
     runtime_client = client or qdrant_schemas.make_qdrant_client(
         QdrantConfig.DEFAULT_DB_PATH
     )
@@ -193,5 +197,10 @@ def ensure_market_segment_listing_index(
         listed_week=0,
         active=False,
     )
-    logging.info('Saved persistent Qdrant copy to %s.', persisted_qdrant_db_path)
+    logging.info(
+        'Indexed %s generated flats into Qdrant collection %s and saved the persistent copy to %s.',
+        len(records),
+        collection_name,
+        persisted_qdrant_db_path,
+    )
     return enriched_manifest, len(records)

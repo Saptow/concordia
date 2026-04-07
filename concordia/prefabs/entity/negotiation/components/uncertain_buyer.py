@@ -343,32 +343,32 @@ class UncertainBuyer(
             "# Input\n"
             "## Buyer Preferences\n"
             f"{self._preferences}\n\n"
-            "## Buyer Preference Prior\n"
-            f"{buyer_state.preference_prior.model_dump(mode='json')}\n\n"
+            "## Buyer Effective Reservation\n"
+            f"{buyer_state.effective_reservation}\n\n"
             "## Failed Negotiation Snapshot\n"
             f"- failed_negotiation_count: {len(buyer_state.negotiation_history)}\n"
             f"{failed_history_summary}\n\n"
             "## Listing Snapshot\n"
             f"{uncertain_helper.build_compact_listing_context(listing_record)}\n\n"
             "# Rubric\n"
-            "- 0.20-0.40: the flat is weakly aligned with the buyer preference prior, there is little useful failed-negotiation experience, or the listing remains ambiguous.\n"
+            "- 0.20-0.40: the flat is weakly aligned with the buyer preferences, there is little useful failed-negotiation experience, or the listing remains ambiguous.\n"
             "- 0.45-0.65: the flat is partially aligned or past failed negotiations give only mixed guidance.\n"
-            "- 0.70-0.90: the flat is strongly aligned with the buyer preference prior, past failed negotiations provide useful comparison points, and the listing has low ambiguity.\n\n"
+            "- 0.70-0.90: the flat is strongly aligned with the buyer preferences, past failed negotiations provide useful comparison points, and the listing has low ambiguity.\n\n"
             "# Few-Shot Examples\n"
             "Example 1:\n"
-            "- Preference prior strongly favors this flat type and town.\n"
+            "- Buyer preferences strongly favor this flat type and town.\n"
             "- Failed negotiations provide useful comparable cases.\n"
             "- Listing is clear and specific.\n"
             '- Output: {"counterpart_confidence": 0.77}\n\n'
             "Example 2:\n"
-            "- Preference prior is only partially aligned.\n"
+            "- Buyer preferences are only partially aligned.\n"
             "- Failed negotiations do not provide much useful guidance.\n"
             "- Listing is partial and ambiguous.\n"
             '- Output: {"counterpart_confidence": 0.34}\n\n'
             "# Rules\n"
             "- Return JSON only.\n"
             "- Keep the value within [0, 1].\n"
-            "- Use the buyer preference prior and failed-negotiation history as the main signal.\n"
+            "- Use the buyer preferences and failed-negotiation history as the main signal.\n"
             "- If the paired flat is very similar to flats the buyer prefers and past failed negotiations provide useful comparison points, increase confidence.\n"
             "- Use listing ambiguity as a secondary adjustment.\n"
         )
@@ -400,28 +400,27 @@ class UncertainBuyer(
     ) -> uncertain_helper.NormalDistribution:
         buyer_state = listing_payload.buyer_state
         listing_prior = buyer_state.effective_reservation
-        attribute_vector = common_schemas.build_buyer_flat_attribute_vector(
+        preference_match_score = common_schemas.build_buyer_flat_preference_match_score(
             buyer_state.preferences,
             listing_payload.listing_record.flat,
         )
-        predictive_mean, preference_variance = buyer_state.preference_prior.project(
-            attribute_vector
-        )
-        irreducible_noise_sq = max(1.0, (0.35 * float(listing_prior.std)) ** 2)
-        predictive_variance = max(1.0, preference_variance + irreducible_noise_sq)
+        base_mean = max(0.0, float(listing_prior.mean))
+        base_std = max(1.0, float(listing_prior.std))
+        mismatch_discount = (1.0 - preference_match_score) * base_std
+        flat_mean = max(0.0, base_mean - mismatch_discount)
         uncertain_helper.append_debug_trace(
             self._debug_trace,
             (
-                'Initialized flat-specific buyer own reservation from preference prior '
-                f'with predictive_mean={predictive_mean:.2f}, '
-                f'preference_var={preference_variance:.2f}, '
-                f'noise_var={irreducible_noise_sq:.2f}.'
+                'Initialized flat-specific buyer own reservation from effective '
+                f'reservation and preference match score={preference_match_score:.2f}, '
+                f'base_mean={base_mean:.2f}, base_std={base_std:.2f}, '
+                f'mismatch_discount={mismatch_discount:.2f}.'
             ),
         )
         return uncertain_helper.NormalDistribution(
             name='Your Reservation Value For This Flat',
-            mean=max(0.0, predictive_mean),
-            std=math.sqrt(max(1e-9, predictive_variance)),
+            mean=flat_mean,
+            std=base_std,
             confidence=max(0.0, min(1.0, own_confidence)),
             # Fresh pair-local belief rebuild for this matched flat.
             evidence_count=0,

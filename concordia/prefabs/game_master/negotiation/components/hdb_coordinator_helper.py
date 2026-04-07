@@ -1,5 +1,4 @@
 from collections.abc import Mapping, Sequence
-from collections.abc import Mapping, Sequence
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -367,7 +366,7 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
             'Overview'
         ),
         (
-            '  Successful matches='
+            '  Listing matches staged for next week='
             f'{len(self._pending_matches)} '
             f'successful negotiations={successful} '
             f'failed negotiations={failed}'
@@ -381,7 +380,7 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     ]
     rendered = '\n'.join(lines)
     print(rendered, flush=True)
-    logging.info('\n%s', rendered)
+    logging.info('Weekly coordinator summary:\n%s', rendered)
 
   def complete_week(
       self,

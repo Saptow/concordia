@@ -28,7 +28,7 @@ def configure_logging() -> None:
 
 def initialise_model() -> VLLMLanguageModel:
     """Initialise the local vLLM model used across HDB workflows."""
-    logging.info('Initialising model...')
+    logging.info('Initialising model %s.', LLMConfig.MODEL_NAME)
     model = VLLMLanguageModel(
         model_name=LLMConfig.MODEL_NAME,
         trust_remote_code=LLMConfig.TRUST_REMOTE_CODE,
@@ -40,18 +40,27 @@ def initialise_model() -> VLLMLanguageModel:
         disable_custom_all_reduce=LLMConfig.DISABLE_CUSTOM_ALL_REDUCE,
         enforce_eager=LLMConfig.ENFORCE_EAGER,
     )
-    logging.info('Model initialised successfully.')
+    logging.info('Model %s initialised successfully.', LLMConfig.MODEL_NAME)
     return model
 
 
 def initialise_dense_embedding_model() -> SentenceTransformer:
     """Initialise the dense sentence embedder used by the listing portal."""
+    logging.info(
+        'Initialising dense embedder %s on device %s.',
+        DenseEmbedderConfig.MODEL_NAME,
+        DenseEmbedderConfig.DEVICE,
+    )
     model = SentenceTransformer(
         DenseEmbedderConfig.MODEL_NAME,
         device=DenseEmbedderConfig.DEVICE,
         local_files_only=DenseEmbedderConfig.LOCAL_FILES_ONLY,
     )
-    logging.info('Dense embedder initialised.')
+    logging.info(
+        'Dense embedder %s initialised on %s.',
+        DenseEmbedderConfig.MODEL_NAME,
+        DenseEmbedderConfig.DEVICE,
+    )
     return model
 
 
@@ -116,5 +125,8 @@ def initialise_sparse_embedding_model() -> SparseTextEmbedding:
             'FastEmbed will rely on its cache_dir behavior.'
         )
     model = SparseTextEmbedding(**model_kwargs)
-    logging.info('Sparse embedder initialised.')
+    logging.info(
+        'Sparse embedder %s initialised.',
+        SparseEmbedderConfig.MODEL_NAME,
+    )
     return model

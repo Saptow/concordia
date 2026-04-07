@@ -33,38 +33,22 @@ def _listing_price_for_seller(seller: listing_schemas.PortalSeller) -> float:
   max_price = float(seller.expectations.max_price)
   return max(min_price, max_price)
 
-def _derive_failed_negotiation_pseudo_observation(
+
+def _derive_failed_negotiation_learning_signal(
     *,
-    buyer: listing_schemas.PortalBuyer,
-    seller: listing_schemas.PortalSeller,
     payload: negotiation_schemas.NegotiationToListingPayload,
-    preference_prior: common_schemas.BuyerPreferencePrior,
-) -> tuple[list[float], float, float]:
-  """Builds a flat-specific pseudo-observation for buyer preference learning."""
-  # x_ij: feature vector for the failed-negotiation flat.
-  attribute_vector = common_schemas.build_buyer_flat_attribute_vector(
-      buyer.preferences,
-      seller.flat,
-  )
-  predicted_mean, predicted_variance = preference_prior.project(attribute_vector)
+) -> tuple[float, float]:
+  """Translate a failed negotiation into flat-specific learning evidence."""
   buyer_belief = payload.buyer_state.effective_reservation
-  buyer_final_mean = max(0.0, float(buyer_belief.mean))
-  buyer_final_std = max(1.0, float(buyer_belief.std))
+  observation = max(0.0, float(buyer_belief.mean))
   confidence = max(0.05, min(1.0, float(buyer_belief.confidence)))
   evidence_count = max(0, int(buyer_belief.evidence_count))
-
-  # y_fail: use the buyer's final flat-specific valuation belief after negotiation.
-  pseudo_target = buyer_final_mean
-  # More confidence and more accumulated evidence imply a more reliable pseudo-target.
-  evidence_scale = 1.0 + (0.25 * evidence_count)
-  belief_variance = buyer_final_std ** 2
-  confidence_adjusted_variance = belief_variance / (confidence * evidence_scale)
-  # sigma_obs^2: keep a floor tied to prior predictive variance to avoid over-learning
-  # from a single failed negotiation, even if the final belief is very tight.
-  variance_floor = max(1.0, 0.25 * predicted_variance)
-  observation_variance = max(variance_floor, confidence_adjusted_variance)
-  return attribute_vector, pseudo_target, observation_variance
-
+  experience_factor = min(1.0, 0.5 + (0.1 * evidence_count))
+  reliability = max(
+      0.0,
+      min(0.9, confidence * experience_factor),
+  )
+  return observation, reliability
 
 def execute_listing_week(
     *,
@@ -131,7 +115,12 @@ def execute_listing_week(
       else ({}, {})
   )
   for seller_id, error in listing_errors.items():
-    logging.error('Failed to list flat for seller %s: %s', seller_id, error)
+    logging.error(
+        'Listing week %s: failed to activate listing for seller %s: %s',
+        week_number,
+        seller_id,
+        error,
+    )
   for seller_id, _ in eligible_sellers_to_list:
     listing_id = listed_results.get(seller_id)
     if listing_id is None:
@@ -160,7 +149,12 @@ def execute_listing_week(
       else ({}, {})
   )
   for buyer_id, error in buyer_errors.items():
-    logging.error('Failed listing search/request for buyer %s: %s', buyer_id, error)
+    logging.error(
+        'Listing week %s: failed buyer %s portal search/request: %s',
+        week_number,
+        buyer_id,
+        error,
+    )
 
   for buyer_id, buyer in eligible_buyers:
     if buyer_results.get(buyer_id) is None:
@@ -193,7 +187,12 @@ def execute_listing_week(
       else ({}, {})
   )
   for seller_id, error in review_errors.items():
-    logging.error('Failed to review listing requests for seller %s: %s', seller_id, error)
+    logging.error(
+        'Listing week %s: failed seller %s request review/start-negotiation: %s',
+        week_number,
+        seller_id,
+        error,
+    )
   for seller_id, seller in eligible_sellers_to_review:
     sellers_reviewed.append(seller.name)
     result = review_results.get(seller_id)
@@ -279,6 +278,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
     self._active_seller_ids: set[str] = set()
     self._inactive_seller_queue: list[str] = []
+    self._seller_release_week_by_id: dict[str, int] = {}
     self._target_active_seller_count = 0
     self._last_released_seller_ids: list[str] = []
 
@@ -291,6 +291,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         str(seller_id): dict(payload)
         for seller_id, payload in dict(seller_profiles).items()
     }
+    self._seller_release_week_by_id = {
+        seller_id: max(1, int(payload.get('listing_release_week', 1) or 1))
+        for seller_id, payload in normalized_seller_profiles.items()
+    }
     initially_listed_seller_ids = {
         seller_id
         for seller_id, payload in normalized_seller_profiles.items()
@@ -300,6 +304,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     inactive_seller_records = sorted(
         (
             (
+                self._seller_release_week_by_id.get(seller_id, 1),
                 int(payload.get('initialization_order', 0) or 0),
                 seller_id,
             )
@@ -307,7 +312,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             if self._normalize_market_state(payload.get('initial_market_state'))
             == 'not_yet_listed'
         ),
-        key=lambda item: (item[0], item[1]),
+        key=lambda item: (item[0], item[1], item[2]),
     )
 
     self._buyers = {
@@ -322,11 +327,11 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         )
         for seller_id, payload in normalized_seller_profiles.items()
     }
-    self._inactive_seller_queue = [seller_id for _, seller_id in inactive_seller_records]
+    self._inactive_seller_queue = [
+        seller_id for _, _, seller_id in inactive_seller_records
+    ]
     self._active_seller_ids = set(self._sellers) - set(self._inactive_seller_queue)
     self._target_active_seller_count = len(initially_listed_seller_ids)
-    if self._target_active_seller_count <= 0 and self._inactive_seller_queue:
-      self._target_active_seller_count = 1
     self._portal_state: dict[str, Any] = {}
     self._portal: listing_portal_lib.ListingPortal | None = None
     if not self._enabled:
@@ -506,26 +511,19 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
   def is_finished(self) -> bool:
     return not self._enabled or self._stage_exhausted or not self.get_open_player_ids()
 
-  def _release_inactive_sellers_if_needed(self) -> list[str]:
-    """Release queued sellers when active listing capacity becomes available."""
-    if not self._inactive_seller_queue or self._target_active_seller_count <= 0:
-      self._last_released_seller_ids = []
-      return []
-
-    portal = self._ensure_portal()
-    active_open_seller_count = sum(
-        1
-        for seller_id in self._active_seller_ids
-        if not portal.is_player_closed(seller_id)
-    )
-    missing_capacity = self._target_active_seller_count - active_open_seller_count
-    if missing_capacity <= 0:
+  def _release_inactive_sellers_for_week(self, week_number: int) -> list[str]:
+    """Release every seller batch whose configured month has entered the window."""
+    if not self._inactive_seller_queue:
       self._last_released_seller_ids = []
       return []
 
     released: list[str] = []
-    while self._inactive_seller_queue and len(released) < missing_capacity:
-      seller_id = self._inactive_seller_queue.pop(0)
+    while self._inactive_seller_queue:
+      seller_id = self._inactive_seller_queue[0]
+      release_week = self._seller_release_week_by_id.get(seller_id, 1)
+      if release_week > week_number:
+        break
+      self._inactive_seller_queue.pop(0)
       self._active_seller_ids.add(seller_id)
       released.append(seller_id)
     self._last_released_seller_ids = released
@@ -533,11 +531,11 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def prepare_weekly_market(self, *, week_number: int | None = None) -> list[str]:
     """Refresh listing availability before assignments are computed."""
-    del week_number
     if not self._enabled:
       self._last_released_seller_ids = []
       return []
-    return self._release_inactive_sellers_if_needed()
+    normalized_week = max(1, int(week_number or 1))
+    return self._release_inactive_sellers_for_week(normalized_week)
 
   def get_open_player_ids(self) -> set[str]:
     if not self._enabled or self._stage_exhausted:
@@ -574,8 +572,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       listing_record = self._ensure_portal().get_listing_record(seller_id)
       if listing_record is None:
         logging.warning(
-            'Skipping listing-to-negotiation transfer for %s because no active listing record was found.',
+            'Skipping listing-to-negotiation transfer for %s because seller %s has no listing record in the portal.',
             match.match_id,
+            seller_id,
         )
         continue
       payload = negotiation_schemas.ListingNegotiationTransferPayload(
@@ -637,22 +636,35 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       buyer.negotiation_history.append(payload.negotiation_history.model_copy(deep=True))
       seller.negotiation_history.append(payload.negotiation_history.model_copy(deep=True))
       buyer_market_state = portal._buyer_market_state(buyer)
-      attribute_vector, pseudo_target, observation_variance = (
-          _derive_failed_negotiation_pseudo_observation(
-              buyer=buyer,
-              seller=seller,
+      observation, reliability = (
+          _derive_failed_negotiation_learning_signal(
               payload=payload,
-              preference_prior=buyer_market_state.preference_prior,
           )
       )
-      buyer_market_state.preference_prior.update_from_pseudo_observation(
-          attribute_vector,
-          pseudo_target,
-          observation_variance,
-      )
-      buyer_market_state.effective_reservation = (
-          payload.buyer_state.effective_reservation.model_copy(deep=True)
-      )
+      if reliability > 0.0:
+        buyer_market_state.effective_reservation.update_with_evidence(
+            observation,
+            reliability=reliability,
+        )
+        buyer_market_state.effective_reservation.mean = max(
+            float(buyer.budget.min_price),
+            min(
+                float(buyer.budget.max_price),
+                float(buyer_market_state.effective_reservation.mean),
+            ),
+        )
+        buyer_market_state.latest_market_feedback = (
+            'Updated reservation after a failed negotiation using '
+            f'flat-specific evidence near SGD {observation:.0f}.'
+        )
+        if (
+            not buyer_market_state.feedback_history
+            or buyer_market_state.feedback_history[-1]
+            != buyer_market_state.latest_market_feedback
+        ):
+          buyer_market_state.feedback_history.append(
+              buyer_market_state.latest_market_feedback
+          )
       portal._seller_market_state(seller).effective_reservation = (
           payload.seller_state.effective_reservation.model_copy(deep=True)
       )
@@ -764,7 +776,6 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         negotiation_history=[
             record.model_copy(deep=True) for record in buyer.negotiation_history
         ],
-        preference_prior=market_state.preference_prior.model_copy(deep=True),
         effective_reservation=market_state.effective_reservation,
         latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
         latest_market_feedback=portal.market_feedback_by_buyer.get(
@@ -894,6 +905,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'last_outcome': self._last_outcome.model_dump(),
         'active_seller_ids': sorted(self._active_seller_ids),
         'inactive_seller_queue': list(self._inactive_seller_queue),
+        'seller_release_week_by_id': dict(self._seller_release_week_by_id),
         'target_active_seller_count': self._target_active_seller_count,
         'last_released_seller_ids': list(self._last_released_seller_ids),
     }
@@ -944,6 +956,12 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._inactive_seller_queue = [
         str(seller_id) for seller_id in state.get('inactive_seller_queue', ())
     ]
+    self._seller_release_week_by_id = {
+        str(seller_id): max(1, int(release_week or 1))
+        for seller_id, release_week in dict(
+            state.get('seller_release_week_by_id', {})
+        ).items()
+    }
     self._target_active_seller_count = int(
         state.get('target_active_seller_count', self._target_active_seller_count)
     )

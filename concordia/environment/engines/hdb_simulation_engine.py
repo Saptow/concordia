@@ -145,10 +145,16 @@ class HDBSimulationEngine(engine_lib.Engine):
     for module, player_ids in module_requests:
       if not player_ids or not hasattr(module, 'get_entity_log_snapshots'):
         continue
+      module_name = type(module).__name__
       try:
         snapshots = module.get_entity_log_snapshots(player_ids)
       except Exception as error:  # pylint: disable=broad-exception-caught
-        logging.warning('Failed to collect module entity logs: %s', error)
+        logging.warning(
+            'Failed to collect entity logs from %s for %s player(s): %s',
+            module_name,
+            len(player_ids),
+            error,
+        )
         continue
       if not isinstance(snapshots, Mapping):
         continue
@@ -202,8 +208,6 @@ class HDBSimulationEngine(engine_lib.Engine):
 
     game_master = coordinator_gm
     steps = 0
-    # if premise: # Game master has no generative elements 
-    #   game_master.observe(f'{EVENT_TAG} {premise}')
 
     while not self.terminate(game_master) and steps < max_steps:
       if step_controller is not None:
@@ -403,7 +407,6 @@ class HDBSimulationEngine(engine_lib.Engine):
           )
         entity.observe(observation)
 
-# 
   def _deliver_pending_observations(
       self,
       *,
@@ -485,7 +488,8 @@ class HDBSimulationEngine(engine_lib.Engine):
     )
 
     tasks: dict[str, Callable[[], Any]] = {}
-    # TODO: add more modules if needed. 
+    # Run the listing and negotiation modules independently, then merge their
+    # outputs back into one weekly summary for the coordinator.
     if week_context['listing_enabled']:
       tasks['listing'] = functools.partial(
           listing_module.run_week,
