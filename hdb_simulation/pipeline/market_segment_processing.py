@@ -891,12 +891,15 @@ def _load_town_transactions(config: SegmentConfig) -> pd.DataFrame:
 
 
 def _load_transactions(config: SegmentConfig) -> pd.DataFrame:
-    """Load the simulation window: successful transactions for the configured town-year."""
+    """Load the simulation window for the configured town-year segment."""
     town_rows = _load_town_transactions(config)
     filtered = town_rows[town_rows["year"].astype(int) == int(config.year)].copy()
+    filtered = filtered[filtered["Date"].dt.month.isin(config.segment_months)].copy()
     if filtered.empty:
         raise ValueError(
-            f"No successful resale rows found for town={config.town!r} year={config.year}."
+            "No successful resale rows found for "
+            f"town={config.town!r} year={config.year} "
+            f"segment={config.segment_label!r}."
         )
     return filtered.reset_index(drop=True)
 
@@ -1142,12 +1145,16 @@ def _build_flat_universe(
         )
 
         normalized_town = _normalize_text(config.town).replace(" ", "_")
-        flat_id = f"{config.year}_{normalized_town}_{order_index:05d}"
+        flat_id_prefix = f"{config.year}_{normalized_town}"
+        if not config.is_full_year_segment:
+            flat_id_prefix = f"{flat_id_prefix}_{config.segment_label}"
+        flat_id = f"{flat_id_prefix}_{order_index:05d}"
         flats.append(
             {
                 "flat_id": flat_id,
                 "town": config.town,
                 "year": int(config.year),
+                "segment": config.segment_label,
                 "transaction_date": transaction_date.date().isoformat(),
                 "transaction_year_month": str(transaction_month),
                 "simulated_market_entry_date": (
@@ -2272,9 +2279,10 @@ def build_transaction_conditioned_segment(
 ) -> dict[str, Any]:
     """Run the end-to-end preprocessing pipeline for one town-year market segment."""
     logging.info(
-        "Building transaction-conditioned market segment for town=%s year=%s.",
+        "Building transaction-conditioned market segment for town=%s year=%s segment=%s.",
         config.town,
         config.year,
+        config.segment_label,
     )
     rng = random.Random(config.random_seed)
 
@@ -2464,6 +2472,9 @@ def save_segment_outputs(bundle: dict[str, Any], output_dir: Path) -> dict[str, 
     _write_jsonl(buyers_retained_path, bundle["buyers_retained"])
 
     manifest = {
+        "town": bundle["flats"][0]["town"] if bundle["flats"] else "",
+        "year": bundle["flats"][0]["year"] if bundle["flats"] else "",
+        "segment": bundle["flats"][0]["segment"] if bundle["flats"] else "full_year",
         "flat_units_path": flats_path.name,
         "sellers_path": sellers_path.name,
         "buyers_broad_path": buyers_broad_path.name,

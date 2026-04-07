@@ -113,9 +113,10 @@ def build_or_load_market_segment(
         return load_bundle_from_manifest(market_manifest_path)
 
     logging.info(
-        'Running market segment preprocessing for %s (%s).',
+        'Running market segment preprocessing for %s (%s, segment=%s).',
         segment_config.town,
         segment_config.year,
+        segment_config.segment_label,
     )
     bundle = market_segment_processing.build_transaction_conditioned_segment(
         segment_config,
@@ -149,6 +150,11 @@ def ensure_market_segment_listing_index(
         or QdrantConfig.market_db_path(
             town=segment_config.town,
             year=segment_config.year,
+            segment_label=(
+                None
+                if segment_config.is_full_year_segment
+                else segment_config.segment_label
+            ),
             restrained_seller_count=segment_config.restrained_seller_count,
             buyer_pool_multiplier=segment_config.buyer_pool_multiplier,
             retained_buyer_pool_multiplier=(
