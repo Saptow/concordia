@@ -20,8 +20,9 @@ from concordia.typing import entity_component
 
 
 TEXT_PAGE_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
-ACTIVE_POLICY_SOURCES_BLOCK_PREFIX = '[[POLICY_ACTIVE_SOURCES_JSON]]'
-ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX = '[[/POLICY_ACTIVE_SOURCES_JSON]]'
+DEFAULT_CURRENT_POLICY_PROMPT = (
+    "No simulation-specific policies are currently in effect."
+)
 
 
 class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
@@ -66,6 +67,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._last_cache_value: str | None = None
         self._policy_pages_cache: list[PolicyPage] | None = None
         self._policy_pages_cache_signature: tuple[tuple[str, int], ...] | None = None
+        self._current_policy_prompt = DEFAULT_CURRENT_POLICY_PROMPT
+        self._synced_active_source_paths: list[str] | None = None
         self._tool_schemas = self._build_vllm_tools()
         self._tool_schema_by_name = {
             tool["function"]["name"]: tool for tool in self._tool_schemas
@@ -146,45 +149,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._policy_pages_cache_signature = signature
         return self._policy_pages_cache
 
-    def _active_source_paths(
-        self,
-        *,
-        observation: str,
-        recent_memories: list[str],
-    ) -> list[str] | None:
-        latest_match: list[str] | None = None
-        for candidate_text in (observation, *recent_memories):
-            parsed = self._extract_active_source_paths(candidate_text)
-            if parsed is not None:
-                latest_match = parsed
-        return latest_match
-
-    @classmethod
-    def _extract_active_source_paths(cls, text: str) -> list[str] | None:
-        raw_text = str(text or "")
-        start = raw_text.rfind(ACTIVE_POLICY_SOURCES_BLOCK_PREFIX)
-        if start == -1:
-            return None
-        start += len(ACTIVE_POLICY_SOURCES_BLOCK_PREFIX)
-        end = raw_text.find(ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX, start)
-        if end == -1:
-            return None
-        try:
-            payload = json.loads(raw_text[start:end].strip())
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, list):
-            return None
-        normalized_paths: list[str] = []
-        seen_paths: set[str] = set()
-        for item in payload:
-            normalized = cls._normalize_page_path(str(item))
-            if not normalized or normalized in seen_paths:
-                continue
-            seen_paths.add(normalized)
-            normalized_paths.append(normalized)
-        return normalized_paths
-
     def _filter_pages_to_active_sources(
         self,
         *,
@@ -259,7 +223,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                     "name": PolicyToolConfig.DIRECTORY_SCREENING_TOOL_NAME,
                     "description": (
                         "Read the configured HDB resale policy directory JSONL and return "
-                        "PolicyPageDirectory-style entries that can be screened for relevance."
+                        "PolicyPageDirectory entries that can be screened for relevance."
                     ),
                     "parameters": {
                         "type": "object",
@@ -279,7 +243,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                     "name": PolicyToolConfig.FULL_PAGE_RETRIEVAL_TOOL_NAME,
                     "description": (
                         "Read exact HDB resale policy pages for the given directory paths and "
-                        "return RetrievedFullPolicyPages-style records with grounded full text."
+                        "return RetrievedFullPolicyPages records with grounded full text."
                     ),
                     "parameters": {
                         "type": "object",
@@ -666,17 +630,48 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._last_cache_value = result
         return result
 
+    def set_active_policy_context(
+        self,
+        *,
+        current_policy_prompt: str,
+        active_source_paths: list[str] | tuple[str, ...] | None,
+    ) -> None:
+        normalized_prompt = str(current_policy_prompt or "").strip()
+        self._current_policy_prompt = (
+            normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
+        )
+        if active_source_paths is None:
+            self._synced_active_source_paths = None
+        else:
+            normalized_paths: list[str] = []
+            seen_paths: set[str] = set()
+            for raw_path in active_source_paths:
+                normalized = self._normalize_page_path(str(raw_path))
+                if not normalized or normalized in seen_paths:
+                    continue
+                seen_paths.add(normalized)
+                normalized_paths.append(normalized)
+            self._synced_active_source_paths = normalized_paths
+        self._last_cache_key = None
+        self._last_cache_value = None
+
+    def _compose_pre_act_value(self, policy_guidance: str) -> str:
+        return (
+            "## Current Policy State\n"
+            f"{self._current_policy_prompt}\n\n"
+            "## Relevant Policy Guidance\n"
+            f"{policy_guidance or self._no_relevant_policy_summary()}"
+        )
+
     def _make_pre_act_value(self) -> str:
         observation = self._current_observation()
         recent_memories = self._recent_memories()
-        active_source_paths = self._active_source_paths(
-            observation=observation,
-            recent_memories=recent_memories,
-        )
+        active_source_paths = self._synced_active_source_paths
         cache_key = json.dumps(
             {
                 "observation": observation,
                 "recent_memories": recent_memories,
+                "current_policy_prompt": self._current_policy_prompt,
                 "policy_index_paths": [
                     self._display_path(path) for path in self._policy_index_paths
                 ],
@@ -697,7 +692,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         except Exception:
             return self._cache_result(
                 cache_key=cache_key,
-                result=self._no_relevant_policy_summary(),
+                result=self._compose_pre_act_value(
+                    self._no_relevant_policy_summary()
+                ),
             )
 
         tool_result = self._run_required_hdb_policy_tool_workflow(
@@ -707,7 +704,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         )
         return self._cache_result(
             cache_key=cache_key,
-            result=tool_result or self._no_relevant_policy_summary(),
+            result=self._compose_pre_act_value(
+                tool_result or self._no_relevant_policy_summary()
+            ),
         )
 
     def update(self) -> None:
@@ -725,6 +724,12 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             "max_directory_candidates": self._max_directory_candidates,
             "max_page_chars": self._max_page_chars,
             "tool_call_retries": self._tool_call_retries,
+            "current_policy_prompt": self._current_policy_prompt,
+            "active_source_paths": (
+                list(self._synced_active_source_paths)
+                if self._synced_active_source_paths is not None
+                else None
+            ),
         }
 
     def set_state(self, state: entity_component.ComponentState) -> None:
@@ -758,5 +763,24 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             self._max_page_chars = max(1_000, max_page_chars) if max_page_chars > 0 else 0
         if "tool_call_retries" in state:
             self._tool_call_retries = max(1, int(state["tool_call_retries"]))
+        if "current_policy_prompt" in state:
+            current_policy_prompt = str(state["current_policy_prompt"]).strip()
+            self._current_policy_prompt = (
+                current_policy_prompt or DEFAULT_CURRENT_POLICY_PROMPT
+            )
+        if "active_source_paths" in state:
+            raw_paths = state["active_source_paths"]
+            if raw_paths is None:
+                self._synced_active_source_paths = None
+            else:
+                normalized_paths: list[str] = []
+                seen_paths: set[str] = set()
+                for raw_path in raw_paths:
+                    normalized = self._normalize_page_path(str(raw_path))
+                    if not normalized or normalized in seen_paths:
+                        continue
+                    seen_paths.add(normalized)
+                    normalized_paths.append(normalized)
+                self._synced_active_source_paths = normalized_paths
         self._last_cache_key = None
         self._last_cache_value = None

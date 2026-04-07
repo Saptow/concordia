@@ -226,9 +226,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
   def _register_pair(self, buyer_id: str, seller_id: str) -> None:
     """Registers a new pair with the scheduler and offer tracker."""
-    if self._pair_exists(buyer_id, seller_id):
-      return
-    self._scheduler.append_pair(buyer_id, seller_id)
+    if not self._pair_exists(buyer_id, seller_id):
+      self._scheduler.append_pair(buyer_id, seller_id)
     self._offer_tracker.register_pair(buyer_id, seller_id)
 
   def _parse_listing_transfer_payload(
@@ -791,11 +790,15 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self,
       player_id: str,
       *,
+      buyer_id: str,
+      seller_id: str,
       has_active_offer: bool,
   ) -> tuple[str | None, bool]:
     """Runs one player turn and returns `(event, should_force_close_pair)`."""
     action_spec = self._build_action_spec_for_pair_state(
         player_id,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
         has_active_offer=has_active_offer,
     )
     if action_spec.output_type == entity_lib.OutputType.SKIP_THIS_STEP:
@@ -818,18 +821,14 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self,
       player_id: str,
       *,
+      buyer_id: str,
+      seller_id: str,
       has_active_offer: bool,
   ) -> entity_lib.ActionSpec:
     """Builds the action spec from pair-local offer state."""
-    pair_members = self._offer_tracker.get_pair_members_for_player(player_id)
-    if not pair_members:
-      return entity_lib.ActionSpec(
-          call_to_action='',
-          output_type=entity_lib.OutputType.SKIP_THIS_STEP,
-      )
     role = (
         negotiation_schemas.RoleType.BUYER
-        if pair_members[0] == player_id
+        if buyer_id == player_id
         else negotiation_schemas.RoleType.SELLER
     )
     allowed_actions = tuple(
@@ -904,6 +903,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
     buyer_event, should_close_pair = self._execute_player_turn(
         buyer_id,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
         has_active_offer=local_has_active_offer,
     )
     force_close = force_close or should_close_pair
@@ -922,6 +923,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if not local_is_closed and not force_close:
       seller_event, should_close_pair = self._execute_player_turn(
           seller_id,
+          buyer_id=buyer_id,
+          seller_id=seller_id,
           has_active_offer=local_has_active_offer,
       )
       force_close = force_close or should_close_pair
@@ -971,8 +974,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             self._run_pair_task,
             buyer_id,
             seller_id,
-            has_active_offer=self._offer_tracker.has_active_offer_for_player(
-                buyer_id
+            has_active_offer=self._offer_tracker.has_active_offer_for_pair(
+                buyer_id,
+                seller_id,
             ),
             is_closed=self._scheduler.is_pair_closed(buyer_id, seller_id),
         )

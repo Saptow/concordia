@@ -532,6 +532,11 @@ class ActiveOfferTracker:
       return False
     return self._active_offers.get(pair_key) is not None
 
+  def has_active_offer_for_pair(self, buyer_id: str, seller_id: str) -> bool:
+    """Returns whether a specific buyer/seller pair has an active offer."""
+    self._ensure_initialized()
+    return self._active_offers.get(self._pair_key(buyer_id, seller_id)) is not None
+
   def get_action_policy_for_player(self, player_id: str) -> dict[str, object]:
     """Returns the allowed action policy for a player from pair-local state."""
     self._ensure_initialized()

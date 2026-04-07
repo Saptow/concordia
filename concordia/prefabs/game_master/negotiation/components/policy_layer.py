@@ -405,38 +405,19 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
     return due_schedules
 
   @classmethod
-  def _active_sources_block(cls, source_paths: Sequence[str]) -> str:
-    return (
-        f'{ACTIVE_POLICY_SOURCES_BLOCK_PREFIX}\n'
-        f'{json.dumps(list(source_paths), ensure_ascii=False)}\n'
-        f'{ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX}'
-    )
-
-  @classmethod
-  def extract_active_source_paths(cls, text: str) -> list[str] | None:
-    raw_text = str(text or '')
-    start = raw_text.rfind(ACTIVE_POLICY_SOURCES_BLOCK_PREFIX)
-    if start == -1:
-      return None
-    start += len(ACTIVE_POLICY_SOURCES_BLOCK_PREFIX)
-    end = raw_text.find(ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX, start)
-    if end == -1:
-      return None
-    try:
-      payload = json.loads(raw_text[start:end].strip())
-    except json.JSONDecodeError:
-      return None
-    if not isinstance(payload, list):
-      return None
-    normalized_sources: list[str] = []
-    seen_sources: set[str] = set()
-    for item in payload:
-      normalized = cls._normalize_markdown_path(str(item))
-      if not normalized or normalized in seen_sources:
-        continue
-      seen_sources.add(normalized)
-      normalized_sources.append(normalized)
-    return normalized_sources
+  def _format_current_policy_prompt(
+      cls,
+      *,
+      current_policies: Sequence[PolicyStateEntry],
+  ) -> str:
+    if current_policies:
+      lines = ['Current policy state in effect:']
+      lines.extend(
+          f'{index}. {policy.policy_type.strip()}: {policy.policy_text.strip()}'
+          for index, policy in enumerate(current_policies, start=1)
+      )
+      return '\n'.join(lines)
+    return 'No simulation-specific policies are currently in effect.'
 
   @classmethod
   def _format_policy_observation(
@@ -444,42 +425,32 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
       *,
       week_number: int,
       current_policies: Sequence[PolicyStateEntry],
-      active_source_paths: Sequence[str],
       newly_applied_schedules: Sequence[PolicyWeekSchedule],
   ) -> str:
-    lines = [f'Week {week_number} policy announcement.']
-
     newly_applied_policies = [
         policy
         for schedule in newly_applied_schedules
         for policy in schedule.policies
     ]
-    if newly_applied_policies:
-      lines.append('New policy updates taking effect this week:')
-      lines.extend(
-          f'- {policy.policy_type.strip()}: {policy.policy_text.strip()}'
-          for policy in newly_applied_policies
-      )
-    else:
-      lines.append('No new policy changes took effect this week.')
+    if not newly_applied_policies:
+      return ''
 
-    if current_policies:
-      lines.append('Current policy state in effect:')
-      lines.extend(
-          f'{index}. {policy.policy_type.strip()}: {policy.policy_text.strip()}'
-          for index, policy in enumerate(current_policies, start=1)
-      )
-    else:
-      lines.append('No simulation-specific policies are currently in effect.')
-
-    if active_source_paths:
+    lines = [f'Week {week_number} policy announcement.']
+    lines.append('New policy updates taking effect this week:')
+    for policy in newly_applied_policies:
       lines.append(
-          f'Policy retrieval source files currently active: '
-          f'{len(active_source_paths)}.'
+          f'- {policy.policy_type.strip()}: {policy.policy_text.strip()}'
       )
-    else:
-      lines.append('No policy retrieval source files are currently active.')
-    lines.append(cls._active_sources_block(active_source_paths))
+      normalized_sources = cls._normalize_policy_sources(
+          policy.sources,
+          context='policy.sources',
+      )
+      if normalized_sources:
+        lines.append('  Sources:')
+        lines.extend(f'  - {source}' for source in normalized_sources)
+    lines.append(cls._format_current_policy_prompt(
+        current_policies=current_policies,
+    ))
     return '\n'.join(lines)
 
   def _make_pre_act_value(self) -> str:
@@ -509,6 +480,11 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
   def get_active_source_paths(self) -> list[str]:
     return list(self._active_source_paths())
 
+  def get_current_policy_prompt(self) -> str:
+    return self._format_current_policy_prompt(
+        current_policies=self._current_policies,
+    )
+
   def announce_policies_for_week(
       self,
       *,
@@ -534,13 +510,16 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
       return {}
 
     due_schedules = self._apply_weekly_policy_updates(week_number=int(week_number))
-    active_source_paths = self._active_source_paths()
     observation = self._format_policy_observation(
         week_number=int(week_number),
         current_policies=self._current_policies,
-        active_source_paths=active_source_paths,
         newly_applied_schedules=due_schedules,
     )
+    if not observation:
+      self._last_announcements = []
+      return {}
+
+    active_source_paths = self._active_source_paths()
     self._announced_weeks.add(int(week_number))
     self._last_announcements = [{
         'week_number': int(week_number),

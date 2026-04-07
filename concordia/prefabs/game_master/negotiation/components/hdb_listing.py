@@ -123,7 +123,10 @@ def execute_listing_week(
       for seller_id, seller in eligible_sellers_to_list
   }
   listed_results, listing_errors = (
-      concurrency.run_tasks_in_background(seller_listing_tasks)
+      concurrency.run_tasks_in_background(
+          seller_listing_tasks,
+          max_workers=1,
+      )
       if seller_listing_tasks
       else ({}, {})
   )
@@ -149,7 +152,12 @@ def execute_listing_week(
       for buyer_id, buyer in eligible_buyers
   }
   buyer_results, buyer_errors = (
-      concurrency.run_tasks_in_background(buyer_tasks) if buyer_tasks else ({}, {})
+      concurrency.run_tasks_in_background(
+          buyer_tasks,
+          max_workers=1,
+      )
+      if buyer_tasks
+      else ({}, {})
   )
   for buyer_id, error in buyer_errors.items():
     logging.error('Failed listing search/request for buyer %s: %s', buyer_id, error)
@@ -177,7 +185,10 @@ def execute_listing_week(
       for seller_id, seller in eligible_sellers_to_review
   }
   review_results, review_errors = (
-      concurrency.run_tasks_in_background(seller_review_tasks)
+      concurrency.run_tasks_in_background(
+          seller_review_tasks,
+          max_workers=1,
+      )
       if seller_review_tasks
       else ({}, {})
   )

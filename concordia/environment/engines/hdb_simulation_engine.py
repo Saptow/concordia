@@ -6,10 +6,12 @@ import json
 from typing import Any
 
 from absl import logging
+from configs import NegotiationComponentConfig
 from concordia.components.game_master import event_resolution as event_resolution_components
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.environment import engine as engine_lib
 from concordia.environment import step_controller as step_controller_lib
+from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.game_master.negotiation.components import hdb_coordinator_helper
 from concordia.typing import entity as entity_lib
 from concordia.utils import concurrency
@@ -344,6 +346,27 @@ class HDBSimulationEngine(engine_lib.Engine):
       ]
     if not normalized_player_ids:
       return
+
+    current_policy_prompt = getattr(
+        policy_layer,
+        'get_current_policy_prompt',
+        lambda: '',
+    )()
+    active_source_paths = list(
+        getattr(policy_layer, 'get_active_source_paths', lambda: [])()
+    )
+    for entity in entities:
+      try:
+        policy_prompt = entity.get_component(
+            NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY,
+            type_=hdb_policy_tool_prompt.HDBPolicyToolPrompt,
+        )
+      except Exception:  # pylint: disable=broad-exception-caught
+        continue
+      policy_prompt.set_active_policy_context(
+          current_policy_prompt=current_policy_prompt,
+          active_source_paths=active_source_paths,
+      )
 
     observations_by_player_id = policy_layer.announce_policies_for_week(
         week_number=int(week_number),

@@ -27,7 +27,7 @@ class PolicyLayerComponentTest(unittest.TestCase):
     path.write_text(textwrap.dedent(content).strip() + '\n', encoding='utf-8')
     return str(path)
 
-  def test_announces_current_policy_state_every_week(self):
+  def test_only_announces_when_policy_changes(self):
     policy_yaml_path = self._write_policy_yaml(
         """
         initial_state:
@@ -49,10 +49,11 @@ class PolicyLayerComponentTest(unittest.TestCase):
         week_number=1,
         active_player_ids=['buyer_1', 'seller_1'],
     )
-    week_1_message = week_1['buyer_1'][0]
-    self.assertIn('Week 1 policy announcement.', week_1_message)
-    self.assertIn('No new policy changes took effect this week.', week_1_message)
-    self.assertIn('Baseline MSR cap remains in force.', week_1_message)
+    self.assertEqual(week_1, {})
+    self.assertIn(
+        'Baseline MSR cap remains in force.',
+        component.get_current_policy_prompt(),
+    )
 
     week_2 = component.announce_policies_for_week(
         week_number=2,
@@ -72,14 +73,19 @@ class PolicyLayerComponentTest(unittest.TestCase):
         {},
     )
 
-  def test_tracks_active_source_paths_in_announcement(self):
+  def test_includes_sources_for_changed_policies_only(self):
     policy_yaml_path = self._write_policy_yaml(
         """
         initial_state:
           - policy_type: Financing and Affordability Rules
             policy_text: Baseline MSR cap remains in force.
-            sources:
-              - data/policies/2022/page/key-statistics.extracted.md
+        policies:
+          - week: 2
+            policies:
+              - policy_type: Grants and Subsidies
+                policy_text: New first-time buyer grant is now available.
+                sources:
+                  - data/policies/2022/page/key-statistics.extracted.md
         """
     )
     component = policy_layer.PolicyLayerComponent(
@@ -91,15 +97,16 @@ class PolicyLayerComponentTest(unittest.TestCase):
         week_number=1,
         active_player_ids=['buyer_1'],
     )
-    week_1_message = week_1['buyer_1'][0]
+    self.assertEqual(week_1, {})
 
-    self.assertIn(
-        'Policy retrieval source files currently active: 1.',
-        week_1_message,
+    week_2 = component.announce_policies_for_week(
+        week_number=2,
+        active_player_ids=['buyer_1'],
     )
+    week_2_message = week_2['buyer_1'][0]
     self.assertIn(
         'data/policies/2022/page/key-statistics.extracted.md',
-        week_1_message,
+        week_2_message,
     )
     self.assertEqual(
         component.get_active_source_paths(),

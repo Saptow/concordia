@@ -253,6 +253,40 @@ class BuildMarketProfilesTest(unittest.TestCase):
     self.assertLen(model.prompts, 1)
     self.assertIn('teacher', model.prompts[0].lower())
 
+  def test_name_generation_prompt_uses_few_shot_extract_or_invent_examples(self):
+    bundle = {
+        'buyers_retained': [{
+            'buyer_id': 'buyer_2023_00563',
+            'age': 25,
+            'occupation_category': 'Associate Professional or Technician',
+            'general_persona': (
+                'Ivan blends a curiosity-driven pragmatism with quiet '
+                'compassion, tunes A.R. Rahman\'s soundtracks while perfecting '
+                'his masala dosa, and cannot resist adding a new cricket '
+                'figurine to his shelf.'
+            ),
+            'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+            'budget': copy.deepcopy(_buyer_profile()['budget']),
+        }],
+        'sellers': [],
+    }
+    model = _FakeNameModel('Ivan')
+
+    buyer_profiles, _ = hdb_initializer_gm.build_market_profiles(
+        bundle,
+        town='Choa Chu Kang',
+        model=model,
+    )
+
+    self.assertEqual(
+        buyer_profiles['buyer_2023_00563']['name'],
+        'Ivan',
+    )
+    self.assertLen(model.prompts, 1)
+    self.assertIn('if the persona already contains a plausible personal name', model.prompts[0].lower())
+    self.assertIn('name: ivan', model.prompts[0].lower())
+    self.assertIn('name: nur aisyah rahman', model.prompts[0].lower())
+
 
 class NegotiationListingObservationTest(unittest.TestCase):
 
