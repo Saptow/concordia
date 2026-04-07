@@ -155,7 +155,7 @@ def ensure_market_segment_listing_index(
                 if segment_config.is_full_year_segment
                 else segment_config.segment_label
             ),
-            restrained_seller_count=segment_config.restrained_seller_count,
+            sampled_flat_ratio=segment_config.sampled_flat_ratio,
             buyer_pool_multiplier=segment_config.buyer_pool_multiplier,
             retained_buyer_pool_multiplier=(
                 segment_config.retained_buyer_pool_multiplier

@@ -2348,9 +2348,17 @@ def build_transaction_conditioned_segment(
         len(hedonic_training_flats),
         window_start,
     )
+    sampled_transaction_count: int | None = None
+    if config.sampled_flat_ratio is not None and config.sampled_flat_ratio < 1:
+        sampled_transaction_count = max(
+            1,
+            math.ceil(len(transactions) * config.sampled_flat_ratio),
+        )
+        if sampled_transaction_count >= len(transactions):
+            sampled_transaction_count = None
     seller_market_attempts = (
         max(1, int(config.seller_segment_regeneration_attempts))
-        if config.restrained_seller_count is not None
+        if sampled_transaction_count is not None
         else 1
     )
     last_market_error: Exception | None = None
@@ -2362,15 +2370,16 @@ def build_transaction_conditioned_segment(
     for seller_attempt in range(1, seller_market_attempts + 1):
         restrained_transactions = _restrain_transactions(
             transactions,
-            restrained_seller_count=config.restrained_seller_count,
-            rng=rng if config.restrained_seller_count is not None else None,
+            restrained_seller_count=sampled_transaction_count,
+            rng=rng if sampled_transaction_count is not None else None,
         )
-        if config.restrained_seller_count is not None:
+        if sampled_transaction_count is not None:
             logging.info(
-                "Seller market sample %s/%s restrained seller pool to %s transaction(s); oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
+                "Seller market sample %s/%s restrained seller pool to %s transaction(s) using sampled_flat_ratio=%s; oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
                 seller_attempt,
                 seller_market_attempts,
                 len(restrained_transactions),
+                config.sampled_flat_ratio,
                 config.buyer_pool_multiplier,
                 config.retained_buyer_pool_multiplier,
             )
