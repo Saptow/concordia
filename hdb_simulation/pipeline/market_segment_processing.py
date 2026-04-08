@@ -681,10 +681,6 @@ def _build_market_bucket_summary(
                     }
                     for amenity_name, counts in amenity_counts.items()
                 },
-                "representative_flats": [
-                    _compact_flat_for_preference_summary(flat)
-                    for flat in _sample_flats_uniformly(bucket_flats)
-                ],
             }
         )
     return summaries
@@ -701,7 +697,6 @@ def _build_reachable_market_summary(
             "overall_price_range": None,
             "town_summaries": [],
             "flat_type_summaries": [],
-            "global_representative_flats": [],
         }
 
     sorted_flats = sorted(
@@ -732,10 +727,6 @@ def _build_reachable_market_summary(
         },
         "town_summaries": _build_market_bucket_summary(sorted_flats, bucket_key="town"),
         "flat_type_summaries": _build_market_bucket_summary(sorted_flats, bucket_key="flat_type"),
-        "global_representative_flats": [
-            _compact_flat_for_preference_summary(flat)
-            for flat in _sample_flats_uniformly(sorted_flats)
-        ],
     }
 
 
@@ -785,16 +776,14 @@ Think step by step privately. Do not reveal your reasoning.
 1. Review the buyer's profile and financial context.
 2. Inspect the reachable-market summary from overall market level, then town
    level, then flat-type level.
-3. Use the representative flats only as concrete examples within those summary
-   buckets, not as the full market.
-4. Compare the buyer against the provided preference archetypes.
-5. Infer the most plausible flat-type and town preferences, constrained by the
+3. Compare the buyer against the provided preference archetypes.
+4. Infer the most plausible flat-type and town preferences, constrained by the
    reachable market summary.
-6. Return a `preferences` list where each item has a `category`, `description`,
+5. Return a `preferences` list where each item has a `category`, `description`,
    and numeric `strength` between 0 and 1.
-7. Include at least one `flat_type` preference and at least one `town`
+6. Include at least one `flat_type` preference and at least one `town`
    preference.
-8. Return only the final JSON object.
+7. Return only the final JSON object.
 
 ## Rules
 
