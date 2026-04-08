@@ -45,6 +45,7 @@ MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
 MARKET_QUANTILE_DOMINANCE_GRID = (0.2, 0.4, 0.6, 0.8)
+MIN_FEASIBLE_RETAINED_BUYERS_PER_SELLER = 5
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
 
 
@@ -1719,7 +1720,7 @@ def _validate_seller_candidate_coverage(
     sellers: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
 ) -> tuple[bool, list[str]]:
-    """Checks whether every seller has at least one feasible retained buyer."""
+    """Checks whether every seller has enough feasible retained buyers."""
     uncovered_seller_ids: list[str] = []
     for seller in sorted(
         sellers,
@@ -1729,7 +1730,7 @@ def _validate_seller_candidate_coverage(
         if not seller_id:
             continue
         candidate_buyer_ids = _rank_candidate_buyer_ids_for_seller(seller, buyers)
-        if candidate_buyer_ids:
+        if len(candidate_buyer_ids) >= MIN_FEASIBLE_RETAINED_BUYERS_PER_SELLER:
             continue
         uncovered_seller_ids.append(seller_id)
     return not uncovered_seller_ids, uncovered_seller_ids

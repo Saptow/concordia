@@ -208,6 +208,10 @@ def execute_listing_week(
       buyers_processed=buyers_processed,
       sellers_reviewed=sellers_reviewed,
       matched_pairs=matched_pairs,
+      sellers_without_match_count=max(
+          0,
+          len(eligible_sellers_to_review) - len(matched_pairs),
+      ),
       closed_player_names=_dedupe_strings(closed_player_names),
   )
 
@@ -272,6 +276,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._completed_weeks = 0
     self._last_run_week = 0
     self._stage_exhausted = False
+    self._total_sellers_without_match = 0
     self._last_outcome = listing_schemas.ListingWeeklyBatchOutcome(week_number=1)
     self._entities_by_id: dict[str, Any] = {}
     self._canonical_entities: tuple[entity_component.EntityWithComponents, ...] = ()
@@ -678,9 +683,15 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       week_number: int,
       active_player_names: Sequence[str] = (),
   ) -> listing_schemas.ListingWeeklyBatchOutcome:
+    avg_sellers_without_match_per_week = (
+        self._total_sellers_without_match / self._completed_weeks
+        if self._completed_weeks > 0
+        else 0.0
+    )
     outcome = listing_schemas.ListingWeeklyBatchOutcome(
         week_number=week_number,
         active_player_names=list(active_player_names),
+        avg_sellers_without_match_per_week=avg_sellers_without_match_per_week,
     )
     self._last_outcome = outcome
     return outcome
@@ -755,9 +766,22 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             ),
         )
     self._completed_weeks += 1
+    self._total_sellers_without_match += int(outcome.sellers_without_match_count)
+    avg_sellers_without_match_per_week = (
+        self._total_sellers_without_match / self._completed_weeks
+        if self._completed_weeks > 0
+        else 0.0
+    )
     self._last_run_week = week_number
     if self._max_rounds is not None and week_number >= self._max_rounds:
       self._stage_exhausted = True
+    outcome = outcome.model_copy(
+        update={
+            'avg_sellers_without_match_per_week': (
+                avg_sellers_without_match_per_week
+            ),
+        }
+    )
     self._last_outcome = outcome
     return outcome
 
@@ -877,6 +901,12 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'released_seller_ids': list(self._last_released_seller_ids),
         'inactive_seller_ids': list(self._inactive_seller_queue),
         'active_seller_ids': sorted(self._active_seller_ids),
+        'sellers_without_match_count': int(
+            self._last_outcome.sellers_without_match_count
+        ),
+        'avg_sellers_without_match_per_week': float(
+            self._last_outcome.avg_sellers_without_match_per_week
+        ),
     }
 
   def get_state(self) -> entity_component.ComponentState:
@@ -902,6 +932,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'completed_weeks': self._completed_weeks,
         'last_run_week': self._last_run_week,
         'stage_exhausted': int(self._stage_exhausted),
+        'total_sellers_without_match': self._total_sellers_without_match,
         'last_outcome': self._last_outcome.model_dump(),
         'active_seller_ids': sorted(self._active_seller_ids),
         'inactive_seller_queue': list(self._inactive_seller_queue),
@@ -923,6 +954,7 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         'active_seller_count': len(self._active_seller_ids),
         'inactive_seller_count': len(self._inactive_seller_queue),
         'target_active_seller_count': self._target_active_seller_count,
+        'total_sellers_without_match': self._total_sellers_without_match,
     }
 
   def set_state(self, state: entity_component.ComponentState) -> None:
@@ -950,6 +982,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     self._completed_weeks = int(state.get('completed_weeks', 0))
     self._last_run_week = int(state.get('last_run_week', 0))
     self._stage_exhausted = bool(state.get('stage_exhausted', 0))
+    self._total_sellers_without_match = int(
+        state.get('total_sellers_without_match', 0)
+    )
     self._active_seller_ids = {
         str(seller_id) for seller_id in state.get('active_seller_ids', ())
     } or set(self._sellers)

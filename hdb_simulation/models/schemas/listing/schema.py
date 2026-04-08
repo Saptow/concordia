@@ -63,4 +63,6 @@ class ListingWeeklyBatchOutcome(BaseModel):
     buyers_processed: list[str] = Field(default_factory=list)
     sellers_reviewed: list[str] = Field(default_factory=list)
     matched_pairs: list[NegotiationMatch] = Field(default_factory=list)
+    sellers_without_match_count: int = Field(default=0, ge=0)
+    avg_sellers_without_match_per_week: float = Field(default=0.0, ge=0.0)
     closed_player_names: list[str] = Field(default_factory=list)

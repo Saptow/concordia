@@ -45,6 +45,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             PolicyToolConfig.DEFAULT_MAX_DIRECTORY_CANDIDATES
         ),
         max_page_chars: int = PolicyToolConfig.DEFAULT_MAX_PAGE_CHARS,
+        max_prompt_chars: int = PolicyToolConfig.DEFAULT_MAX_PROMPT_CHARS,
         tool_call_retries: int = PolicyToolConfig.DEFAULT_TOOL_CALL_RETRIES,
         pre_act_label: str = "# POLICY SEARCH TOOL",
     ):
@@ -62,6 +63,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._policy_index_paths = self._resolve_policy_index_paths()
         self._max_directory_candidates = max(1, int(max_directory_candidates))
         self._max_page_chars = max(1000, max_page_chars) if max_page_chars > 0 else 0
+        self._max_prompt_chars = (
+            max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
+        )
         self._tool_call_retries = max(1, int(tool_call_retries))
         self._last_cache_key: str | None = None
         self._last_cache_value: str | None = None
@@ -215,6 +219,34 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return normalized
         return normalized[: max_chars - 3].rstrip() + "..."
 
+    @staticmethod
+    def _truncate_middle_text(text: str, *, max_chars: int) -> str:
+        normalized = str(text or "").strip()
+        if max_chars <= 0:
+            return normalized
+        if len(normalized) <= max_chars:
+            return normalized
+        if max_chars <= 10:
+            return normalized[:max_chars]
+
+        marker = "\n\n... [prompt truncated] ...\n\n"
+        available = max_chars - len(marker)
+        if available <= 2:
+            return normalized[:max_chars]
+        head_chars = available // 2
+        tail_chars = available - head_chars
+        return (
+            normalized[:head_chars].rstrip()
+            + marker
+            + normalized[-tail_chars:].lstrip()
+        )
+
+    def _maybe_truncate_prompt(self, prompt: str) -> str:
+        return self._truncate_middle_text(
+            prompt,
+            max_chars=self._max_prompt_chars,
+        )
+
     def _build_vllm_tools(self) -> tuple[dict[str, Any], dict[str, Any]]:
         return (
             {
@@ -363,7 +395,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         for _ in range(self._tool_call_retries):
             try:
                 response = chat(
-                    [{"role": "user", "content": prompt}],
+                    [{"role": "user", "content": self._maybe_truncate_prompt(prompt)}],
                     max_tokens=2_000,
                     tools=[tool_schema],
                 )
@@ -460,7 +492,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         for _ in range(self._tool_call_retries):
             try:
                 selection_response = self._model.sample_text(
-                    (
+                    self._maybe_truncate_prompt(
+                        (
                         "# Role\n"
                         "You are an HDB resale policy relevance analyst.\n\n"
                         "# Task\n"
@@ -480,6 +513,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                         "2. Keep only entries that are materially relevant to the observation or recent memories.\n"
                         "3. Return only exact `path` values that appear in the screened directory result.\n"
                         "4. If nothing is relevant, return an empty list.\n"
+                        )
                     ),
                     json_schema=RelevantPolicyPathSelection.model_json_schema(),
                 )
@@ -584,8 +618,11 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             try:
                 return (
                     chat(
-                        [{"role": "user", "content": final_prompt}],
-                        max_tokens=6000,
+                        [{
+                            "role": "user",
+                            "content": self._maybe_truncate_prompt(final_prompt),
+                        }],
+                        max_tokens=4096,
                     ).strip()
                 )
             except Exception:
@@ -723,6 +760,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             "policy_directory": str(self._policy_directory),
             "max_directory_candidates": self._max_directory_candidates,
             "max_page_chars": self._max_page_chars,
+            "max_prompt_chars": self._max_prompt_chars,
             "tool_call_retries": self._tool_call_retries,
             "current_policy_prompt": self._current_policy_prompt,
             "active_source_paths": (
@@ -761,6 +799,11 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         if "max_page_chars" in state:
             max_page_chars = int(state["max_page_chars"])
             self._max_page_chars = max(1_000, max_page_chars) if max_page_chars > 0 else 0
+        if "max_prompt_chars" in state:
+            max_prompt_chars = int(state["max_prompt_chars"])
+            self._max_prompt_chars = (
+                max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
+            )
         if "tool_call_retries" in state:
             self._tool_call_retries = max(1, int(state["tool_call_retries"]))
         if "current_policy_prompt" in state:

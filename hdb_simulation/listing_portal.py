@@ -22,6 +22,7 @@ from concordia.hdb_simulation.models.schemas.listing import qdrant as qdrant_sch
 
 
 PORTAL_SEARCH_LIMIT = 10
+PORTAL_REQUEST_LIMIT_PER_WEEK = 5
 
 
 @dataclasses.dataclass
@@ -287,16 +288,19 @@ class ListingPortal:
         buyer: listing_schemas.PortalBuyer,
         results: Sequence[listing_schemas.PortalSearchResult],
     ) -> list[str]:
-        """Returns the top-scoring valid listing for the buyer, if any."""
+        """Returns up to the top-scoring valid listings for the buyer this week."""
         buyer_id = str(buyer.id).strip()
         max_budget = float(buyer.budget.max_price)
+        requested_listing_ids: list[str] = []
         for result in results:
             if result.listing_price > max_budget or result.score <= 0.0:
                 continue
             if self.has_buyer_negotiated_with_seller(buyer_id, result.seller_id):
                 continue
-            return [result.listing_id]
-        return []
+            requested_listing_ids.append(result.listing_id)
+            if len(requested_listing_ids) >= PORTAL_REQUEST_LIMIT_PER_WEEK:
+                break
+        return requested_listing_ids
 
     def _buyer_market_state(
         self,

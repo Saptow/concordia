@@ -14,7 +14,10 @@ from concordia.components import game_master as gm_components
 from concordia.components.agent import action_spec_ignored
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import listing as listing_schemas
-from concordia.hdb_simulation.name_utils import resolve_profile_name
+from concordia.hdb_simulation.name_utils import (
+    disambiguate_profile_name,
+    resolve_profile_name,
+)
 from concordia.language_model import language_model
 from concordia.typing import entity_component
 from concordia.typing import prefab as prefab_lib
@@ -24,6 +27,7 @@ def _unique_market_display_name(
     *,
     participant_id: str,
     requested_name: str,
+    record: Mapping[str, Any],
     role_label: str,
     seen_names: set[str],
 ) -> str:
@@ -32,6 +36,20 @@ def _unique_market_display_name(
   if candidate not in seen_names:
     seen_names.add(candidate)
     return candidate
+
+  disambiguated_name = disambiguate_profile_name(
+      requested_name=candidate,
+      record=record,
+      role_label=role_label,
+  )
+  if disambiguated_name and disambiguated_name not in seen_names:
+    logging.warning(
+        'Duplicate participant display name %r detected; using persona-based surname disambiguation %r instead.',
+        candidate,
+        disambiguated_name,
+    )
+    seen_names.add(disambiguated_name)
+    return disambiguated_name
 
   suffix = participant_id.rsplit('_', 1)[-1]
   disambiguated = f'{candidate} ({role_label} {suffix})'
@@ -77,6 +95,7 @@ def build_market_profiles(
     buyer_name = _unique_market_display_name(
         participant_id=buyer_id,
         requested_name=buyer_name,
+        record=buyer,
         role_label='Buyer',
         seen_names=seen_names,
     )
@@ -113,6 +132,7 @@ def build_market_profiles(
     seller_name = _unique_market_display_name(
         participant_id=seller_id,
         requested_name=seller_name,
+        record=seller,
         role_label='Seller',
         seen_names=seen_names,
     )

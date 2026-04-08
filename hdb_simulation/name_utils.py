@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import re
 from typing import Any
 
@@ -42,6 +43,25 @@ _PERSONA_NAME_PATTERNS = (
         r"^(?P<name>[A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){0,4})\s+"
         r"(?:a|an|the)\b"
     ),
+)
+
+_FALLBACK_GIVEN_NAMES = (
+    'Aarav', 'Adeline', 'Aiden', 'Aisha', 'Amir', 'Aqil', 'Benjamin',
+    'Brandon', 'Charlotte', 'Cheryl', 'Daniel', 'Darren', 'Dev', 'Ethan',
+    'Farah', 'Felix', 'Grace', 'Hafiz', 'Hannah', 'Haziq', 'Isabel', 'Jia',
+    'Jin', 'Joel', 'Kai', 'Keith', 'Marcus', 'Mei', 'Nadia', 'Natasha',
+    'Noah', 'Nurul', 'Priya', 'Ravi', 'Ryan', 'Siti', 'Sofia', 'Syafiq',
+    'Tania', 'Wei', 'Xavier', 'Ying', 'Yusuf', 'Zara',
+)
+_FALLBACK_MIDDLE_NAMES = (
+    '', '', '', 'Ahmad', 'Aisyah', 'Anand', 'Bin', 'Binti', 'Chandra',
+    'Hui', 'Jie', 'Jun', 'Kumar', 'Ling', 'Mei', 'Nair', 'Nur', 'Qistina',
+    'Raj', 'Wei', 'Xin',
+)
+_FALLBACK_SURNAMES = (
+    'Abdullah', 'Ahmad', 'Chong', 'Goh', 'Ibrahim', 'Kaur', 'Koh', 'Kumar',
+    'Lim', 'Loh', 'Nair', 'Ng', 'Ong', 'Pillai', 'Rahman', 'Sharma', 'Tan',
+    'Teo', 'Toh', 'Wong', 'Yap', 'Yeo',
 )
 
 
@@ -171,6 +191,39 @@ def _generate_name_from_persona(
     return normalized
 
 
+def _fallback_name_from_persona(
+    *,
+    persona: str,
+    role_label: str,
+) -> str:
+    """Generate a stable Singapore-style fallback name from persona text."""
+    seed_text = f"{role_label}\n{persona}".encode('utf-8', errors='ignore')
+    digest = hashlib.sha256(seed_text).digest()
+    given_name = _FALLBACK_GIVEN_NAMES[digest[0] % len(_FALLBACK_GIVEN_NAMES)]
+    middle_name = _FALLBACK_MIDDLE_NAMES[digest[1] % len(_FALLBACK_MIDDLE_NAMES)]
+    surname = _FALLBACK_SURNAMES[digest[2] % len(_FALLBACK_SURNAMES)]
+    if middle_name in {'Bin', 'Binti'}:
+        connector_name = _FALLBACK_GIVEN_NAMES[digest[3] % len(_FALLBACK_GIVEN_NAMES)]
+        return f'{given_name} {middle_name} {connector_name}'
+    if middle_name:
+        return f'{given_name} {middle_name} {surname}'
+    return f'{given_name} {surname}'
+
+
+def _fallback_surname_from_persona(
+    *,
+    persona: str,
+    role_label: str,
+) -> str:
+    """Generate a stable surname for duplicate-name disambiguation."""
+    seed_text = f"surname\n{role_label}\n{persona}".encode(
+        'utf-8',
+        errors='ignore',
+    )
+    digest = hashlib.sha256(seed_text).digest()
+    return _FALLBACK_SURNAMES[digest[0] % len(_FALLBACK_SURNAMES)]
+
+
 def resolve_profile_name(
     record: Mapping[str, Any],
     *,
@@ -194,5 +247,41 @@ def resolve_profile_name(
                 role_label=role_label,
             )
             if generated_name:
-                return generated_name
+            return generated_name
+        fallback_from_persona = _fallback_name_from_persona(
+            persona=persona,
+            role_label=role_label,
+        )
+        if fallback_from_persona:
+            return fallback_from_persona
     return fallback_name
+
+
+def disambiguate_profile_name(
+    *,
+    requested_name: str,
+    record: Mapping[str, Any],
+    role_label: str,
+) -> str:
+    """Prefer adding a surname over exposing role/id-style duplicate suffixes."""
+    candidate = str(requested_name).strip()
+    if not candidate:
+        return candidate
+
+    tokens = candidate.split()
+    if len(tokens) >= 2:
+        return candidate
+
+    persona = str(record.get('general_persona', '')).strip()
+    if not persona:
+        return candidate
+
+    surname = _fallback_surname_from_persona(
+        persona=persona,
+        role_label=role_label,
+    )
+    if not surname:
+        return candidate
+    if tokens[0] == surname:
+        return candidate
+    return f'{candidate} {surname}'

@@ -33,6 +33,18 @@ def _json_block(value: Any) -> str:
   return f'<pre class="json-block">{html.escape(rendered)}</pre>'
 
 
+def _metrics_block(metrics: Mapping[str, Any]) -> str:
+  rows = []
+  for label, value in metrics.items():
+    rows.append(
+        '<div class="metric-row">'
+        f'<div class="metric-label">{_escape(label)}</div>'
+        f'<div class="metric-value">{_escape(value)}</div>'
+        '</div>'
+    )
+  return '<div class="metric-grid">' + ''.join(rows) + '</div>'
+
+
 def _details(summary: str, body: str, *, open_by_default: bool = False,
              css_class: str = '') -> str:
   open_attr = ' open' if open_by_default else ''
@@ -267,7 +279,11 @@ def _render_week_view(week_view: Mapping[str, Any]) -> str:
           f'Currently listed sellers: {len(listed_sellers)} | '
           f'Released this week: {len(released_seller_ids)} | '
           f'Still inactive: {len(inactive_seller_ids)} | '
-          f'Matches this week: {len(matched_pairs)}'
+          f'Matches this week: {len(matched_pairs)} | '
+          'Reviewed sellers with no match: '
+          f'{listing.get("sellers_without_match_count", 0)} | '
+          'Avg/week: '
+          f'{float(listing.get("avg_sellers_without_match_per_week", 0.0)):.2f}'
           '</div>'
       ),
       _render_collection(
@@ -382,6 +398,10 @@ body { font-family: Arial, sans-serif; margin: 0; background: #eef3f8; color: #1
 .summary-card, .week-card, .memory-section { background: #ffffff; border: 1px solid #d7e0ea; border-radius: 14px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }
 .summary-card { padding: 16px 18px; margin-bottom: 20px; }
 .week-card { padding: 18px; margin-bottom: 18px; }
+.metric-grid { display: grid; gap: 10px; }
+.metric-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 12px; border: 1px solid #e5ecf3; border-radius: 10px; background: #f8fbfd; }
+.metric-label { font-weight: 600; color: #233445; }
+.metric-value { color: #102a43; text-align: right; font-variant-numeric: tabular-nums; }
 .week-header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
 .week-header h2 { margin: 0; font-size: 24px; }
 .week-step { color: #5b6b79; font-size: 14px; }
@@ -415,7 +435,7 @@ summary::-webkit-details-marker { display: none; }
   if player_scores:
     html_parts.append(
         '<section class="summary-card"><h2>Simulation Summary</h2>'
-        + _json_block(player_scores)
+        + _metrics_block(player_scores)
         + '</section>'
     )
   if summary_sections_html:

@@ -287,6 +287,87 @@ class BuildMarketProfilesTest(unittest.TestCase):
     self.assertIn('name: ivan', model.prompts[0].lower())
     self.assertIn('name: nur aisyah rahman', model.prompts[0].lower())
 
+  def test_generates_stable_fallback_name_from_persona_without_model(self):
+    bundle = {
+        'buyers_retained': [{
+            'buyer_id': 'buyer_2023_00853',
+            'age': 34,
+            'occupation_category': 'Teacher',
+            'general_persona': (
+                'A careful and community-minded teacher who prefers a calm '
+                'home base near family and values reliable transit.'
+            ),
+            'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+            'budget': copy.deepcopy(_buyer_profile()['budget']),
+        }],
+        'sellers': [],
+    }
+
+    buyer_profiles_first, _ = hdb_initializer_gm.build_market_profiles(
+        bundle,
+        town='Choa Chu Kang',
+        model=None,
+    )
+    buyer_profiles_second, _ = hdb_initializer_gm.build_market_profiles(
+        bundle,
+        town='Choa Chu Kang',
+        model=None,
+    )
+
+    generated_name = buyer_profiles_first['buyer_2023_00853']['name']
+    self.assertTrue(generated_name)
+    self.assertNotEqual(generated_name, 'buyer_2023_00853')
+    self.assertEqual(
+        generated_name,
+        buyer_profiles_second['buyer_2023_00853']['name'],
+    )
+
+  def test_duplicate_single_names_gain_persona_based_surname(self):
+    bundle = {
+        'buyers_retained': [
+            {
+                'buyer_id': 'buyer_2023_00853',
+                'age': 34,
+                'occupation_category': 'Teacher',
+                'general_persona': (
+                    'A careful and community-minded teacher who prefers a calm '
+                    'home base near family and values reliable transit.'
+                ),
+                'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+                'budget': copy.deepcopy(_buyer_profile()['budget']),
+            },
+            {
+                'buyer_id': 'buyer_2023_00854',
+                'age': 29,
+                'occupation_category': 'Designer',
+                'general_persona': (
+                    'A design-conscious and quietly ambitious professional who '
+                    'wants a bright flat near transit and weekend cafes.'
+                ),
+                'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+                'budget': copy.deepcopy(_buyer_profile()['budget']),
+            },
+        ],
+        'sellers': [],
+    }
+    model = _FakeNameModel('Ivan')
+
+    buyer_profiles, _ = hdb_initializer_gm.build_market_profiles(
+        bundle,
+        town='Choa Chu Kang',
+        model=model,
+    )
+
+    self.assertEqual(buyer_profiles['buyer_2023_00853']['name'], 'Ivan')
+    self.assertNotEqual(
+        buyer_profiles['buyer_2023_00854']['name'],
+        'Ivan',
+    )
+    self.assertNotIn(
+        '(Buyer',
+        buyer_profiles['buyer_2023_00854']['name'],
+    )
+
 
 class NegotiationListingObservationTest(unittest.TestCase):
 
