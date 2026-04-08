@@ -247,7 +247,7 @@ def resolve_profile_name(
                 role_label=role_label,
             )
             if generated_name:
-            return generated_name
+                return generated_name
         fallback_from_persona = _fallback_name_from_persona(
             persona=persona,
             role_label=role_label,

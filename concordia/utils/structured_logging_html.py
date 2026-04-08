@@ -244,6 +244,25 @@ def _render_week_view(week_view: Mapping[str, Any]) -> str:
       item for item in listing.get('matched_pairs', ())
       if isinstance(item, Mapping)
   ]
+  sellers_reviewed = list(listing.get('sellers_reviewed', ()))
+  reviewed_seller_count = len(sellers_reviewed)
+  matched_seller_count = len(matched_pairs)
+  sellers_without_match_count = int(
+      listing.get(
+          'sellers_without_match_count',
+          max(0, reviewed_seller_count - matched_seller_count),
+      )
+  )
+  seller_match_rate = (
+      (matched_seller_count / reviewed_seller_count) * 100.0
+      if reviewed_seller_count > 0
+      else 0.0
+  )
+  seller_no_match_rate = (
+      (sellers_without_match_count / reviewed_seller_count) * 100.0
+      if reviewed_seller_count > 0
+      else 0.0
+  )
   pair_states = [
       item for item in negotiation.get('pair_states', ())
       if isinstance(item, Mapping)
@@ -280,10 +299,8 @@ def _render_week_view(week_view: Mapping[str, Any]) -> str:
           f'Released this week: {len(released_seller_ids)} | '
           f'Still inactive: {len(inactive_seller_ids)} | '
           f'Matches this week: {len(matched_pairs)} | '
-          'Reviewed sellers with no match: '
-          f'{listing.get("sellers_without_match_count", 0)} | '
-          'Avg/week: '
-          f'{float(listing.get("avg_sellers_without_match_per_week", 0.0)):.2f}'
+          f'Seller match rate this week: {seller_match_rate:.1f}% | '
+          f'Seller no-match rate this week: {seller_no_match_rate:.1f}%'
           '</div>'
       ),
       _render_collection(
