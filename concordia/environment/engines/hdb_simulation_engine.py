@@ -385,6 +385,7 @@ class HDBSimulationEngine(engine_lib.Engine):
         for entity in entities
         if getattr(entity, '_hdb_player_id', '')
     }
+    announcement_tasks: dict[str, Callable[[], None]] = {}
     for player_id, observations in observations_by_player_id.items():
       entity = entity_by_id.get(player_id)
       if entity is None:
@@ -394,18 +395,28 @@ class HDBSimulationEngine(engine_lib.Engine):
             player_id,
         )
         continue
-      for observation in observations:
-        if verbose:
-          print(
-              termcolor.colored(
-                  (
-                      f'Entity {entity.name} observed policy announcement: '
-                      f'{observation}'
-                  ),
-                  _PRINT_COLOR,
-              )
-          )
-        entity.observe(observation)
+      ordered_observations = tuple(
+          str(observation).strip()
+          for observation in observations
+          if str(observation).strip()
+      )
+      if not ordered_observations:
+        continue
+      announcement_tasks[player_id] = functools.partial(
+          self._observe_policy_announcements_for_entity,
+          entity,
+          ordered_observations,
+      )
+    if announcement_tasks:
+      concurrency.run_tasks(announcement_tasks)
+
+  @staticmethod
+  def _observe_policy_announcements_for_entity(
+      entity: entity_lib.Entity,
+      observations: Sequence[str],
+  ) -> None:
+    for observation in observations:
+      entity.observe(observation)
 
   def _deliver_pending_observations(
       self,
