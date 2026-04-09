@@ -28,20 +28,40 @@ def configure_logging() -> None:
 
 def initialise_model() -> VLLMLanguageModel:
     """Initialise the local vLLM model used across HDB workflows."""
-    logging.info('Initialising model %s.', LLMConfig.MODEL_NAME)
-    model = VLLMLanguageModel(
-        model_name=LLMConfig.MODEL_NAME,
-        trust_remote_code=LLMConfig.TRUST_REMOTE_CODE,
-        gpu_memory_utilization=LLMConfig.GPU_MEMORY_UTILIZATION,
-        max_model_len=LLMConfig.MAX_MODEL_LEN,
-        max_num_seqs=LLMConfig.MAX_NUM_SEQS,
-        limit_mm_per_prompt=LLMConfig.LIMIT_MM_PER_PROMPT,
-        tensor_parallel_size=LLMConfig.TENSOR_PARALLEL_SIZE,
-        disable_custom_all_reduce=LLMConfig.DISABLE_CUSTOM_ALL_REDUCE,
-        enforce_eager=LLMConfig.ENFORCE_EAGER,
-        performance_mode=LLMConfig.PERFORMANCE_MODE,
-    )
-    logging.info('Model %s initialised successfully.', LLMConfig.MODEL_NAME)
+    logging.info("Initialising model %s.", LLMConfig.MODEL_NAME)
+
+    # Map config attribute name -> VLLMLanguageModel kwarg name
+    config_to_model_kwargs = {
+        "MODEL_NAME": "model_name",
+        "TRUST_REMOTE_CODE": "trust_remote_code",
+        "GPU_MEMORY_UTILIZATION": "gpu_memory_utilization",
+        "MAX_MODEL_LEN": "max_model_len",
+        "MAX_NUM_SEQS": "max_num_seqs",
+        "LIMIT_MM_PER_PROMPT": "limit_mm_per_prompt",
+        "TENSOR_PARALLEL_SIZE": "tensor_parallel_size",
+        "DISABLE_CUSTOM_ALL_REDUCE": "disable_custom_all_reduce",
+        "ENFORCE_EAGER": "enforce_eager",
+        "PERFORMANCE_MODE": "performance_mode",
+        "QUANTIZATION": "quantization",
+        "CACHE_DTYPE": "cache_dtype",
+    }
+
+    model_kwargs = {}
+
+    for config_name, model_kwarg in config_to_model_kwargs.items():
+        if hasattr(LLMConfig, config_name):
+            value = getattr(LLMConfig, config_name)
+            if value is not None:
+                model_kwargs[model_kwarg] = value
+
+    # Optional: allow fully custom extra kwargs
+    extra_kwargs = getattr(LLMConfig, "EXTRA_VLLM_KWARGS", {})
+    if extra_kwargs:
+        model_kwargs.update(extra_kwargs)
+
+    model = VLLMLanguageModel(**model_kwargs)
+
+    logging.info("Model %s initialised successfully.", LLMConfig.MODEL_NAME)
     return model
 
 
