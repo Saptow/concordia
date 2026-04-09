@@ -678,11 +678,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         active_source_paths: list[str] | tuple[str, ...] | None,
     ) -> None:
         normalized_prompt = str(current_policy_prompt or "").strip()
-        self._current_policy_prompt = (
-            normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
-        )
         if active_source_paths is None:
-            self._synced_active_source_paths = None
+            normalized_active_source_paths = None
         else:
             normalized_paths: list[str] = []
             seen_paths: set[str] = set()
@@ -692,7 +689,17 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                     continue
                 seen_paths.add(normalized)
                 normalized_paths.append(normalized)
-            self._synced_active_source_paths = normalized_paths
+            normalized_active_source_paths = normalized_paths
+        if (
+            (normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT)
+            == self._current_policy_prompt
+            and normalized_active_source_paths == self._synced_active_source_paths
+        ):
+            return
+        self._current_policy_prompt = (
+            normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
+        )
+        self._synced_active_source_paths = normalized_active_source_paths
         self._last_cache_key = None
         self._last_cache_value = None
 
@@ -704,16 +711,66 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             f"{policy_guidance or self._no_relevant_policy_summary()}"
         )
 
+    def _summarize_active_policy_sources(
+        self,
+        *,
+        pages: list[PolicyPage],
+        active_source_paths: list[str] | None,
+    ) -> str:
+        if active_source_paths == []:
+            return self._no_relevant_policy_summary()
+        if not pages:
+            return self._no_relevant_policy_summary()
+        chat = getattr(self._model, "chat", None)
+        if not callable(chat):
+            return self._no_relevant_policy_summary()
+
+        full_page_result = self._run_full_page_retrieval_tool(
+            active_source_paths or [page.path for page in pages],
+            pages,
+        )
+        if not full_page_result.strip():
+            return self._no_relevant_policy_summary()
+
+        prompt = (
+            "# Role\n"
+            "You are an HDB resale policy analyst preparing static policy guidance "
+            "for a simulation state.\n\n"
+            "# Task\n"
+            "Summarize the currently active simulation policy state and the grounded "
+            "active policy source pages.\n\n"
+            "# Inputs\n"
+            "## Current Policy State\n"
+            f"{self._current_policy_prompt}\n\n"
+            "## Active Policy Source Pages\n"
+            f"{full_page_result}\n\n"
+            "# Instructions\n"
+            "1. Summarize only policies that are currently active.\n"
+            "2. Ground every policy summary in the supplied active policy source pages.\n"
+            "3. Focus on concrete implications for negotiation behavior and constraints.\n"
+            "4. Do not mention inactive or hypothetical policies.\n\n"
+            "# Output Format\n"
+            "Return markdown with exactly these sections:\n"
+            "- `## Current Policy State`\n"
+            "- `## Relevant Policy Summaries`\n"
+            "- `## Overall Policy Guidance`\n"
+        )
+        for _ in range(self._tool_call_retries):
+            try:
+                return chat(
+                    [{"role": "user", "content": self._maybe_truncate_prompt(prompt)}],
+                    max_tokens=POLICY_SUMMARY_MAX_TOKENS,
+                ).strip()
+            except Exception:
+                continue
+        return self._no_relevant_policy_summary()
+
     def _make_pre_act_value(self) -> str:
-        observation = self._current_observation()
-        recent_memories = self._recent_memories()
         active_source_paths = self._synced_active_source_paths
         if active_source_paths == []:
             return self._compose_pre_act_value(self._no_relevant_policy_summary())
         cache_key = json.dumps(
             {
-                "observation": observation,
-                "recent_memories": recent_memories,
                 "current_policy_prompt": self._current_policy_prompt,
                 "policy_index_paths": [
                     self._display_path(path) for path in self._policy_index_paths
@@ -740,10 +797,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                 ),
             )
 
-        tool_result = self._run_required_hdb_policy_tool_workflow(
-            observation=observation,
-            recent_memories=recent_memories,
+        tool_result = self._summarize_active_policy_sources(
             pages=pages,
+            active_source_paths=active_source_paths,
         )
         return self._cache_result(
             cache_key=cache_key,

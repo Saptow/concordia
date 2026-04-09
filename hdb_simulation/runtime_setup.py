@@ -39,6 +39,7 @@ def initialise_model() -> VLLMLanguageModel:
         tensor_parallel_size=LLMConfig.TENSOR_PARALLEL_SIZE,
         disable_custom_all_reduce=LLMConfig.DISABLE_CUSTOM_ALL_REDUCE,
         enforce_eager=LLMConfig.ENFORCE_EAGER,
+        performance_mode=LLMConfig.PERFORMANCE_MODE,
     )
     logging.info('Model %s initialised successfully.', LLMConfig.MODEL_NAME)
     return model

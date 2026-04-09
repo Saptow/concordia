@@ -355,18 +355,14 @@ class HDBSimulationEngine(engine_lib.Engine):
         week_number=int(week_number),
         active_player_ids=normalized_player_ids,
     )
-    if observations_by_player_id:
-      current_policy_prompt = getattr(
-          policy_layer,
-          'get_current_policy_prompt',
-          lambda: '',
-      )()
-      active_source_paths = list(
-          getattr(policy_layer, 'get_active_source_paths', lambda: [])()
-      )
-    else:
-      current_policy_prompt = ''
-      active_source_paths = []
+    current_policy_prompt = getattr(
+        policy_layer,
+        'get_current_policy_prompt',
+        lambda: '',
+    )()
+    active_source_paths = list(
+        getattr(policy_layer, 'get_active_source_paths', lambda: [])()
+    )
 
     for entity in entities:
       try:
