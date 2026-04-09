@@ -49,6 +49,10 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         ),
         max_page_chars: int = PolicyToolConfig.DEFAULT_MAX_PAGE_CHARS,
         max_prompt_chars: int = PolicyToolConfig.DEFAULT_MAX_PROMPT_CHARS,
+        max_current_policy_chars: int = (
+            PolicyToolConfig.DEFAULT_MAX_CURRENT_POLICY_CHARS
+        ),
+        max_component_chars: int = PolicyToolConfig.DEFAULT_MAX_COMPONENT_CHARS,
         tool_call_retries: int = PolicyToolConfig.DEFAULT_TOOL_CALL_RETRIES,
         pre_act_label: str = "# POLICY SEARCH TOOL",
     ):
@@ -68,6 +72,16 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._max_page_chars = max(1000, max_page_chars) if max_page_chars > 0 else 0
         self._max_prompt_chars = (
             max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
+        )
+        self._max_current_policy_chars = (
+            max(500, max_current_policy_chars)
+            if max_current_policy_chars > 0
+            else 0
+        )
+        self._max_component_chars = (
+            max(1_500, max_component_chars)
+            if max_component_chars > 0
+            else 0
         )
         self._tool_call_retries = max(1, int(tool_call_retries))
         self._last_cache_key: str | None = None
@@ -248,6 +262,18 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         return self._truncate_middle_text(
             prompt,
             max_chars=self._max_prompt_chars,
+        )
+
+    def _maybe_truncate_current_policy_prompt(self, prompt: str) -> str:
+        return self._truncate_middle_text(
+            prompt,
+            max_chars=self._max_current_policy_chars,
+        )
+
+    def _maybe_truncate_component_text(self, text: str) -> str:
+        return self._truncate_middle_text(
+            text,
+            max_chars=self._max_component_chars,
         )
 
     def _build_vllm_tools(self) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -697,18 +723,22 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         ):
             return
         self._current_policy_prompt = (
-            normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
+            self._maybe_truncate_current_policy_prompt(
+                normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
+            )
         )
         self._synced_active_source_paths = normalized_active_source_paths
         self._last_cache_key = None
         self._last_cache_value = None
 
     def _compose_pre_act_value(self, policy_guidance: str) -> str:
-        return (
+        return self._maybe_truncate_component_text(
+            (
             "## Current Policy State\n"
             f"{self._current_policy_prompt}\n\n"
             "## Relevant Policy Guidance\n"
             f"{policy_guidance or self._no_relevant_policy_summary()}"
+            )
         )
 
     def _summarize_active_policy_sources(
@@ -823,6 +853,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             "max_directory_candidates": self._max_directory_candidates,
             "max_page_chars": self._max_page_chars,
             "max_prompt_chars": self._max_prompt_chars,
+            "max_current_policy_chars": self._max_current_policy_chars,
+            "max_component_chars": self._max_component_chars,
             "tool_call_retries": self._tool_call_retries,
             "current_policy_prompt": self._current_policy_prompt,
             "active_source_paths": (
@@ -866,11 +898,25 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             self._max_prompt_chars = (
                 max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
             )
+        if "max_current_policy_chars" in state:
+            max_current_policy_chars = int(state["max_current_policy_chars"])
+            self._max_current_policy_chars = (
+                max(500, max_current_policy_chars)
+                if max_current_policy_chars > 0
+                else 0
+            )
+        if "max_component_chars" in state:
+            max_component_chars = int(state["max_component_chars"])
+            self._max_component_chars = (
+                max(1_500, max_component_chars)
+                if max_component_chars > 0
+                else 0
+            )
         if "tool_call_retries" in state:
             self._tool_call_retries = max(1, int(state["tool_call_retries"]))
         if "current_policy_prompt" in state:
             current_policy_prompt = str(state["current_policy_prompt"]).strip()
-            self._current_policy_prompt = (
+            self._current_policy_prompt = self._maybe_truncate_current_policy_prompt(
                 current_policy_prompt or DEFAULT_CURRENT_POLICY_PROMPT
             )
         if "active_source_paths" in state:
