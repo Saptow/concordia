@@ -13,6 +13,14 @@ from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 from pydantic import ValidationError
 
+BUYER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS = 700
+BUYER_PREFERENCES_PROMPT_MAX_CHARS = 900
+BUYER_NEGOTIATION_HISTORY_PROMPT_MAX_CHARS = 700
+BUYER_LISTING_CONTEXT_PROMPT_MAX_CHARS = 700
+BUYER_OBSERVATION_PROMPT_MAX_CHARS = 1_200
+BUYER_BELIEF_UPDATE_MAX_TOKENS = 192
+
+
 class UncertainBuyer(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
 ):
@@ -231,6 +239,10 @@ class UncertainBuyer(
             buyer_state.latest_market_feedback
         ):
             observation_count += 1
+        agent_description = uncertain_helper.truncate_prompt_text(
+            self._agent_description,
+            max_chars=BUYER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS,
+        )
 
         prompt = (
             "# Role\n"
@@ -240,7 +252,7 @@ class UncertainBuyer(
             "Estimate own_confidence between 0 and 1.\n\n"
             "# Input\n"
             "## Buyer Description / Persona\n"
-            f"{self._agent_description}\n\n"
+            f"{agent_description}\n\n"
             "## Negotiation History\n"
             f"- failed_negotiation_count: {negotiation_count}\n"
             f"- listing_stage_observation_count: {observation_count}\n\n"
@@ -333,6 +345,21 @@ class UncertainBuyer(
         failed_history_summary = self._format_failed_negotiation_history(
             buyer_state
         )
+        preferences_text = uncertain_helper.truncate_prompt_text(
+            self._preferences,
+            max_chars=BUYER_PREFERENCES_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        failed_history_summary = uncertain_helper.truncate_prompt_text(
+            failed_history_summary,
+            max_chars=BUYER_NEGOTIATION_HISTORY_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        listing_context = uncertain_helper.truncate_prompt_text(
+            uncertain_helper.build_compact_listing_context(listing_record),
+            max_chars=BUYER_LISTING_CONTEXT_PROMPT_MAX_CHARS,
+            middle=True,
+        )
 
         prompt = (
             "# Role\n"
@@ -342,14 +369,14 @@ class UncertainBuyer(
             "Estimate counterpart_confidence between 0 and 1.\n\n"
             "# Input\n"
             "## Buyer Preferences\n"
-            f"{self._preferences}\n\n"
+            f"{preferences_text}\n\n"
             "## Buyer Effective Reservation\n"
             f"{buyer_state.effective_reservation}\n\n"
             "## Failed Negotiation Snapshot\n"
             f"- failed_negotiation_count: {len(buyer_state.negotiation_history)}\n"
             f"{failed_history_summary}\n\n"
             "## Listing Snapshot\n"
-            f"{uncertain_helper.build_compact_listing_context(listing_record)}\n\n"
+            f"{listing_context}\n\n"
             "# Rubric\n"
             "- 0.20-0.40: the flat is weakly aligned with the buyer preferences, there is little useful failed-negotiation experience, or the listing remains ambiguous.\n"
             "- 0.45-0.65: the flat is partially aligned or past failed negotiations give only mixed guidance.\n"
@@ -485,6 +512,16 @@ class UncertainBuyer(
     def _update_own_reservation_from_context(self, context: str) -> str:
         # TODO: refine prompt to include more specific examples of the flat (what the LLM should look out for)
         """Update own reservation belief based on new context information."""
+        truncated_context = uncertain_helper.truncate_prompt_text(
+            context,
+            max_chars=BUYER_OBSERVATION_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        preferences_text = uncertain_helper.truncate_prompt_text(
+            self._preferences,
+            max_chars=BUYER_PREFERENCES_PROMPT_MAX_CHARS,
+            middle=True,
+        )
         prompt = (
             "# Role\n"
             "You are a buyer in an HDB resale negotiation with imperfect information.\n\n"
@@ -492,9 +529,9 @@ class UncertainBuyer(
             "You observe a new situation (Observation). Given your preferences and current beliefs, decide whether this observation contains material information that should update **your own reservation value** for this flat.\n\n"
             "# Inputs\n"
             "## Observation\n"
-            f"{context}\n\n"
+            f"{truncated_context}\n\n"
             "## Preferences\n"
-            f"{self._preferences}\n\n"
+            f"{preferences_text}\n\n"
             "## Current Belief\n"
             f"- Current reservation value: {self._beliefs['own_reservation'].get_expected_mean:.2f}\n"
             f"- Current confidence level: {self._beliefs['own_reservation'].confidence:.2f}\n\n"
@@ -519,6 +556,7 @@ class UncertainBuyer(
         response = self._model.sample_text(
             prompt,
             json_schema=negotiation_schemas.UpdateOwnBeliefInfo.model_json_schema(),
+            max_tokens=BUYER_BELIEF_UPDATE_MAX_TOKENS,
         )
 
         # Ignore malformed model output so one bad response does not crash the turn.
@@ -547,6 +585,11 @@ class UncertainBuyer(
         # TODO: we are going to use the LLM as a black box to extract relevant info and give confidence estimates on whether the given price is driven
         # by market sentiments OR private valuations (e.g. urgency, relationship, etc). 
         # We will update the respective beliefs separately based on the estimates given by the LLM output. 
+        truncated_context = uncertain_helper.truncate_prompt_text(
+            context,
+            max_chars=BUYER_OBSERVATION_PROMPT_MAX_CHARS,
+            middle=True,
+        )
         prompt = (
             "# Role\n"
             "You are a buyer in an HDB resale negotiation with imperfect information.\n\n"
@@ -555,7 +598,7 @@ class UncertainBuyer(
             "- **seller's likely reservation value**, with a confidence level.\n"
             "- (ONLY if there is no usable signal on reservation value) **trust level signal** on the seller based on the new information [-1 to 1], where -1 indicates negative trust and 1 indicates positive trust.\n\n"
             "## Observation\n"
-            f"{context}\n\n"
+            f"{truncated_context}\n\n"
             "## Current Belief about Seller's Reservation Value\n"
             f"- Reservation Value Estimate: {self._beliefs['counterpart_reservation'].get_expected_mean:.2f}\n"
             f"- Confidence in Reservation Value: `{self._beliefs['counterpart_reservation'].confidence:.2f}\n\n"
@@ -593,6 +636,7 @@ class UncertainBuyer(
         response = self._model.sample_text(
             prompt,
             json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
+            max_tokens=BUYER_BELIEF_UPDATE_MAX_TOKENS,
         )
 
         # Ignore malformed model output so one bad response does not crash the turn.

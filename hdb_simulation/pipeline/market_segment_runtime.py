@@ -139,6 +139,7 @@ def ensure_market_segment_listing_index(
     sparse_embedder: SparseTextEmbedding | None = None,
     client: Any | None = None,
     rebuild: bool = False,
+    listing_index_path: str | Path | None = None,
 ) -> tuple[dict[str, object], int]:
     """Ensure the market-segment listing index exists and return an enriched manifest."""
     market_segment_name = (
@@ -151,19 +152,24 @@ def ensure_market_segment_listing_index(
             market_segment_name=market_segment_name
         )
     )
-    persisted_qdrant_db_path = (
-        str(manifest.get('qdrant_db_path', '')).strip()
-        or QdrantConfig.market_db_path(
+    requested_qdrant_db_path = str(listing_index_path or '').strip() or str(
+        manifest.get('qdrant_db_path', '')
+    ).strip()
+    if requested_qdrant_db_path:
+        persisted_qdrant_db_path = str(
+            Path(requested_qdrant_db_path).expanduser().resolve()
+        )
+    else:
+        persisted_qdrant_db_path = QdrantConfig.market_db_path(
             market_segment_name=market_segment_name,
         )
-    )
 
     enriched_manifest = dict(manifest)
     enriched_manifest['market_segment_name'] = market_segment_name
     enriched_manifest['qdrant_db_path'] = persisted_qdrant_db_path
     enriched_manifest['qdrant_collection_name'] = collection_name
 
-    if not rebuild and str(manifest.get('qdrant_db_path', '')).strip():
+    if not rebuild and requested_qdrant_db_path:
         existing_client = qdrant_schemas.make_qdrant_client(persisted_qdrant_db_path)
         if existing_client.collection_exists(collection_name):
             logging.info(

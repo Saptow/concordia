@@ -22,6 +22,27 @@ import yaml
 
 ACTIVE_POLICY_SOURCES_BLOCK_PREFIX = '[[POLICY_ACTIVE_SOURCES_JSON]]'
 ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX = '[[/POLICY_ACTIVE_SOURCES_JSON]]'
+POLICY_REASSESSMENT_PROMPT_MAX_CHARS = 3_200
+POLICY_REASSESSMENT_MAX_TOKENS = 384
+
+
+def _truncate_middle_text(text: object, *, max_chars: int) -> str:
+  normalized = str(text or '').strip()
+  if max_chars <= 0 or len(normalized) <= max_chars:
+    return normalized
+  if max_chars <= 10:
+    return normalized[:max_chars]
+  marker = '\n\n... [truncated] ...\n\n'
+  available = max_chars - len(marker)
+  if available <= 2:
+    return normalized[:max_chars]
+  head_chars = available // 2
+  tail_chars = available - head_chars
+  return (
+      normalized[:head_chars].rstrip()
+      + marker
+      + normalized[-tail_chars:].lstrip()
+  )
 
 
 class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
@@ -336,7 +357,13 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
         f'{json.dumps(injected_policies, ensure_ascii=False, indent=2)}\n'
     )
     try:
-      response = self._model.sample_text(prompt, max_tokens=1600)
+      response = self._model.sample_text(
+          _truncate_middle_text(
+              prompt,
+              max_chars=POLICY_REASSESSMENT_PROMPT_MAX_CHARS,
+          ),
+          max_tokens=POLICY_REASSESSMENT_MAX_TOKENS,
+      )
       parsed_response = json.loads(response)
       normalized_policies: list[PolicyStateEntry] = []
       for raw_policy in parsed_response.get('policies', []):

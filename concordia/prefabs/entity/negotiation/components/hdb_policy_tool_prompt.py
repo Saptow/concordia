@@ -23,6 +23,9 @@ TEXT_PAGE_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
 DEFAULT_CURRENT_POLICY_PROMPT = (
     "No simulation-specific policies are currently in effect."
 )
+POLICY_TOOL_CALL_MAX_TOKENS = 256
+POLICY_PATH_SELECTION_MAX_TOKENS = 256
+POLICY_SUMMARY_MAX_TOKENS = 768
 
 
 class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
@@ -396,7 +399,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             try:
                 response = chat(
                     [{"role": "user", "content": self._maybe_truncate_prompt(prompt)}],
-                    max_tokens=2_000,
+                    max_tokens=POLICY_TOOL_CALL_MAX_TOKENS,
                     tools=[tool_schema],
                 )
                 tool_calls = self._parse_tool_calls(response)
@@ -516,6 +519,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                         )
                     ),
                     json_schema=RelevantPolicyPathSelection.model_json_schema(),
+                    max_tokens=POLICY_PATH_SELECTION_MAX_TOKENS,
                 )
                 path_selection = RelevantPolicyPathSelection.model_validate_json(
                     selection_response
@@ -622,7 +626,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                             "role": "user",
                             "content": self._maybe_truncate_prompt(final_prompt),
                         }],
-                        max_tokens=4096,
+                        max_tokens=POLICY_SUMMARY_MAX_TOKENS,
                     ).strip()
                 )
             except Exception:
@@ -704,6 +708,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         observation = self._current_observation()
         recent_memories = self._recent_memories()
         active_source_paths = self._synced_active_source_paths
+        if active_source_paths == []:
+            return self._compose_pre_act_value(self._no_relevant_policy_summary())
         cache_key = json.dumps(
             {
                 "observation": observation,

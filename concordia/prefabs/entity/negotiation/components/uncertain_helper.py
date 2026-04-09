@@ -13,6 +13,38 @@ from concordia.hdb_simulation.models.schemas.common import NormalDistribution
 from pydantic import BaseModel, Field, ValidationError
 from scipy import stats
 
+ISSUE_BANK_PROMPT_MAX_CHARS = 1_000
+RECENT_MEMORIES_PROMPT_MAX_CHARS = 1_000
+FULL_CONTEXT_PROMPT_MAX_CHARS = 1_600
+DISCOVER_ISSUES_MAX_TOKENS = 512
+
+
+def truncate_prompt_text(
+    text: Any,
+    *,
+    max_chars: int,
+    middle: bool = False,
+) -> str:
+    normalized = str(text or '').strip()
+    if max_chars <= 0 or len(normalized) <= max_chars:
+        return normalized
+    if max_chars <= 10:
+        return normalized[:max_chars]
+    if not middle:
+        return normalized[: max_chars - 3].rstrip() + '...'
+
+    marker = '\n\n... [truncated] ...\n\n'
+    available = max_chars - len(marker)
+    if available <= 2:
+        return normalized[:max_chars]
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return (
+        normalized[:head_chars].rstrip()
+        + marker
+        + normalized[-tail_chars:].lstrip()
+    )
+
 
 def build_compact_listing_context(listing_record: Any) -> str:
     """Render a compact listing snapshot for model prompts."""
@@ -552,6 +584,21 @@ def discover_issues(
     issue_bank: List[NegotiationIssue],
     recent_memories: List[str],
 ) -> List[NegotiationIssue]:
+    issue_bank_json = truncate_prompt_text(
+        json.dumps([issue.model_dump() for issue in issue_bank], ensure_ascii=False),
+        max_chars=ISSUE_BANK_PROMPT_MAX_CHARS,
+        middle=True,
+    )
+    recent_memories_json = truncate_prompt_text(
+        json.dumps(recent_memories, ensure_ascii=False),
+        max_chars=RECENT_MEMORIES_PROMPT_MAX_CHARS,
+        middle=True,
+    )
+    truncated_context = truncate_prompt_text(
+        context,
+        max_chars=FULL_CONTEXT_PROMPT_MAX_CHARS,
+        middle=True,
+    )
     prompt = (
         "# Role\n"
         f"You are a {role_description}.\n\n"
@@ -559,11 +606,11 @@ def discover_issues(
         "Given the full context below, as well as the current issue bank and recent memories, identify up to 5 **open issues** that matter right now in this negotiation.\n\n"
         "# Inputs\n"
         "## Current Issue Bank\n"
-        f"{json.dumps([issue.model_dump() for issue in issue_bank], ensure_ascii=False)}\n\n"
+        f"{issue_bank_json}\n\n"
         "## Recent Memories\n"
-        f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
+        f"{recent_memories_json}\n\n"
         "## Full Context\n"
-        f"{context}\n\n"
+        f"{truncated_context}\n\n"
         "# Private Reasoning Process\n"
         "Think step by step **privately** before answering:\n\n"
         "1. Review the current issue bank against the Full Context and Recent Memories and keep only issues that are still open and relevant now.\n"
@@ -593,6 +640,7 @@ def discover_issues(
     response = model.sample_text(
         prompt,
         json_schema=NegotiationIssueResponse.model_json_schema(),
+        max_tokens=DISCOVER_ISSUES_MAX_TOKENS,
     )
     try:
         issue_response = NegotiationIssueResponse.model_validate_json(response)
@@ -648,4 +696,5 @@ __all__ = [
     'retrieve_recent_memories',
     'sanitize_issue_bank',
     'summarize_top_issue',
+    'truncate_prompt_text',
 ]

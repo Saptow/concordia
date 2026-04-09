@@ -12,6 +12,13 @@ from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 from pydantic import ValidationError
 
+SELLER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS = 700
+SELLER_LISTING_CONTEXT_PROMPT_MAX_CHARS = 700
+SELLER_STATE_PROMPT_MAX_CHARS = 800
+SELLER_OBSERVATION_PROMPT_MAX_CHARS = 1_200
+SELLER_BELIEF_UPDATE_MAX_TOKENS = 192
+
+
 class UncertainSeller(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
 ):
@@ -262,6 +269,20 @@ class UncertainSeller(
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> Optional[negotiation_schemas.InitialSellerPairingPriors]:
         negotiation_count = len(listing_payload.seller_state.negotiation_history)
+        agent_description = uncertain_helper.truncate_prompt_text(
+            self._agent_description,
+            max_chars=SELLER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS,
+        )
+        listing_context = uncertain_helper.truncate_prompt_text(
+            uncertain_helper.build_compact_listing_context(listing_payload.listing_record),
+            max_chars=SELLER_LISTING_CONTEXT_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        seller_state_json = uncertain_helper.truncate_prompt_text(
+            listing_payload.seller_state.model_dump(mode='json'),
+            max_chars=SELLER_STATE_PROMPT_MAX_CHARS,
+            middle=True,
+        )
         prompt = (
             "# Role\n"
             "You are calibrating initial uncertainty priors for a seller who has "
@@ -271,11 +292,11 @@ class UncertainSeller(
             "This reflects how confident the seller is in their initial estimate of the buyer's reservation value, based on how informative versus ambiguous the flat listing is.\n\n"
             "# Input\n"
             "## Seller Description / Persona\n"
-            f"{self._agent_description}\n\n"
+            f"{agent_description}\n\n"
             "## Listing Snapshot\n"
-            f"{uncertain_helper.build_compact_listing_context(listing_payload.listing_record)}\n\n"
+            f"{listing_context}\n\n"
             "## Seller State\n"
-            f"{listing_payload.seller_state.model_dump(mode='json')}\n\n"
+            f"{seller_state_json}\n\n"
             "## Seller Experience\n"
             f"- failed_negotiation_count: {negotiation_count}\n\n"
             "# Rubric\n"
@@ -376,6 +397,11 @@ class UncertainSeller(
 
     def _update_counterpart_reservation_from_context(self, context: str) -> str:
         """Update beliefs based on new context information."""
+        truncated_context = uncertain_helper.truncate_prompt_text(
+            context,
+            max_chars=SELLER_OBSERVATION_PROMPT_MAX_CHARS,
+            middle=True,
+        )
         prompt = (
             "# Role\n"
             "You are a seller in an HDB resale negotiation.\n\n"
@@ -386,7 +412,7 @@ class UncertainSeller(
             "based on the new information `[-1, 1]`, where `-1` indicates negative trust and `1` indicates positive trust.\n\n"
             "# Inputs\n"
             "## Observation\n"
-            f"{context}\n\n"
+            f"{truncated_context}\n\n"
             "## Current Belief about Buyer's Reservation Value\n"
             f"- Reservation value estimate: {self._beliefs['counterpart_reservation'].get_expected_mean:.2f}\n"
             f"- Confidence in reservation value: `{self._beliefs['counterpart_reservation'].confidence:.2f}`\n\n"
@@ -418,6 +444,7 @@ class UncertainSeller(
         response = self._model.sample_text(
             prompt,
             json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
+            max_tokens=SELLER_BELIEF_UPDATE_MAX_TOKENS,
         )
 
         # Ignore malformed model output so one bad response does not crash the turn.

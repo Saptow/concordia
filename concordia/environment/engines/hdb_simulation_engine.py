@@ -351,14 +351,23 @@ class HDBSimulationEngine(engine_lib.Engine):
     if not normalized_player_ids:
       return
 
-    current_policy_prompt = getattr(
-        policy_layer,
-        'get_current_policy_prompt',
-        lambda: '',
-    )()
-    active_source_paths = list(
-        getattr(policy_layer, 'get_active_source_paths', lambda: [])()
+    observations_by_player_id = policy_layer.announce_policies_for_week(
+        week_number=int(week_number),
+        active_player_ids=normalized_player_ids,
     )
+    if observations_by_player_id:
+      current_policy_prompt = getattr(
+          policy_layer,
+          'get_current_policy_prompt',
+          lambda: '',
+      )()
+      active_source_paths = list(
+          getattr(policy_layer, 'get_active_source_paths', lambda: [])()
+      )
+    else:
+      current_policy_prompt = ''
+      active_source_paths = []
+
     for entity in entities:
       try:
         policy_prompt = entity.get_component(
@@ -372,10 +381,6 @@ class HDBSimulationEngine(engine_lib.Engine):
           active_source_paths=active_source_paths,
       )
 
-    observations_by_player_id = policy_layer.announce_policies_for_week(
-        week_number=int(week_number),
-        active_player_ids=normalized_player_ids,
-    )
     if not observations_by_player_id:
       return
 
