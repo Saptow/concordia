@@ -235,6 +235,7 @@ class Simulation(simulation_lib.Simulation):
       self,
       premise: str | None = None,
       max_steps: int | None = None,
+      verbose: bool = False,
       raw_log: list[Mapping[str, Any]] | None = None,
       get_state_callback: Callable[[dict[str, Any]], None] | None = None,
       checkpoint_path: str | None = None,
@@ -246,6 +247,7 @@ class Simulation(simulation_lib.Simulation):
     Args:
       premise: A string to use as the initial premise of the simulation.
       max_steps: The maximum number of steps to run the simulation for.
+      verbose: Whether to print per-step engine output while running.
       raw_log: A list to store the raw log of the simulation. This is used to
         generate the HTML log. Data in the supplied raw_log will be appended
         with the log from the simulation. If None, a new list is created.
@@ -295,7 +297,7 @@ class Simulation(simulation_lib.Simulation):
         entities=self.entities,
         premise=premise,
         max_steps=max_steps,
-        verbose=True,
+        verbose=verbose,
         log=raw_log,
         checkpoint_callback=checkpoint_callback,
         step_controller=step_controller,

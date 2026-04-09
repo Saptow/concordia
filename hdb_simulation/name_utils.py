@@ -269,19 +269,39 @@ def disambiguate_profile_name(
         return candidate
 
     tokens = candidate.split()
-    if len(tokens) >= 2:
-        return candidate
-
     persona = str(record.get('general_persona', '')).strip()
     if not persona:
+        return candidate
+
+    full_fallback_name = _fallback_name_from_persona(
+        persona=persona,
+        role_label=role_label,
+    )
+    if len(tokens) >= 2:
+        if full_fallback_name and full_fallback_name != candidate:
+            fallback_tokens = full_fallback_name.split()
+            if fallback_tokens and fallback_tokens[-1] != tokens[-1]:
+                return f'{candidate} {fallback_tokens[-1]}'
         return candidate
 
     surname = _fallback_surname_from_persona(
         persona=persona,
         role_label=role_label,
     )
-    if not surname:
-        return candidate
-    if tokens[0] == surname:
-        return candidate
-    return f'{candidate} {surname}'
+    variants: list[str] = []
+    if surname and tokens[0] != surname:
+        variants.append(f'{candidate} {surname}')
+
+    if full_fallback_name:
+        fallback_tokens = full_fallback_name.split()
+        if len(fallback_tokens) >= 2:
+            trailing_tokens = " ".join(fallback_tokens[1:])
+            if trailing_tokens:
+                variants.append(f'{candidate} {trailing_tokens}')
+        variants.append(full_fallback_name)
+
+    for variant in variants:
+        normalized_variant = str(variant).strip()
+        if normalized_variant and normalized_variant != candidate:
+            return normalized_variant
+    return candidate

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import re
 from collections.abc import Sequence
@@ -46,6 +47,33 @@ HDB_FIELD_GENERATION_INFO_GUARDRAILS = (
 
 def _log_error(message: str) -> None:
     logging.error(message)
+
+
+@dataclasses.dataclass(frozen=True)
+class StructuredActionAttemptRequest:
+    """Represents the final payload-generation request for one action."""
+
+    component: "HDBStructuredActComponent"
+    action_spec: entity_lib.ActionSpec
+    preferred_action_type: str
+    specific_schema: type[BaseModel]
+    prompt_text: str
+    prompt_log_sections: tuple[str, ...]
+    structured_question: str
+    max_tokens: int = 2200
+    terminators: tuple[str, ...] = ()
+    temperature: float = language_model.DEFAULT_TEMPERATURE
+    top_p: float = language_model.DEFAULT_TOP_P
+    top_k: int = language_model.DEFAULT_TOP_K
+
+
+@dataclasses.dataclass(frozen=True)
+class StructuredActionPlan:
+    """Resolved phase-2 payload-generation inputs for one action."""
+
+    preferred_action_type: str
+    specific_schema: type[BaseModel]
+    decision_brief: str
 
 class HDBStructuredActComponent(
     entity_component.ActingComponent, entity_component.ComponentWithLogging
@@ -339,43 +367,85 @@ class HDBStructuredActComponent(
         prompt.statement(section)
         prompt_log_sections.append(section.strip())
 
-    def _generate_action_payload(
+    def _resolve_structured_action_plan(
         self,
         contexts: entity_component.ComponentContextMapping,
         action_spec: entity_lib.ActionSpec,
-        allowed_types: Sequence[str] = (),
-        preferred_action_type: str | None = None,
-        decision_brief: str = "",
-    ) -> str:
-        """Generate payload fields for one already-chosen action type."""
-        call_to_action = action_spec.call_to_action.replace("{name}", self.get_entity().name)
-        allowed_set = {str(x).strip().upper() for x in allowed_types}
-        preferred_type = str(preferred_action_type or "").strip().upper()
-        if not preferred_type and len(allowed_set) == 1:
-            preferred_type = next(iter(allowed_set))
-        if not preferred_type:
-            _log_error("Missing chosen action type for structured field generation.")
-            return "{}"
-        if allowed_set and preferred_type not in allowed_set:
+    ) -> StructuredActionPlan | None:
+        """Resolve the fixed action type and schema for phase-2 generation."""
+        use_structured = (
+            action_spec.output_type in entity_lib.FREE_ACTION_TYPES
+            or self._looks_like_action_type_choice(action_spec)
+        )
+        if not use_structured:
+            return None
+        allowed_types = tuple(str(opt).strip().upper() for opt in action_spec.options)
+        raw = contexts.get(self._structured_component_key)
+        if not raw:
             _log_error(
-                f"Chosen action type {preferred_type!r} is not allowed this turn."
+                f'Missing action choice in "{self._structured_component_key}".'
             )
-            preferred_type = next(iter(allowed_set)) if allowed_set else ""
-            if not preferred_type:
-                return "{}"
-        specific_schema = self._schema_for_action_type(preferred_type)
+            return None
+        preferred_action_type = self._parse_action_type(
+            raw, allowed_types=allowed_types
+        )
+        if not preferred_action_type:
+            if not allowed_types:
+                _log_error(
+                    f'Could not parse chosen action type from "{self._structured_component_key}".'
+                )
+                return None
+            preferred_action_type = allowed_types[0]
+            self._logging_channel({
+                "Summary": (
+                    f'Could not parse chosen action type from "{self._structured_component_key}". '
+                    f"Falling back to first allowed option: {preferred_action_type}."
+                ),
+                "Value": str(raw),
+            })
+        if allowed_types and preferred_action_type not in set(allowed_types):
+            _log_error(
+                f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
+            )
+            preferred_action_type = allowed_types[0] if allowed_types else None
+            if preferred_action_type is None:
+                return None
+        specific_schema = self._schema_for_action_type(preferred_action_type)
         if specific_schema is None:
             _log_error(
-                f"Unsupported action type for structured generation: {preferred_type!r}."
+                f"Unsupported action type for structured generation: {preferred_action_type!r}."
             )
-            return "{}"
-        chosen_action_description = (
-            self._format_action_type_descriptions((preferred_type,))
-            if preferred_type
-            else ""
+            return None
+        return StructuredActionPlan(
+            preferred_action_type=preferred_action_type,
+            specific_schema=specific_schema,
+            decision_brief=self._build_decision_brief(
+                raw,
+                preferred_action_type=preferred_action_type,
+            ),
+        )
+
+    def _build_payload_generation_request(
+        self,
+        contexts: entity_component.ComponentContextMapping,
+        action_spec: entity_lib.ActionSpec,
+        plan: StructuredActionPlan,
+    ) -> StructuredActionAttemptRequest:
+        """Assemble the single prompt used for structured field generation."""
+        call_to_action = action_spec.call_to_action.replace(
+            "{name}", self.get_entity().name
+        )
+        preferred_type = plan.preferred_action_type
+        chosen_action_description = self._format_action_type_descriptions(
+            (preferred_type,)
         )
         offer_actions = {"MAKE_OFFER", "MAKE_COUNTEROFFER", "ACCEPT_OFFER"}
-        info_actions = {"INQUIRE_BUYER","INQUIRE_SELLER","QUESTION_BUYER","NORMAL_ANSWER"}
+        info_actions = {
+            "INQUIRE_BUYER",
+            "INQUIRE_SELLER",
+            "QUESTION_BUYER",
+            "NORMAL_ANSWER",
+        }
         action_specific_guardrails = ""
         if preferred_type in offer_actions:
             action_specific_guardrails += HDB_FIELD_GENERATION_MONETARY_GUARDRAILS
@@ -387,7 +457,7 @@ class HDBStructuredActComponent(
             else ""
         )
         prompt = interactive_document.InteractiveDocument(self._model)
-        prompt_log_sections = []
+        prompt_log_sections: list[str] = []
         self._append_prompt_section(
             prompt,
             prompt_log_sections,
@@ -398,7 +468,7 @@ class HDBStructuredActComponent(
             prompt,
             prompt_log_sections,
             "# Decision Brief",
-            decision_brief,
+            plan.decision_brief,
         )
         prompt.statement(HDB_FIELD_GENERATION_BASE_GUARDRAILS)
         prompt_log_sections.append(HDB_FIELD_GENERATION_BASE_GUARDRAILS.strip())
@@ -446,6 +516,8 @@ class HDBStructuredActComponent(
             "- Follow the fixed action type.\n"
             "- Return only the required fields for the schema."
         )
+        prompt._question(f"Question: {structured_question}\n")
+        prompt._response("Answer: ")
         self._logging_channel({
             "Summary": (
                 f"StructuredAct field-generation prompt "
@@ -456,13 +528,142 @@ class HDBStructuredActComponent(
                 + ["", "Question:", structured_question]
             ),
         })
-        generated = prompt.structured_question(
-            question=structured_question,
-            output_schema=specific_schema,
-            max_tokens=2200,
-            terminators=(),
+        return StructuredActionAttemptRequest(
+            component=self,
+            action_spec=action_spec,
+            preferred_action_type=preferred_type,
+            specific_schema=plan.specific_schema,
+            prompt_text=prompt.view().text(),
+            prompt_log_sections=tuple(prompt_log_sections),
+            structured_question=structured_question,
         )
-        return self._serialize_action_payload(generated)
+
+    def build_action_attempt_request(
+        self,
+        contexts: entity_component.ComponentContextMapping,
+        action_spec: entity_lib.ActionSpec,
+    ) -> StructuredActionAttemptRequest | None:
+        """Build a batchable phase-2 request when structured generation applies."""
+        plan = self._resolve_structured_action_plan(contexts, action_spec)
+        if plan is None:
+            return None
+        return self._build_payload_generation_request(
+            contexts=contexts,
+            action_spec=action_spec,
+            plan=plan,
+        )
+
+    def _parse_action_payload_response(
+        self,
+        request: StructuredActionAttemptRequest,
+        raw_response: str,
+    ) -> str:
+        """Validate and normalize one structured payload generation response."""
+        try:
+            parsed_response = request.specific_schema.model_validate_json(raw_response)
+            normalized = parsed_response.model_dump_json()
+        except Exception:
+            normalized = raw_response
+        serialized = self._serialize_action_payload(normalized)
+        self._logging_channel({
+            "Summary": (
+                f"Using chosen action type from {self._structured_component_key} "
+                f"to generate payload fields ({request.preferred_action_type})"
+            ),
+            "Value": serialized,
+        })
+        return serialized
+
+    def execute_action_attempt_request(
+        self,
+        request: StructuredActionAttemptRequest,
+    ) -> str:
+        """Execute one phase-2 request through the language model."""
+        raw_response = self._model.sample_text(
+            prompt=request.prompt_text,
+            max_tokens=request.max_tokens,
+            terminators=request.terminators,
+            json_schema=request.specific_schema.model_json_schema(),
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+        )
+        return self._parse_action_payload_response(request, raw_response)
+
+    @classmethod
+    def execute_action_attempt_requests(
+        cls,
+        requests: Sequence[StructuredActionAttemptRequest],
+    ) -> list[str]:
+        """Execute payload-generation requests, batching compatible groups."""
+        if not requests:
+            return []
+        outputs = [""] * len(requests)
+        grouped_requests: dict[
+            tuple[Any, ...],
+            list[tuple[int, StructuredActionAttemptRequest]],
+        ] = {}
+        for index, request in enumerate(requests):
+            group_key = (
+                id(request.component._model),
+                request.specific_schema,
+                request.max_tokens,
+                request.terminators,
+                request.temperature,
+                request.top_p,
+                request.top_k,
+            )
+            grouped_requests.setdefault(group_key, []).append((index, request))
+
+        for grouped in grouped_requests.values():
+            model = grouped[0][1].component._model
+            batch_sampler = getattr(model, "sample_text_batch", None)
+            use_batch = callable(batch_sampler) and len(grouped) > 1
+            if not use_batch:
+                for index, request in grouped:
+                    outputs[index] = request.component.execute_action_attempt_request(
+                        request
+                    )
+                continue
+            try:
+                raw_responses = batch_sampler(
+                    [request.prompt_text for _, request in grouped],
+                    max_tokens=grouped[0][1].max_tokens,
+                    terminators=grouped[0][1].terminators,
+                    json_schema=grouped[0][1].specific_schema.model_json_schema(),
+                    temperature=grouped[0][1].temperature,
+                    top_p=grouped[0][1].top_p,
+                    top_k=grouped[0][1].top_k,
+                )
+            except Exception:
+                raw_responses = []
+            if len(raw_responses) != len(grouped):
+                for index, request in grouped:
+                    outputs[index] = request.component.execute_action_attempt_request(
+                        request
+                    )
+                continue
+            for (index, request), raw_response in zip(grouped, raw_responses):
+                outputs[index] = request.component._parse_action_payload_response(
+                    request,
+                    raw_response,
+                )
+        return outputs
+
+    def _generate_action_payload(
+        self,
+        contexts: entity_component.ComponentContextMapping,
+        action_spec: entity_lib.ActionSpec,
+        allowed_types: Sequence[str] = (),
+        preferred_action_type: str | None = None,
+        decision_brief: str = "",
+    ) -> str:
+        """Generate payload fields for one already-chosen action type."""
+        del allowed_types, preferred_action_type, decision_brief
+        request = self.build_action_attempt_request(contexts, action_spec)
+        if request is None:
+            return "{}"
+        return self.execute_action_attempt_request(request)
 
     @staticmethod
     def _looks_like_action_type_choice(action_spec: entity_lib.ActionSpec) -> bool:
@@ -484,56 +685,10 @@ class HDBStructuredActComponent(
             or self._looks_like_action_type_choice(action_spec)
         )
         if use_structured:
-            allowed_types = tuple(str(opt).strip().upper() for opt in action_spec.options)
-            raw = contexts.get(self._structured_component_key)
-            if not raw:
-                _log_error(
-                    f'Missing action choice in "{self._structured_component_key}".'
-                )
+            request = self.build_action_attempt_request(contexts, action_spec)
+            if request is None:
                 return "{}"
-            preferred_action_type = self._parse_action_type(
-                raw, allowed_types=allowed_types
-            )
-            if not preferred_action_type:
-                if not allowed_types:
-                    _log_error(
-                        f'Could not parse chosen action type from "{self._structured_component_key}".'
-                    )
-                    return "{}"
-                preferred_action_type = allowed_types[0]
-                self._logging_channel({
-                    "Summary": (
-                        f'Could not parse chosen action type from "{self._structured_component_key}". '
-                        f"Falling back to first allowed option: {preferred_action_type}."
-                    ),
-                    "Value": str(raw),
-                })
-            if allowed_types and preferred_action_type not in set(allowed_types):
-                _log_error(
-                    f"Chosen action type {preferred_action_type!r} not in allowed options {sorted(set(allowed_types))}."
-                )
-                preferred_action_type = allowed_types[0] if allowed_types else None
-                if preferred_action_type is None:
-                    return "{}"
-            decision_brief = self._build_decision_brief(
-                raw,
-                preferred_action_type=preferred_action_type,
-            )
-            out = self._generate_action_payload(
-                contexts=contexts,
-                action_spec=action_spec,
-                allowed_types=allowed_types,
-                preferred_action_type=preferred_action_type,
-                decision_brief=decision_brief,
-            )
-            self._logging_channel({
-                "Summary": (
-                    f"Using chosen action type from {self._structured_component_key} "
-                    f"to generate payload fields ({preferred_action_type})"
-                ),
-                "Value": out,
-            })
-            return out
+            return self.execute_action_attempt_request(request)
 
         prompt = interactive_document.InteractiveDocument(self._model)
         prompt.statement(self._build_action_context(contexts) + "\n")

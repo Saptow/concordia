@@ -261,6 +261,8 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
       *,
       model: language_model.LanguageModel | None,
       bundle: Mapping[str, Any],
+      buyer_profiles: Mapping[str, Mapping[str, Any]] | None,
+      seller_profiles: Mapping[str, Mapping[str, Any]] | None,
       town: str,
       next_game_master_name: str,
       week_number: int = 1,
@@ -269,6 +271,22 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
     super().__init__(pre_act_label=pre_act_label)
     self._model = model
     self._bundle = dict(bundle)
+    self._buyer_profiles = (
+        {
+            str(buyer_id): dict(profile)
+            for buyer_id, profile in dict(buyer_profiles).items()
+        }
+        if buyer_profiles is not None
+        else None
+    )
+    self._seller_profiles = (
+        {
+            str(seller_id): dict(profile)
+            for seller_id, profile in dict(seller_profiles).items()
+        }
+        if seller_profiles is not None
+        else None
+    )
     self._town = str(town)
     self._next_game_master_name = str(next_game_master_name)
     self._week_number = int(week_number)
@@ -489,11 +507,15 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
           coordinator.name,
       )
 
-    buyer_profiles, seller_profiles = build_market_profiles(
-        self._bundle,
-        town=self._town,
-        model=self._model,
-    )
+    if self._buyer_profiles is not None and self._seller_profiles is not None:
+      buyer_profiles = self._buyer_profiles
+      seller_profiles = self._seller_profiles
+    else:
+      buyer_profiles, seller_profiles = build_market_profiles(
+          self._bundle,
+          town=self._town,
+          model=self._model,
+      )
     listing_module = coordinator.get_component('listing_module')
     weekly_coordinator = coordinator.get_component('weekly_coordinator')
 
@@ -589,6 +611,8 @@ class InitialiserGameMaster(prefab_lib.Prefab):
           'next_game_master_name': 'Market_Coordinator',
           'town': '',
           'bundle': {},
+          'buyer_profiles': {},
+          'seller_profiles': {},
           'week_number': 1,
       }
   )
@@ -606,6 +630,8 @@ class InitialiserGameMaster(prefab_lib.Prefab):
     initializer = HDBMarketInitialiser(
         model=model,
         bundle=self.params.get('bundle', {}),
+        buyer_profiles=self.params.get('buyer_profiles'),
+        seller_profiles=self.params.get('seller_profiles'),
         town=str(self.params.get('town', '')),
         next_game_master_name=str(
             self.params.get('next_game_master_name', 'Market_Coordinator')

@@ -14,6 +14,7 @@
 
 """A modular entity agent using the new component system."""
 
+import dataclasses
 from collections.abc import Mapping
 from concurrent import futures
 import functools
@@ -30,6 +31,14 @@ from concordia.utils import concurrency
 
 # TODO: b/313715068 - remove disable once pytype bug is fixed.
 # pytype: disable=override-error
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedAct:
+  """Prepared act state held between PRE_ACT and POST_ACT."""
+
+  action_spec: entity.ActionSpec
+  contexts: entity_component.ComponentContextMapping
 
 
 class EntityAgent(entity_component.EntityWithComponents):
@@ -165,30 +174,59 @@ class EntityAgent(entity_component.EntityWithComponents):
   def act(
       self, action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC
   ) -> str:
-    with self._control_lock:
-      try:
-        self._set_phase(entity_component.Phase.PRE_ACT)
-        contexts = self._parallel_call_('pre_act', action_spec)
-        self._context_processor.pre_act(types.MappingProxyType(contexts))
+    prepared_act = self.prepare_act(action_spec)
+    return self.finalize_prepared_act(prepared_act)
+
+  def prepare_act(
+      self,
+      action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC,
+  ) -> PreparedAct:
+    """Prepare an action and hold the agent in PRE_ACT until finalized."""
+    self._control_lock.acquire()
+    try:
+      self._set_phase(entity_component.Phase.PRE_ACT)
+      contexts = self._parallel_call_('pre_act', action_spec)
+      contexts = types.MappingProxyType(contexts)
+      self._context_processor.pre_act(contexts)
+      return PreparedAct(action_spec=action_spec, contexts=contexts)
+    except Exception:
+      self.set_phase(entity_component.Phase.READY)
+      self._control_lock.release()
+      raise
+
+  def finalize_prepared_act(
+      self,
+      prepared_act: PreparedAct,
+      action_attempt: str | None = None,
+  ) -> str:
+    """Finalize a prepared action, running POST_ACT and UPDATE."""
+    try:
+      if action_attempt is None:
         action_attempt = self._act_component.get_action_attempt(
-            contexts, action_spec
+            prepared_act.contexts,
+            prepared_act.action_spec,
         )
 
-        self._set_phase(entity_component.Phase.POST_ACT)
-        contexts = self._parallel_call_('post_act', action_attempt)
-        self._context_processor.post_act(contexts)
+      self._set_phase(entity_component.Phase.POST_ACT)
+      contexts = self._parallel_call_('post_act', action_attempt)
+      self._context_processor.post_act(contexts)
 
-        self._set_phase(entity_component.Phase.UPDATE)
-        self._parallel_call_('update')
+      self._set_phase(entity_component.Phase.UPDATE)
+      self._parallel_call_('update')
 
-        self._set_phase(entity_component.Phase.READY)
+      self._set_phase(entity_component.Phase.READY)
+      return action_attempt
+    except Exception:
+      self.set_phase(entity_component.Phase.READY)
+      raise
+    finally:
+      self._control_lock.release()
 
-        return action_attempt
-      except Exception:
-        # Ensure correct error handling in the case of multiple threads
-        # using the same entity by setting the phase to ready before raising.
-        self.set_phase(entity_component.Phase.READY)
-        raise
+  def cancel_prepared_act(self, prepared_act: PreparedAct) -> None:
+    """Abort a prepared action and return the agent to READY."""
+    del prepared_act
+    self.set_phase(entity_component.Phase.READY)
+    self._control_lock.release()
 
   @override
   def observe(self, observation: str) -> None:

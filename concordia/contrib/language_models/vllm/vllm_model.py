@@ -130,6 +130,31 @@ class VLLMLanguageModel(language_model.LanguageModel):
 
     self._llm = LLM(**llm_kwargs)
 
+  def _build_sampling_params(
+      self,
+      *,
+      max_tokens: int,
+      terminators: Collection[str],
+      temperature: float,
+      top_p: float,
+      top_k: int,
+      seed: int | None,
+      json_schema: dict[str, Any] | None = None,
+  ) -> SamplingParams:
+    """Build sampling params shared by single and batched generation."""
+    structured_outputs = None
+    if json_schema is not None:
+      structured_outputs = StructuredOutputsParams(json=json_schema)
+    return SamplingParams(
+        structured_outputs=structured_outputs,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        seed=seed,
+        stop=list(terminators) if terminators else None,
+    )
+
   def increment_lora_adapters(self) -> int:
     """Increment the count of LoRA adapters used."""
     if not self._enable_lora:
@@ -154,22 +179,14 @@ class VLLMLanguageModel(language_model.LanguageModel):
   ) -> str:
     """Sample text from the vLLM model."""
     del timeout  # vLLM doesn't support timeout in SamplingParams
-
-    # Create structured output params if JSON schema is provided
-    structured_outputs = None
-    if json_schema is not None:
-      structured_outputs = StructuredOutputsParams(
-        json=json_schema
-      )
-    # Create sampling parameters
-    sampling_params = SamplingParams(
-        structured_outputs=structured_outputs,
+    sampling_params = self._build_sampling_params(
+        max_tokens=max_tokens,
+        terminators=terminators,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
-        max_tokens=max_tokens,
         seed=seed,
-        stop=list(terminators) if terminators else None,
+        json_schema=json_schema,
     )
 
     # Generate response
@@ -191,6 +208,53 @@ class VLLMLanguageModel(language_model.LanguageModel):
       )
 
     return generated_text
+
+  def sample_text_batch(
+      self,
+      prompts: Sequence[str],
+      *,
+      max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K,
+      timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
+      seed: int | None = None,
+      lora_request: LoRARequest | None = None,
+      json_schema: dict[str, Any] | None = None,
+  ) -> list[str]:
+    """Sample batched text from the vLLM model with shared params."""
+    del timeout  # vLLM doesn't support timeout in SamplingParams
+    if not prompts:
+      return []
+
+    sampling_params = self._build_sampling_params(
+        max_tokens=max_tokens,
+        terminators=terminators,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        seed=seed,
+        json_schema=json_schema,
+    )
+
+    with self._lock:
+      outputs = self._llm.generate(
+          prompts=list(prompts),
+          sampling_params=sampling_params,
+          lora_request=lora_request,
+      )
+
+    generated_texts = [output.outputs[0].text for output in outputs]
+
+    if self._measurements is not None:
+      for generated_text in generated_texts:
+        self._measurements.publish_datum(
+            self._channel,
+            {'raw_text_length': len(generated_text)},
+        )
+
+    return generated_texts
 
   def chat(
       self,
@@ -513,6 +577,33 @@ class VLLMLora(language_model.LanguageModel):
         timeout=timeout,
         seed=seed,
         lora_request=self._lora_request,
+    )
+
+  def sample_text_batch(
+      self,
+      prompts: Sequence[str],
+      *,
+      max_tokens: int = language_model.DEFAULT_MAX_TOKENS,
+      terminators: Collection[str] = language_model.DEFAULT_TERMINATORS,
+      temperature: float = language_model.DEFAULT_TEMPERATURE,
+      top_p: float = language_model.DEFAULT_TOP_P,
+      top_k: int = language_model.DEFAULT_TOP_K,
+      timeout: float = language_model.DEFAULT_TIMEOUT_SECONDS,
+      seed: int | None = None,
+      json_schema: dict[str, Any] | None = None,
+  ) -> list[str]:
+    """Sample batched text from the vLLM model with the LoRA adapter."""
+    return self._vllm_model.sample_text_batch(
+        prompts,
+        max_tokens=max_tokens,
+        terminators=terminators,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        timeout=timeout,
+        seed=seed,
+        lora_request=self._lora_request,
+        json_schema=json_schema,
     )
 
   def chat(

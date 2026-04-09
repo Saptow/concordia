@@ -34,6 +34,19 @@ def _listing_price_for_seller(seller: listing_schemas.PortalSeller) -> float:
   return max(min_price, max_price)
 
 
+def _normalize_max_workers(value: object) -> int | None:
+  """Parse worker counts while allowing `None` to mean executor default."""
+  if value is None:
+    return None
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError):
+    return 1
+  if parsed <= 0:
+    return None
+  return parsed
+
+
 def _derive_failed_negotiation_learning_signal(
     *,
     payload: negotiation_schemas.NegotiationToListingPayload,
@@ -58,6 +71,9 @@ def execute_listing_week(
     week_number: int,
     active_player_ids: Sequence[str],
     active_player_names: Sequence[str],
+    seller_listing_max_workers: int | None = 1,
+    buyer_search_max_workers: int | None = 1,
+    seller_review_max_workers: int | None = 1,
 ) -> listing_schemas.ListingWeeklyBatchOutcome:
   """Executes one scripted listing week for the provided active participants.
 
@@ -109,7 +125,7 @@ def execute_listing_week(
   listed_results, listing_errors = (
       concurrency.run_tasks_in_background(
           seller_listing_tasks,
-          max_workers=1,
+          max_workers=seller_listing_max_workers,
       )
       if seller_listing_tasks
       else ({}, {})
@@ -143,7 +159,7 @@ def execute_listing_week(
   buyer_results, buyer_errors = (
       concurrency.run_tasks_in_background(
           buyer_tasks,
-          max_workers=1,
+          max_workers=buyer_search_max_workers,
       )
       if buyer_tasks
       else ({}, {})
@@ -181,7 +197,7 @@ def execute_listing_week(
   review_results, review_errors = (
       concurrency.run_tasks_in_background(
           seller_review_tasks,
-          max_workers=1,
+          max_workers=seller_review_max_workers,
       )
       if seller_review_tasks
       else ({}, {})
@@ -254,6 +270,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       db_path: str | None = None,
       random_seed: int = 0,
       max_rounds: int | None = None,
+      seller_listing_max_workers: int | None = 1,
+      buyer_search_max_workers: int | None = 1,
+      seller_review_max_workers: int | None = 1,
       enabled: bool = True,
       pre_act_label: str = 'Listing module',
   ):
@@ -273,6 +292,15 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
     self._id_to_name = dict(zip(self._player_ids, self._player_names))
     self._max_rounds = max_rounds if max_rounds and max_rounds > 0 else None
+    self._seller_listing_max_workers = _normalize_max_workers(
+        seller_listing_max_workers
+    )
+    self._buyer_search_max_workers = _normalize_max_workers(
+        buyer_search_max_workers
+    )
+    self._seller_review_max_workers = _normalize_max_workers(
+        seller_review_max_workers
+    )
     self._completed_weeks = 0
     self._last_run_week = 0
     self._stage_exhausted = False
@@ -733,6 +761,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         week_number=week_number,
         active_player_ids=active_player_ids,
         active_player_names=active_player_names,
+        seller_listing_max_workers=self._seller_listing_max_workers,
+        buyer_search_max_workers=self._buyer_search_max_workers,
+        seller_review_max_workers=self._seller_review_max_workers,
     )
     newly_listed_ids = set(outcome.newly_listed_listing_ids)
     reviewed_seller_names = set(outcome.sellers_reviewed)

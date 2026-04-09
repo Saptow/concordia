@@ -1149,7 +1149,7 @@ def _build_flat_universe(
                 "transaction_year_month": str(transaction_month),
                 "simulated_market_entry_date": (
                     transaction_date
-                    - pd.DateOffset(months=config.effective_lead_months)
+                    - pd.DateOffset(months=config.lead_months)
                 ).date().isoformat(),
                 "initialization_order": order_index,
                 "relative_transaction_timing": relative_timing,
