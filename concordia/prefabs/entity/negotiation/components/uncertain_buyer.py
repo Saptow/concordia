@@ -8,6 +8,7 @@ from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -167,6 +168,21 @@ class UncertainBuyer(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
+        requests = self.build_listing_handoff_requests(listing_payload)
+        responses = structured_setup_batching.execute_setup_requests(requests)
+        self.apply_listing_handoff_responses(
+            listing_payload,
+            {
+                request.response_key: response
+                for request, response in zip(requests, responses)
+            },
+        )
+
+    def apply_listing_handoff_responses(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+        responses_by_key: Dict[str, str],
+    ) -> None:
         buyer_state = listing_payload.buyer_state
         negotiation_count = max(0, len(buyer_state.negotiation_history))
         # Each new listing-to-negotiation handoff starts a fresh pair, so we
@@ -177,9 +193,11 @@ class UncertainBuyer(
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         # Re-estimate confidence at the start of every new negotiation rather
         # than inheriting the previous pair's confidence state.
-        own_confidence = self._estimate_own_confidence(listing_payload)
-        counterpart_confidence = self._estimate_counterpart_confidence(
-            listing_payload
+        own_confidence = self._parse_own_confidence_response(
+            responses_by_key.get('own_confidence', '')
+        )
+        counterpart_confidence = self._parse_counterpart_confidence_response(
+            responses_by_key.get('counterpart_confidence', '')
         )
         self._beliefs['own_reservation'] = self._build_flat_specific_own_reservation(
             listing_payload,
@@ -228,10 +246,10 @@ class UncertainBuyer(
             confidence=max(0.0, min(1.0, own_confidence)),
         )
 
-    def _estimate_own_confidence(
+    def _build_own_confidence_prompt(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> float:
+    ) -> str:
         buyer_state = listing_payload.buyer_state
         observation_count = len(buyer_state.latest_search_results)
         negotiation_count = len(buyer_state.negotiation_history)
@@ -276,16 +294,10 @@ class UncertainBuyer(
             "- Use listing-stage observation count as a secondary grounding signal.\n"
             "- Use the examples as anchors, not as fixed templates.\n"
         )
+        return prompt
 
+    def _parse_own_confidence_response(self, response: str) -> float:
         try:
-            response = self._model.sample_text(
-                prompt,
-                json_schema=(
-                    negotiation_schemas.BuyerOwnConfidenceEstimate
-                    .model_json_schema()
-                ),
-                max_tokens=120,
-            )
             estimate = negotiation_schemas.BuyerOwnConfidenceEstimate.model_validate_json(
                 response
             )
@@ -336,10 +348,10 @@ class UncertainBuyer(
             )
         return '\n'.join(lines)
 
-    def _estimate_counterpart_confidence(
+    def _build_counterpart_confidence_prompt(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> float:
+    ) -> str:
         listing_record = listing_payload.listing_record
         buyer_state = listing_payload.buyer_state
         failed_history_summary = self._format_failed_negotiation_history(
@@ -399,16 +411,10 @@ class UncertainBuyer(
             "- If the paired flat is very similar to flats the buyer prefers and past failed negotiations provide useful comparison points, increase confidence.\n"
             "- Use listing ambiguity as a secondary adjustment.\n"
         )
+        return prompt
 
+    def _parse_counterpart_confidence_response(self, response: str) -> float:
         try:
-            response = self._model.sample_text(
-                prompt,
-                json_schema=(
-                    negotiation_schemas.BuyerCounterpartConfidenceEstimate
-                    .model_json_schema()
-                ),
-                max_tokens=120,
-            )
             estimate = (
                 negotiation_schemas.BuyerCounterpartConfidenceEstimate
                 .model_validate_json(response)
@@ -418,6 +424,29 @@ class UncertainBuyer(
         except Exception:
             return self._base_counterpart_confidence
         return max(0.0, min(1.0, float(estimate.counterpart_confidence)))
+
+    def build_listing_handoff_requests(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
+        return [
+            structured_setup_batching.StructuredSetupRequest(
+                component=self,
+                response_key='own_confidence',
+                prompt_text=self._build_own_confidence_prompt(listing_payload),
+                specific_schema=negotiation_schemas.BuyerOwnConfidenceEstimate,
+                max_tokens=120,
+            ),
+            structured_setup_batching.StructuredSetupRequest(
+                component=self,
+                response_key='counterpart_confidence',
+                prompt_text=self._build_counterpart_confidence_prompt(listing_payload),
+                specific_schema=(
+                    negotiation_schemas.BuyerCounterpartConfidenceEstimate
+                ),
+                max_tokens=120,
+            ),
+        ]
 
     def _build_flat_specific_own_reservation(
         self,

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -177,6 +178,21 @@ class UncertainSeller(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
+        requests = self.build_listing_handoff_requests(listing_payload)
+        responses = structured_setup_batching.execute_setup_requests(requests)
+        self.apply_listing_handoff_responses(
+            listing_payload,
+            {
+                request.response_key: response
+                for request, response in zip(requests, responses)
+            },
+        )
+
+    def apply_listing_handoff_responses(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+        responses_by_key: Dict[str, str],
+    ) -> None:
         seller_state = listing_payload.seller_state
         negotiation_count = max(0, len(seller_state.negotiation_history))
         # Each new listing-to-negotiation handoff starts a fresh pair, so we
@@ -194,7 +210,9 @@ class UncertainSeller(
             self._debug_trace.append(
                 'Own reservation equals listing price; seller expectation spread is absent.'
             )
-        priors = self._calibrate_initial_pairing_priors(listing_payload)
+        priors = self._parse_initial_pairing_priors_response(
+            responses_by_key.get('initial_pairing_priors', '')
+        )
         # Seller own-confidence is reset to a fixed baseline each new pair,
         # while counterpart confidence is re-estimated from the new handoff.
         own_confidence = 1.0
@@ -231,6 +249,22 @@ class UncertainSeller(
             ),
         )
 
+    def build_listing_handoff_requests(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
+        return [
+            structured_setup_batching.StructuredSetupRequest(
+                component=self,
+                response_key='initial_pairing_priors',
+                prompt_text=self._build_initial_pairing_priors_prompt(
+                    listing_payload
+                ),
+                specific_schema=negotiation_schemas.InitialSellerPairingPriors,
+                max_tokens=120,
+            )
+        ]
+
     def get_effective_reservation_distribution(
         self,
     ) -> uncertain_helper.NormalDistribution:
@@ -264,10 +298,10 @@ class UncertainSeller(
             confidence=max(0.0, min(1.0, counterpart_confidence)),
         )
 
-    def _calibrate_initial_pairing_priors(
+    def _build_initial_pairing_priors_prompt(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> Optional[negotiation_schemas.InitialSellerPairingPriors]:
+    ) -> str:
         negotiation_count = len(listing_payload.seller_state.negotiation_history)
         agent_description = uncertain_helper.truncate_prompt_text(
             self._agent_description,
@@ -316,16 +350,13 @@ class UncertainSeller(
             "- Base the estimate primarily on how informative versus ambiguous the flat listing is.\n"
             "- Use the examples as anchors, not as fixed templates.\n"
         )
+        return prompt
 
+    def _parse_initial_pairing_priors_response(
+        self,
+        response: str,
+    ) -> Optional[negotiation_schemas.InitialSellerPairingPriors]:
         try:
-            response = self._model.sample_text(
-                prompt,
-                json_schema=(
-                    negotiation_schemas.InitialSellerPairingPriors
-                    .model_json_schema()
-                ),
-                max_tokens=120,
-            )
             priors = (
                 negotiation_schemas.InitialSellerPairingPriors
                 .model_validate_json(response)

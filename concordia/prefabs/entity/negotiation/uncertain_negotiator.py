@@ -13,6 +13,7 @@ from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components import (
     uncertain_buyer,
     uncertain_seller,
@@ -475,11 +476,24 @@ class Entity(prefab_lib.Prefab):
         return agent
 
 
-def update_agent_from_listing(
-    agent: entity_agent_with_logging.EntityAgentWithLogging,
-    listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+def batch_update_agents_from_listings(
+    agent_payload_pairs: tuple[
+        tuple[
+            entity_agent_with_logging.EntityAgentWithLogging,
+            negotiation_schemas.ListingNegotiationTransferPayload,
+        ],
+        ...,
+    ]
+    | list[
+        tuple[
+            entity_agent_with_logging.EntityAgentWithLogging,
+            negotiation_schemas.ListingNegotiationTransferPayload,
+        ]
+    ],
 ) -> None:
-    def _buyer_safe_payload() -> SimpleNamespace:
+    def _buyer_safe_payload(
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             match_id=listing_payload.match_id,
             week_matched=listing_payload.week_matched,
@@ -496,7 +510,9 @@ def update_agent_from_listing(
             ),
         )
 
-    def _seller_safe_payload() -> SimpleNamespace:
+    def _seller_safe_payload(
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             match_id=listing_payload.match_id,
             week_matched=listing_payload.week_matched,
@@ -510,39 +526,86 @@ def update_agent_from_listing(
             ),
         )
 
-    buyer_safe_payload = _buyer_safe_payload()
-    seller_safe_payload = _seller_safe_payload()
-    instructions_payload = SimpleNamespace(listing_record=listing_payload.listing_record)
+    pending_structured_updates: list[
+        tuple[
+            object,
+            object,
+            list[structured_setup_batching.StructuredSetupRequest],
+        ]
+    ] = []
+    direct_updates: list[tuple[object, object]] = []
+    all_requests: list[structured_setup_batching.StructuredSetupRequest] = []
 
-    for component_name in (
-        'NegotiationInstructions',
-        'uncertain_buyer',
-        'uncertain_seller',
-        'NegotiationStrategy',
-    ):
-        try:
-            component = agent.get_component(component_name)
-        except Exception:
-            continue
-        apply_listing_handoff = getattr(component, 'apply_listing_handoff', None)
-        if not callable(apply_listing_handoff):
-            continue
-        if component_name == 'NegotiationInstructions':
-            apply_listing_handoff(instructions_payload)
-            continue
-        if component_name == 'uncertain_buyer':
-            apply_listing_handoff(buyer_safe_payload)
-            continue
-        if component_name == 'uncertain_seller':
-            apply_listing_handoff(seller_safe_payload)
-            continue
-        component_role = getattr(component, '_role', None)
-        if component_role == common_schemas.RoleType.BUYER:
-            apply_listing_handoff(buyer_safe_payload)
-        elif component_role == common_schemas.RoleType.SELLER:
-            apply_listing_handoff(seller_safe_payload)
-        else:
-            apply_listing_handoff(instructions_payload)
+    for agent, listing_payload in agent_payload_pairs:
+        buyer_safe_payload = _buyer_safe_payload(listing_payload)
+        seller_safe_payload = _seller_safe_payload(listing_payload)
+        instructions_payload = SimpleNamespace(
+            listing_record=listing_payload.listing_record
+        )
+
+        for component_name in (
+            'NegotiationInstructions',
+            'uncertain_buyer',
+            'uncertain_seller',
+            'NegotiationStrategy',
+        ):
+            try:
+                component = agent.get_component(component_name)
+            except Exception:
+                continue
+            apply_listing_handoff = getattr(component, 'apply_listing_handoff', None)
+            if not callable(apply_listing_handoff):
+                continue
+            if component_name == 'NegotiationInstructions':
+                apply_listing_handoff(instructions_payload)
+                continue
+            if component_name == 'uncertain_buyer':
+                target_payload = buyer_safe_payload
+            elif component_name == 'uncertain_seller':
+                target_payload = seller_safe_payload
+            else:
+                component_role = getattr(component, '_role', None)
+                if component_role == common_schemas.RoleType.BUYER:
+                    target_payload = buyer_safe_payload
+                elif component_role == common_schemas.RoleType.SELLER:
+                    target_payload = seller_safe_payload
+                else:
+                    target_payload = instructions_payload
+
+            build_requests = getattr(component, 'build_listing_handoff_requests', None)
+            apply_responses = getattr(
+                component, 'apply_listing_handoff_responses', None
+            )
+            if callable(build_requests) and callable(apply_responses):
+                component_requests = list(build_requests(target_payload) or ())
+                if component_requests:
+                    pending_structured_updates.append(
+                        (component, target_payload, component_requests)
+                    )
+                    all_requests.extend(component_requests)
+                    continue
+            direct_updates.append((component, target_payload))
+
+    raw_responses = structured_setup_batching.execute_setup_requests(all_requests)
+    response_index = 0
+    for component, target_payload, component_requests in pending_structured_updates:
+        response_count = len(component_requests)
+        component_responses = raw_responses[
+            response_index: response_index + response_count
+        ]
+        response_index += response_count
+        getattr(component, 'apply_listing_handoff_responses')(
+            target_payload,
+            {
+                request.response_key: response
+                for request, response in zip(
+                    component_requests, component_responses
+                )
+            },
+        )
+
+    for component, target_payload in direct_updates:
+        component.apply_listing_handoff(target_payload)
 
 def build_agent(
     model: language_model.LanguageModel,

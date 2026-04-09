@@ -11,6 +11,7 @@ from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components.uncertain_buyer import UncertainBuyer
 from concordia.prefabs.entity.negotiation.components.uncertain_seller import UncertainSeller
 from concordia.typing import entity_component
@@ -107,6 +108,21 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         *,
         number_of_failed_negotiations: int = 0,
     ) -> float:
+        prompt = self._build_urgency_prompt(
+            number_of_failed_negotiations=number_of_failed_negotiations,
+        )
+        response = self._model.sample_text(
+            prompt=prompt,
+            json_schema=UrgencyLevel.model_json_schema(),
+            max_tokens=100,
+        )
+        return self._parse_urgency_response(response)
+
+    def _build_urgency_prompt(
+        self,
+        *,
+        number_of_failed_negotiations: int = 0,
+    ) -> str:
         prompt = (
             "# Role\n"
             f"You are estimating negotiation urgency for a {self._role} in an HDB resale negotiation.\n\n"
@@ -139,13 +155,9 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "- Return JSON only.\n"
             "- Match the provided schema exactly.\n"
         )
+        return prompt
 
-        response = self._model.sample_text(
-            prompt=prompt,
-            json_schema=UrgencyLevel.model_json_schema(),
-            max_tokens=100,
-        )
-
+    def _parse_urgency_response(self, response: str) -> float:
         try:
             urgency_output = UrgencyLevel.model_validate_json(response)
             return urgency_output.urgency
@@ -212,13 +224,47 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
+        requests = self.build_listing_handoff_requests(listing_payload)
+        responses = structured_setup_batching.execute_setup_requests(requests)
+        self.apply_listing_handoff_responses(
+            listing_payload,
+            {
+                request.response_key: response
+                for request, response in zip(requests, responses)
+            },
+        )
+
+    def build_listing_handoff_requests(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
         participant_state = (
             listing_payload.buyer_state
             if self._role == RoleType.BUYER
             else listing_payload.seller_state
         )
-        self._urgency_level = self._judge_urgency_level(
-            number_of_failed_negotiations=len(participant_state.negotiation_history),
+        return [
+            structured_setup_batching.StructuredSetupRequest(
+                component=self,
+                response_key='urgency',
+                prompt_text=self._build_urgency_prompt(
+                    number_of_failed_negotiations=len(
+                        participant_state.negotiation_history
+                    ),
+                ),
+                specific_schema=UrgencyLevel,
+                max_tokens=100,
+            )
+        ]
+
+    def apply_listing_handoff_responses(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+        responses_by_key: Dict[str, str],
+    ) -> None:
+        del listing_payload
+        self._urgency_level = self._parse_urgency_response(
+            responses_by_key.get('urgency', '')
         )
 
     @staticmethod

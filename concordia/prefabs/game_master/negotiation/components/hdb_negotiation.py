@@ -12,7 +12,7 @@ from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation.uncertain_negotiator import (
-    update_agent_from_listing,
+    batch_update_agents_from_listings,
 )
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
@@ -276,7 +276,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       *,
       buyer_id: str,
       seller_id: str,
-  ) -> None:
+  ) -> list[tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]]:
     """Applies listing-to-negotiation context once per pair."""
     listing_record = pair_payload.listing_record
     pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
@@ -292,14 +292,16 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         f"{seller_name}, you accepted {buyer_name}'s negotiation request for your flat. "
         f"You are now negotiating directly as the seller."
     )
+    pending_updates: list[
+        tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]
+    ] = []
     buyer_entity = self._entities_by_id.get(buyer_id)
     if buyer_entity is not None:
-      update_agent_from_listing(buyer_entity, pair_payload)
-      buyer_entity.observe(buyer_observation)
+      pending_updates.append((buyer_entity, pair_payload, buyer_observation))
     seller_entity = self._entities_by_id.get(seller_id)
     if seller_entity is not None:
-      update_agent_from_listing(seller_entity, pair_payload)
-      seller_entity.observe(seller_observation)
+      pending_updates.append((seller_entity, pair_payload, seller_observation))
+    return pending_updates
 
   def _bind_entities_for_pairs(
       self,
@@ -309,6 +311,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
   ) -> list[tuple[str, str]]:
     """Binds both participants for each valid negotiation pair."""
     normalized_pairs: list[tuple[str, str]] = []
+    pending_listing_updates: list[
+        tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]
+    ] = []
     for pair in new_negotiation_pairs:
       transfer_payload = self._parse_listing_transfer_payload(pair)
       if transfer_payload is not None:
@@ -335,12 +340,23 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       pair_already_exists = self._pair_exists(buyer_id, seller_id)
       self._register_pair(buyer_id, seller_id)
       if not pair_already_exists and transfer_payload is not None:
-        self._apply_listing_transfer_payload(
-            transfer_payload,
-            buyer_id=buyer_id,
-            seller_id=seller_id,
+        pending_listing_updates.extend(
+            self._apply_listing_transfer_payload(
+                transfer_payload,
+                buyer_id=buyer_id,
+                seller_id=seller_id,
+            )
         )
       normalized_pairs.append((buyer_id, seller_id))
+    if pending_listing_updates:
+      batch_update_agents_from_listings(
+          [
+              (agent, pair_payload)
+              for agent, pair_payload, _ in pending_listing_updates
+          ]
+      )
+      for agent, _, observation in pending_listing_updates:
+        agent.observe(observation)
     return normalized_pairs
 
   def _ensure_entities_bound(self) -> None:
