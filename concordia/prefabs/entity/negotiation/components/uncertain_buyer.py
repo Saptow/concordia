@@ -195,12 +195,11 @@ class UncertainBuyer(
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         # Re-estimate confidence at the start of every new negotiation rather
         # than inheriting the previous pair's confidence state.
-        own_confidence = self._parse_own_confidence_response(
-            responses_by_key.get('own_confidence', '')
+        priors = self._parse_initial_pairing_priors_response(
+            responses_by_key.get('initial_pairing_priors', '')
         )
-        counterpart_confidence = self._parse_counterpart_confidence_response(
-            responses_by_key.get('counterpart_confidence', '')
-        )
+        own_confidence = float(priors.own_confidence)
+        counterpart_confidence = float(priors.counterpart_confidence)
         self._beliefs['own_reservation'] = self._build_flat_specific_own_reservation(
             listing_payload,
             own_confidence=own_confidence,
@@ -248,11 +247,12 @@ class UncertainBuyer(
             confidence=max(0.0, min(1.0, own_confidence)),
         )
 
-    def _build_own_confidence_prompt(
+    def _build_initial_pairing_priors_prompt(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> str:
         buyer_state = listing_payload.buyer_state
+        listing_record = listing_payload.listing_record
         observation_count = len(buyer_state.latest_search_results)
         negotiation_count = len(buyer_state.negotiation_history)
         if self._has_substantive_market_feedback(
@@ -263,51 +263,90 @@ class UncertainBuyer(
             self._agent_description,
             max_chars=BUYER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS,
         )
+        failed_history_summary = self._format_failed_negotiation_history(
+            buyer_state
+        )
+        preferences_text = uncertain_helper.truncate_prompt_text(
+            self._preferences,
+            max_chars=BUYER_PREFERENCES_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        failed_history_summary = uncertain_helper.truncate_prompt_text(
+            failed_history_summary,
+            max_chars=BUYER_NEGOTIATION_HISTORY_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        listing_context = uncertain_helper.truncate_prompt_text(
+            uncertain_helper.build_compact_listing_context(listing_record),
+            max_chars=BUYER_LISTING_CONTEXT_PROMPT_MAX_CHARS,
+            middle=True,
+        )
 
-        prompt = (
+        return (
             "# Role\n"
-            "You are calibrating own_confidence for a buyer who has just started "
-            "a new HDB resale negotiation.\n\n"
+            "You are calibrating initial buyer-side priors for a buyer who has just "
+            "started a new HDB resale negotiation.\n\n"
             "# Task\n"
-            "Estimate own_confidence between 0 and 1.\n\n"
+            "Estimate both `own_confidence` and `counterpart_confidence` between 0 and 1.\n\n"
             "# Input\n"
             "## Buyer Description / Persona\n"
             f"{agent_description}\n\n"
+            "## Buyer Preferences\n"
+            f"{preferences_text}\n\n"
+            "## Buyer Effective Reservation\n"
+            f"{buyer_state.effective_reservation}\n\n"
             "## Negotiation History\n"
             f"- failed_negotiation_count: {negotiation_count}\n"
-            f"- listing_stage_observation_count: {observation_count}\n\n"
-            "# Rubric\n"
-            "- 0.20-0.40: unsure, highly flexible, or weakly anchored in own limits.\n"
-            "- 0.45-0.65: moderately grounded persona with some self-knowledge.\n"
-            "- 0.70-0.90: decisive, valuation-driven, or reinforced by more failed negotiations.\n\n"
+            f"- listing_stage_observation_count: {observation_count}\n"
+            f"{failed_history_summary}\n\n"
+            "## Listing Snapshot\n"
+            f"{listing_context}\n\n"
+            "# Calibration Heuristics\n"
+            "- `own_confidence` should mainly reflect how grounded, decisive, and valuation-disciplined the buyer is, adjusted upward by more failed negotiations and listing-stage observation count.\n"
+            "- `counterpart_confidence` should mainly reflect how informative the listing is and how much the buyer's preferences and failed-negotiation history help infer the seller's likely reservation value.\n\n"
             "# Few-Shot Examples\n"
             "Example 1:\n"
             "- Buyer persona: analytical, budget-disciplined, compares transactions carefully.\n"
             "- Failed negotiations: 4\n"
-            '- Output: {"own_confidence": 0.82}\n\n'
+            "- Listing strongly matches buyer preferences and is clear and specific.\n"
+            '- Output: {"own_confidence": 0.82, "counterpart_confidence": 0.77}\n\n'
             "Example 2:\n"
             "- Buyer persona: uncertain first-time buyer, still figuring out trade-offs.\n"
             "- Failed negotiations: 0\n"
-            '- Output: {"own_confidence": 0.38}\n\n'
+            "- Listing is partial, ambiguous, and only weakly aligned with buyer preferences.\n"
+            '- Output: {"own_confidence": 0.38, "counterpart_confidence": 0.34}\n\n'
             "# Rules\n"
             "- Return JSON only.\n"
-            "- Keep the value within [0, 1].\n"
-            "- Base the estimate primarily on the persona and failed negotiation count.\n"
-            "- Use listing-stage observation count as a secondary grounding signal.\n"
+            "- Keep both values within [0, 1].\n"
+            "- Use the persona and negotiation history as the main signal for `own_confidence`.\n"
+            "- Use buyer preferences, listing clarity, and failed-negotiation history as the main signal for `counterpart_confidence`.\n"
             "- Use the examples as anchors, not as fixed templates.\n"
         )
-        return prompt
 
-    def _parse_own_confidence_response(self, response: str) -> float:
+    def _parse_initial_pairing_priors_response(
+        self,
+        response: str,
+    ) -> negotiation_schemas.InitialBuyerPairingPriors:
         try:
-            estimate = negotiation_schemas.BuyerOwnConfidenceEstimate.model_validate_json(
+            priors = negotiation_schemas.InitialBuyerPairingPriors.model_validate_json(
                 response
             )
         except ValidationError:
-            return self._base_own_confidence
+            return negotiation_schemas.InitialBuyerPairingPriors(
+                own_confidence=self._base_own_confidence,
+                counterpart_confidence=self._base_counterpart_confidence,
+            )
         except Exception:
-            return self._base_own_confidence
-        return max(0.0, min(1.0, float(estimate.own_confidence)))
+            return negotiation_schemas.InitialBuyerPairingPriors(
+                own_confidence=self._base_own_confidence,
+                counterpart_confidence=self._base_counterpart_confidence,
+            )
+        return negotiation_schemas.InitialBuyerPairingPriors(
+            own_confidence=max(0.0, min(1.0, float(priors.own_confidence))),
+            counterpart_confidence=max(
+                0.0, min(1.0, float(priors.counterpart_confidence))
+            ),
+        )
 
     @staticmethod
     def _has_substantive_market_feedback(feedback: str) -> bool:
@@ -350,83 +389,6 @@ class UncertainBuyer(
             )
         return '\n'.join(lines)
 
-    def _build_counterpart_confidence_prompt(
-        self,
-        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> str:
-        listing_record = listing_payload.listing_record
-        buyer_state = listing_payload.buyer_state
-        failed_history_summary = self._format_failed_negotiation_history(
-            buyer_state
-        )
-        preferences_text = uncertain_helper.truncate_prompt_text(
-            self._preferences,
-            max_chars=BUYER_PREFERENCES_PROMPT_MAX_CHARS,
-            middle=True,
-        )
-        failed_history_summary = uncertain_helper.truncate_prompt_text(
-            failed_history_summary,
-            max_chars=BUYER_NEGOTIATION_HISTORY_PROMPT_MAX_CHARS,
-            middle=True,
-        )
-        listing_context = uncertain_helper.truncate_prompt_text(
-            uncertain_helper.build_compact_listing_context(listing_record),
-            max_chars=BUYER_LISTING_CONTEXT_PROMPT_MAX_CHARS,
-            middle=True,
-        )
-
-        prompt = (
-            "# Role\n"
-            "You are calibrating counterpart_confidence for a buyer who has just "
-            "started a new HDB resale negotiation.\n\n"
-            "# Task\n"
-            "Estimate counterpart_confidence between 0 and 1.\n\n"
-            "# Input\n"
-            "## Buyer Preferences\n"
-            f"{preferences_text}\n\n"
-            "## Buyer Effective Reservation\n"
-            f"{buyer_state.effective_reservation}\n\n"
-            "## Failed Negotiation Snapshot\n"
-            f"- failed_negotiation_count: {len(buyer_state.negotiation_history)}\n"
-            f"{failed_history_summary}\n\n"
-            "## Listing Snapshot\n"
-            f"{listing_context}\n\n"
-            "# Rubric\n"
-            "- 0.20-0.40: the flat is weakly aligned with the buyer preferences, there is little useful failed-negotiation experience, or the listing remains ambiguous.\n"
-            "- 0.45-0.65: the flat is partially aligned or past failed negotiations give only mixed guidance.\n"
-            "- 0.70-0.90: the flat is strongly aligned with the buyer preferences, past failed negotiations provide useful comparison points, and the listing has low ambiguity.\n\n"
-            "# Few-Shot Examples\n"
-            "Example 1:\n"
-            "- Buyer preferences strongly favor this flat type and town.\n"
-            "- Failed negotiations provide useful comparable cases.\n"
-            "- Listing is clear and specific.\n"
-            '- Output: {"counterpart_confidence": 0.77}\n\n'
-            "Example 2:\n"
-            "- Buyer preferences are only partially aligned.\n"
-            "- Failed negotiations do not provide much useful guidance.\n"
-            "- Listing is partial and ambiguous.\n"
-            '- Output: {"counterpart_confidence": 0.34}\n\n'
-            "# Rules\n"
-            "- Return JSON only.\n"
-            "- Keep the value within [0, 1].\n"
-            "- Use the buyer preferences and failed-negotiation history as the main signal.\n"
-            "- If the paired flat is very similar to flats the buyer prefers and past failed negotiations provide useful comparison points, increase confidence.\n"
-            "- Use listing ambiguity as a secondary adjustment.\n"
-        )
-        return prompt
-
-    def _parse_counterpart_confidence_response(self, response: str) -> float:
-        try:
-            estimate = (
-                negotiation_schemas.BuyerCounterpartConfidenceEstimate
-                .model_validate_json(response)
-            )
-        except ValidationError:
-            return self._base_counterpart_confidence
-        except Exception:
-            return self._base_counterpart_confidence
-        return max(0.0, min(1.0, float(estimate.counterpart_confidence)))
-
     def build_listing_handoff_requests(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
@@ -434,18 +396,11 @@ class UncertainBuyer(
         return [
             structured_setup_batching.StructuredSetupRequest(
                 component=self,
-                response_key='own_confidence',
-                prompt_text=self._build_own_confidence_prompt(listing_payload),
-                specific_schema=negotiation_schemas.BuyerOwnConfidenceEstimate,
-                max_tokens=120,
-            ),
-            structured_setup_batching.StructuredSetupRequest(
-                component=self,
-                response_key='counterpart_confidence',
-                prompt_text=self._build_counterpart_confidence_prompt(listing_payload),
-                specific_schema=(
-                    negotiation_schemas.BuyerCounterpartConfidenceEstimate
+                response_key='initial_pairing_priors',
+                prompt_text=self._build_initial_pairing_priors_prompt(
+                    listing_payload
                 ),
+                specific_schema=negotiation_schemas.InitialBuyerPairingPriors,
                 max_tokens=120,
             ),
         ]
