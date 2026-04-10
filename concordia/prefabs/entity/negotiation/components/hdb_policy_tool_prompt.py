@@ -1,4 +1,4 @@
-"""vLLM-compatible HDB policy retrieval context for negotiation agents."""
+"""Active-policy guidance context for HDB negotiation agents."""
 
 from __future__ import annotations
 
@@ -10,11 +10,8 @@ from configs import NegotiationComponentConfig
 from configs import PolicyToolConfig
 from configs import REPO_ROOT
 from concordia.components.agent import action_spec_ignored
-from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas.policy.schema import FullPolicyPage
 from concordia.hdb_simulation.models.schemas.policy.schema import PolicyPage
-from concordia.hdb_simulation.models.schemas.policy.schema import PolicyPageDirectory
-from concordia.hdb_simulation.models.schemas.policy.schema import RelevantPolicyPathSelection
 from concordia.hdb_simulation.models.schemas.policy.schema import RetrievedFullPolicyPages
 from concordia.typing import entity_component
 
@@ -23,8 +20,6 @@ TEXT_PAGE_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
 DEFAULT_CURRENT_POLICY_PROMPT = (
     "No simulation-specific policies are currently in effect."
 )
-POLICY_TOOL_CALL_MAX_TOKENS = 256
-POLICY_PATH_SELECTION_MAX_TOKENS = 256
 POLICY_SUMMARY_MAX_TOKENS = 768
 
 
@@ -35,11 +30,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self,
         *,
         model: Any,
-        observation_component_key: str = (
-            NegotiationComponentConfig.OBSERVATION_COMPONENT_KEY
-        ),
-        memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
-        num_memories_to_retrieve: int = 6,
         policy_jsonl_filenames: tuple[str, ...] = (
             PolicyToolConfig.DEFAULT_POLICY_JSONL_FILENAMES
         ),
@@ -49,18 +39,12 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         ),
         max_page_chars: int = PolicyToolConfig.DEFAULT_MAX_PAGE_CHARS,
         max_prompt_chars: int = PolicyToolConfig.DEFAULT_MAX_PROMPT_CHARS,
-        max_current_policy_chars: int = (
-            PolicyToolConfig.DEFAULT_MAX_CURRENT_POLICY_CHARS
-        ),
         max_component_chars: int = PolicyToolConfig.DEFAULT_MAX_COMPONENT_CHARS,
         tool_call_retries: int = PolicyToolConfig.DEFAULT_TOOL_CALL_RETRIES,
         pre_act_label: str = "# POLICY SEARCH TOOL",
     ):
         super().__init__(pre_act_label=pre_act_label)
         self._model = model
-        self._observation_component_key = observation_component_key
-        self._memory_component_key = memory_component_key
-        self._num_memories_to_retrieve = max(1, int(num_memories_to_retrieve))
         self._policy_directory = Path(policy_directory)
         self._policy_jsonl_filenames = tuple(
             str(filename).strip()
@@ -72,11 +56,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._max_page_chars = max(1000, max_page_chars) if max_page_chars > 0 else 0
         self._max_prompt_chars = (
             max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
-        )
-        self._max_current_policy_chars = (
-            max(500, max_current_policy_chars)
-            if max_current_policy_chars > 0
-            else 0
         )
         self._max_component_chars = (
             max(1_500, max_component_chars)
@@ -90,10 +69,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._policy_pages_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._current_policy_prompt = DEFAULT_CURRENT_POLICY_PROMPT
         self._synced_active_source_paths: list[str] | None = None
-        self._tool_schemas = self._build_vllm_tools()
-        self._tool_schema_by_name = {
-            tool["function"]["name"]: tool for tool in self._tool_schemas
-        }
 
     @property
     def name(self) -> str:
@@ -170,6 +145,20 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._policy_pages_cache_signature = signature
         return self._policy_pages_cache
 
+    def _policy_index_signature(self) -> tuple[tuple[str, int], ...]:
+        signatures: list[tuple[str, int]] = []
+        for policy_index_path in self._policy_index_paths:
+            if not policy_index_path.exists():
+                continue
+            stat = policy_index_path.stat()
+            signatures.append(
+                (
+                    self._display_path(policy_index_path),
+                    stat.st_mtime_ns,
+                )
+            )
+        return tuple(signatures)
+
     def _filter_pages_to_active_sources(
         self,
         *,
@@ -199,34 +188,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return ""
         return resolved.read_text(encoding="utf-8", errors="ignore")
 
-    def _current_observation(self) -> str:
-        try:
-            observation_value = self.get_named_component_pre_act_value(
-                self._observation_component_key
-            ).strip()
-        except Exception:
-            return "None"
-        return observation_value or "None"
-
-    def _recent_memories(self) -> list[str]:
-        try:
-            memory = self.get_entity().get_component(
-                self._memory_component_key,
-                type_=memory_component.Memory,
-            )
-            raw_memories = list(
-                memory.retrieve_recent(limit=self._num_memories_to_retrieve)
-            )
-        except Exception:
-            return []
-
-        cleaned: list[str] = []
-        for memory_text in raw_memories:
-            text = str(memory_text).strip()
-            if text:
-                cleaned.append(text)
-        return cleaned
-
     @staticmethod
     def _maybe_truncate_text(text: str, *, max_chars: int) -> str:
         normalized = str(text or "").strip()
@@ -237,7 +198,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         return normalized[: max_chars - 3].rstrip() + "..."
 
     @staticmethod
-    def _truncate_middle_text(text: str, *, max_chars: int) -> str:
+    def _truncate_tail_text(text: str, *, max_chars: int) -> str:
         normalized = str(text or "").strip()
         if max_chars <= 0:
             return normalized
@@ -245,123 +206,141 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return normalized
         if max_chars <= 10:
             return normalized[:max_chars]
-
-        marker = "\n\n... [prompt truncated] ...\n\n"
+        marker = "\n\n... [truncated] ..."
         available = max_chars - len(marker)
-        if available <= 2:
+        if available <= 0:
             return normalized[:max_chars]
-        head_chars = available // 2
-        tail_chars = available - head_chars
-        return (
-            normalized[:head_chars].rstrip()
-            + marker
-            + normalized[-tail_chars:].lstrip()
-        )
+        return normalized[:available].rstrip() + marker
 
-    def _maybe_truncate_prompt(self, prompt: str) -> str:
-        return self._truncate_middle_text(
-            prompt,
-            max_chars=self._max_prompt_chars,
+    def _fit_policy_summary_prompt(
+        self,
+        *,
+        current_policy_prompt: str,
+        full_page_result: str,
+    ) -> str:
+        prefix = (
+            "# Role\n"
+            "You are an HDB resale policy analyst preparing static policy guidance "
+            "for a simulation state.\n\n"
+            "# Task\n"
+            "Summarize the grounded active policy source pages for negotiation use "
+            "without restating the current policy state verbatim.\n\n"
+            "# Inputs\n"
+            "## Current Policy State\n"
         )
-
-    def _maybe_truncate_current_policy_prompt(self, prompt: str) -> str:
-        return self._truncate_middle_text(
-            prompt,
-            max_chars=self._max_current_policy_chars,
+        between_sections = "\n\n## Active Policy Source Pages\n"
+        suffix = (
+            "\n\n# Instructions\n"
+            "1. Summarize only policies that are currently active.\n"
+            "2. Ground every policy summary in the supplied active policy source pages.\n"
+            "3. Focus on concrete implications for negotiation behavior and constraints.\n"
+            "4. Do not mention inactive or hypothetical policies.\n"
+            "5. Do not repeat or paraphrase the full current policy state section; "
+            "assume it is already shown separately and use the guidance area for "
+            "added value only.\n"
+            "6. Keep the guidance concise and implication-focused rather than "
+            "relisting policy text.\n\n"
+            "# Output Format\n"
+            "Return markdown with exactly these sections:\n"
+            "- `## Relevant Policy Summaries`\n"
+            "- `## Overall Policy Guidance`\n"
         )
-
-    def _maybe_truncate_component_text(self, text: str) -> str:
-        return self._truncate_middle_text(
-            text,
-            max_chars=self._max_component_chars,
+        prompt = (
+            prefix
+            + current_policy_prompt
+            + between_sections
+            + full_page_result
+            + suffix
         )
+        if self._max_prompt_chars <= 0 or len(prompt) <= self._max_prompt_chars:
+            return prompt
 
-    def _build_vllm_tools(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        return (
-            {
-                "type": "function",
-                "function": {
-                    "name": PolicyToolConfig.DIRECTORY_SCREENING_TOOL_NAME,
-                    "description": (
-                        "Read the configured HDB resale policy directory JSONL and return "
-                        "PolicyPageDirectory entries that can be screened for relevance."
+        fixed_without_pages = prefix + current_policy_prompt + between_sections + suffix
+        available_for_pages = self._max_prompt_chars - len(fixed_without_pages)
+        if available_for_pages > 0:
+            prompt = (
+                fixed_without_pages.replace(
+                    between_sections,
+                    between_sections
+                    + self._truncate_tail_text(
+                        full_page_result,
+                        max_chars=available_for_pages,
                     ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "policy_jsonl_path": {
-                                "type": "string",
-                                "description": "Path to the HDB resale policy JSONL directory file.",
-                            }
-                        },
-                        "required": ["policy_jsonl_path"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": PolicyToolConfig.FULL_PAGE_RETRIEVAL_TOOL_NAME,
-                    "description": (
-                        "Read exact HDB resale policy pages for the given directory paths and "
-                        "return RetrievedFullPolicyPages records with grounded full text."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "paths": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Exact policy page paths selected from the policy directory.",
-                            }
-                        },
-                        "required": ["paths"],
-                    },
-                },
-            },
-        )
-
-    @staticmethod
-    def _parse_tool_calls(response: str) -> list[dict[str, Any]] | None:
-        try:
-            payload = json.loads(str(response or "").strip())
-        except json.JSONDecodeError:
-            return None
-
-        if isinstance(payload, dict):
-            payload = [payload]
-        if not isinstance(payload, list):
-            return None
-
-        parsed_calls: list[dict[str, Any]] = []
-        for item in payload:
-            if not isinstance(item, dict):
-                return None
-            name = item.get("name") or item.get("tool_name")
-            arguments = item.get("arguments", {})
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-            if not isinstance(name, str) or not isinstance(arguments, dict):
-                return None
-            parsed_calls.append({"name": name, "arguments": arguments})
-        return parsed_calls or None
-
-    def _run_directory_screening_tool(self, pages: list[PolicyPage]) -> str:
-        directory = PolicyPageDirectory(
-            policy_pages=[
-                PolicyPage(
-                    path=page.path,
-                    source=page.source,
-                    summary=str(page.summary or "").strip(),
-                    tags=page.tags,
+                    1,
                 )
-                for page in pages
-            ]
+            )
+            if len(prompt) <= self._max_prompt_chars:
+                return prompt
+
+        fixed_without_state = prefix + between_sections + full_page_result + suffix
+        available_for_state = self._max_prompt_chars - len(fixed_without_state)
+        trimmed_state = self._truncate_tail_text(
+            current_policy_prompt,
+            max_chars=max(0, available_for_state),
         )
-        return directory.model_dump_json()
+        prompt = prefix + trimmed_state + between_sections + full_page_result + suffix
+        if len(prompt) <= self._max_prompt_chars:
+            return prompt
+
+        available_for_pages = self._max_prompt_chars - len(
+            prefix + trimmed_state + between_sections + suffix
+        )
+        trimmed_pages = self._truncate_tail_text(
+            full_page_result,
+            max_chars=max(0, available_for_pages),
+        )
+        return prefix + trimmed_state + between_sections + trimmed_pages + suffix
+
+    def _fit_pre_act_component_text(
+        self,
+        *,
+        current_policy_prompt: str,
+        policy_guidance: str,
+    ) -> str:
+        prefix = "## Current Policy State\n"
+        between_sections = "\n\n## Relevant Policy Guidance\n"
+        component_text = (
+            prefix + current_policy_prompt + between_sections + policy_guidance
+        )
+        if (
+            self._max_component_chars <= 0
+            or len(component_text) <= self._max_component_chars
+        ):
+            return component_text
+
+        fixed_without_guidance = prefix + current_policy_prompt + between_sections
+        available_for_guidance = (
+            self._max_component_chars - len(fixed_without_guidance)
+        )
+        if available_for_guidance > 0:
+            trimmed_guidance = self._truncate_tail_text(
+                policy_guidance,
+                max_chars=available_for_guidance,
+            )
+            component_text = (
+                prefix + current_policy_prompt + between_sections + trimmed_guidance
+            )
+            if len(component_text) <= self._max_component_chars:
+                return component_text
+
+        fixed_without_state = prefix + between_sections + policy_guidance
+        available_for_state = self._max_component_chars - len(fixed_without_state)
+        trimmed_state = self._truncate_tail_text(
+            current_policy_prompt,
+            max_chars=max(0, available_for_state),
+        )
+        component_text = prefix + trimmed_state + between_sections + policy_guidance
+        if len(component_text) <= self._max_component_chars:
+            return component_text
+
+        available_for_guidance = self._max_component_chars - len(
+            prefix + trimmed_state + between_sections
+        )
+        trimmed_guidance = self._truncate_tail_text(
+            policy_guidance,
+            max_chars=max(0, available_for_guidance),
+        )
+        return prefix + trimmed_state + between_sections + trimmed_guidance
 
     def _run_full_page_retrieval_tool(
         self,
@@ -393,304 +372,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
 
         return RetrievedFullPolicyPages(policy_pages=full_pages).model_dump_json()
 
-    def _execute_tool_call(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-        pages: list[PolicyPage],
-    ) -> str:
-        if tool_name == PolicyToolConfig.DIRECTORY_SCREENING_TOOL_NAME:
-            return self._run_directory_screening_tool(pages)
-        if tool_name == PolicyToolConfig.FULL_PAGE_RETRIEVAL_TOOL_NAME:
-            raw_paths = arguments.get("paths", [])
-            if not isinstance(raw_paths, list):
-                raw_paths = []
-            requested_paths = [str(path) for path in raw_paths if str(path).strip()]
-            return self._run_full_page_retrieval_tool(requested_paths, pages)
-        return json.dumps({"error": f"Unknown tool: {tool_name}"}, ensure_ascii=False)
-
-    def _run_required_tool_call(
-        self,
-        *,
-        prompt: str,
-        tool_name: str,
-        pages: list[PolicyPage],
-    ) -> tuple[str, str]:
-        chat = getattr(self._model, "chat", None)
-        if not callable(chat):
-            return "", ""
-
-        tool_schema = self._tool_schema_by_name[tool_name]
-        for _ in range(self._tool_call_retries):
-            try:
-                response = chat(
-                    [{"role": "user", "content": self._maybe_truncate_prompt(prompt)}],
-                    max_tokens=POLICY_TOOL_CALL_MAX_TOKENS,
-                    tools=[tool_schema],
-                )
-                tool_calls = self._parse_tool_calls(response)
-                if not tool_calls or len(tool_calls) != 1:
-                    continue
-
-                tool_call = tool_calls[0]
-                if tool_call["name"] != tool_name:
-                    continue
-
-                tool_result = self._execute_tool_call(
-                    tool_call["name"],
-                    tool_call["arguments"],
-                    pages,
-                )
-                return response, tool_result
-            except Exception:
-                continue
-
-        return "", ""
-
-    @staticmethod
-    def _empty_relevant_policy_path_selection(
-        retrieval_decision: str = "No relevant HDB resale policies were identified.",
-    ) -> RelevantPolicyPathSelection:
-        return RelevantPolicyPathSelection(
-            relevant_paths=[],
-            retrieval_decision=retrieval_decision,
-        )
-
     @staticmethod
     def _no_relevant_policy_summary() -> str:
         return "No relevant HDB resale policy summary for the current context."
-
-    def _normalize_relevant_paths(
-        self,
-        relevant_paths: list[str],
-    ) -> list[str]:
-        normalized_paths: list[str] = []
-        seen_paths: set[str] = set()
-        for path in relevant_paths:
-            normalized = str(path).strip()
-            if normalized and normalized not in seen_paths:
-                seen_paths.add(normalized)
-                normalized_paths.append(normalized)
-        return normalized_paths[: self._max_directory_candidates]
-
-    # The workflow has three stages:
-    # 1. Ask the model to call the directory screening tool.
-    # 2. Ask the model to choose exact relevant paths from that grounded output.
-    # 3. Retrieve full pages for only those paths and summarize them.
-    def _screen_relevant_policies_from_directory(
-        self,
-        *,
-        observation: str,
-        recent_memories: list[str],
-        pages: list[PolicyPage],
-    ) -> tuple[RelevantPolicyPathSelection, str, str]:
-        directory_prompt = (
-            "# Role\n"
-            "You are an HDB resale policy directory screener.\n\n"
-            "# Task\n"
-            "Screen the HDB resale policy directory and identify which exact policy paths are relevant to the current negotiation context.\n\n"
-            "# Inputs\n"
-            "## Observation\n"
-            f"{observation}\n\n"
-            "## Retrieved Memories\n"
-            f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
-            "# Private Chain-of-Thought Process\n"
-            "Think step by step privately. Do not reveal your reasoning.\n\n"
-            "1. Decide whether the observation or recent memories raise HDB resale policy questions.\n"
-            "2. Use the directory screening tool to inspect the policy directory.\n"
-            "3. After seeing the tool result, identify only the exact relevant policy paths.\n"
-            "4. Return no invented paths.\n"
-        )
-        directory_tool_call, directory_tool_result = self._run_required_tool_call(
-            prompt=directory_prompt,
-            tool_name=PolicyToolConfig.DIRECTORY_SCREENING_TOOL_NAME,
-            pages=pages,
-        )
-        if not directory_tool_call or not directory_tool_result:
-            return (
-                self._empty_relevant_policy_path_selection(
-                    "The policy directory screening tool did not return a usable result."
-                ),
-                "",
-                "",
-            )
-
-        path_selection = self._empty_relevant_policy_path_selection(
-            "Unable to parse relevant policy paths from the directory result."
-        )
-        for _ in range(self._tool_call_retries):
-            try:
-                selection_response = self._model.sample_text(
-                    self._maybe_truncate_prompt(
-                        (
-                        "# Role\n"
-                        "You are an HDB resale policy relevance analyst.\n\n"
-                        "# Task\n"
-                        "Read the screened HDB resale policy directory result and identify only the exact policy paths that are relevant to the current negotiation context.\n\n"
-                        "# Inputs\n"
-                        "## Observation\n"
-                        f"{observation}\n\n"
-                        "## Retrieved Memories\n"
-                        f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
-                        "## Directory Screening Tool Call\n"
-                        f"{directory_tool_call}\n\n"
-                        "## Directory Screening Tool Result\n"
-                        f"{directory_tool_result}\n\n"
-                        "# Private Chain-of-Thought Process\n"
-                        "Think step by step privately. Do not reveal your reasoning.\n\n"
-                        "1. Review the screened directory entries.\n"
-                        "2. Keep only entries that are materially relevant to the observation or recent memories.\n"
-                        "3. Return only exact `path` values that appear in the screened directory result.\n"
-                        "4. If nothing is relevant, return an empty list.\n"
-                        )
-                    ),
-                    json_schema=RelevantPolicyPathSelection.model_json_schema(),
-                    max_tokens=POLICY_PATH_SELECTION_MAX_TOKENS,
-                )
-                path_selection = RelevantPolicyPathSelection.model_validate_json(
-                    selection_response
-                )
-                break
-            except Exception:
-                continue
-
-        path_selection.relevant_paths = self._normalize_relevant_paths(
-            path_selection.relevant_paths
-        )
-        return path_selection, directory_tool_call, directory_tool_result
-
-    def _summarize_relevant_policies_from_full_pages(
-        self,
-        *,
-        observation: str,
-        recent_memories: list[str],
-        pages: list[PolicyPage],
-        path_selection: RelevantPolicyPathSelection,
-        directory_tool_call: str,
-        directory_tool_result: str,
-    ) -> str:
-        chat = getattr(self._model, "chat", None)
-        if not callable(chat):
-            return self._no_relevant_policy_summary()
-
-        relevant_paths = path_selection.relevant_paths
-        if not relevant_paths:
-            return self._no_relevant_policy_summary()
-
-        full_page_tool_call = ""
-        full_page_tool_result = ""
-        full_page_prompt = (
-            "# Role\n"
-            "You are an HDB resale policy page retriever.\n\n"
-            "# Task\n"
-            "Retrieve the full pages for the relevant HDB resale policy entries.\n\n"
-            "# Inputs\n"
-            "## Observation\n"
-            f"{observation}\n\n"
-            "## Retrieved Memories\n"
-            f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
-            "## Directory Screening Tool Call\n"
-            f"{directory_tool_call}\n\n"
-            "## Directory Screening Tool Result\n"
-            f"{directory_tool_result}\n\n"
-            "## Relevant Directory Paths\n"
-            f"{json.dumps(relevant_paths, ensure_ascii=False)}\n\n"
-            "# Private Chain-of-Thought Process\n"
-            "Think step by step privately. Do not reveal your reasoning.\n\n"
-            "1. Review the relevant directory paths.\n"
-            "2. Use the full-page retrieval tool with those exact paths.\n"
-            "3. Return only the tool call.\n"
-        )
-        full_page_tool_call, full_page_tool_result = self._run_required_tool_call(
-            prompt=full_page_prompt,
-            tool_name=PolicyToolConfig.FULL_PAGE_RETRIEVAL_TOOL_NAME,
-            pages=pages,
-        )
-        if not full_page_tool_call or not full_page_tool_result:
-            return self._no_relevant_policy_summary()
-
-        final_prompt = (
-            "# Role\n"
-            "You are an HDB resale policy analyst helping a negotiation agent.\n\n"
-            "# Task\n"
-            "Produce the final markdown policy context grounded in the tool results.\n\n"
-            "# Inputs\n"
-            "## Observation\n"
-            f"{observation}\n\n"
-            "## Retrieved Memories\n"
-            f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
-            "## Directory Screening Tool Call\n"
-            f"{directory_tool_call}\n\n"
-            "## Directory Screening Tool Result\n"
-            f"{directory_tool_result}\n\n"
-            "## Directory Relevance Decision\n"
-            f"{path_selection.retrieval_decision}\n\n"
-            "## Relevant Directory Paths\n"
-            f"{json.dumps(relevant_paths, ensure_ascii=False)}\n\n"
-            "## Full Page Retrieval Tool Call\n"
-            f"{full_page_tool_call or 'Not used'}\n\n"
-            "## Full Page Retrieval Tool Result\n"
-            f"{full_page_tool_result or 'No relevant full pages were retrieved.'}\n\n"
-            "# Private Chain-of-Thought Process\n"
-            "Think step by step privately. Do not reveal your reasoning.\n\n"
-            "1. Decide whether the directory screening found relevant policy entries.\n"
-            "2. If full pages were retrieved, summarize only grounded policy details from those pages.\n"
-            "3. If no relevant policies were found, say so explicitly.\n"
-            "4. Tie the policy implications back to the observation and recent memories.\n\n"
-            "# Output Format\n"
-            "Return markdown with exactly these sections:\n"
-            "- `## Tool Contract`\n"
-            "- `## Retrieval Decision`\n"
-            "- `## Relevant Policy Summaries`\n"
-            "- `## Overall Policy Guidance`\n"
-        )
-        for _ in range(self._tool_call_retries):
-            try:
-                return (
-                    chat(
-                        [{
-                            "role": "user",
-                            "content": self._maybe_truncate_prompt(final_prompt),
-                        }],
-                        max_tokens=POLICY_SUMMARY_MAX_TOKENS,
-                    ).strip()
-                )
-            except Exception:
-                continue
-        return ""
-
-    def _run_required_hdb_policy_tool_workflow(
-        self,
-        *,
-        observation: str,
-        recent_memories: list[str],
-        pages: list[PolicyPage],
-    ) -> str:
-        chat = getattr(self._model, "chat", None)
-        if not callable(chat):
-            return self._no_relevant_policy_summary()
-
-        path_selection, directory_tool_call, directory_tool_result = (
-            self._screen_relevant_policies_from_directory(
-                observation=observation,
-                recent_memories=recent_memories,
-                pages=pages,
-            )
-        )
-        if not directory_tool_call or not directory_tool_result:
-            return self._no_relevant_policy_summary()
-
-        if not path_selection.relevant_paths:
-            return self._no_relevant_policy_summary()
-
-        return self._summarize_relevant_policies_from_full_pages(
-            observation=observation,
-            recent_memories=recent_memories,
-            pages=pages,
-            path_selection=path_selection,
-            directory_tool_call=directory_tool_call,
-            directory_tool_result=directory_tool_result,
-        )
 
     def _cache_result(self, *, cache_key: str, result: str) -> str:
         self._last_cache_key = cache_key
@@ -723,23 +407,51 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         ):
             return
         self._current_policy_prompt = (
-            self._maybe_truncate_current_policy_prompt(
-                normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
-            )
+            normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT
         )
         self._synced_active_source_paths = normalized_active_source_paths
         self._last_cache_key = None
         self._last_cache_value = None
 
     def _compose_pre_act_value(self, policy_guidance: str) -> str:
-        return self._maybe_truncate_component_text(
-            (
-            "## Current Policy State\n"
-            f"{self._current_policy_prompt}\n\n"
-            "## Relevant Policy Guidance\n"
-            f"{policy_guidance or self._no_relevant_policy_summary()}"
-            )
+        return self._fit_pre_act_component_text(
+            current_policy_prompt=self._current_policy_prompt,
+            policy_guidance=self._dedupe_policy_guidance(
+                policy_guidance or self._no_relevant_policy_summary()
+            ),
         )
+
+    @staticmethod
+    def _dedupe_policy_guidance(policy_guidance: str) -> str:
+        guidance = str(policy_guidance or "").strip()
+        if not guidance:
+            return ""
+
+        current_state_marker = "## Current Policy State"
+        summaries_marker = "## Relevant Policy Summaries"
+        overall_marker = "## Overall Policy Guidance"
+
+        current_state_index = guidance.find(current_state_marker)
+        if current_state_index < 0:
+            return guidance
+
+        summaries_index = guidance.find(summaries_marker)
+        overall_index = guidance.find(overall_marker)
+        next_section_candidates = [
+            index
+            for index in (summaries_index, overall_index)
+            if index > current_state_index
+        ]
+        if not next_section_candidates:
+            return guidance
+
+        next_section_index = min(next_section_candidates)
+        trimmed = (
+            guidance[:current_state_index].rstrip()
+            + ("\n\n" if guidance[:current_state_index].strip() else "")
+            + guidance[next_section_index:].lstrip()
+        ).strip()
+        return trimmed or guidance
 
     def _summarize_active_policy_sources(
         self,
@@ -762,33 +474,14 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         if not full_page_result.strip():
             return self._no_relevant_policy_summary()
 
-        prompt = (
-            "# Role\n"
-            "You are an HDB resale policy analyst preparing static policy guidance "
-            "for a simulation state.\n\n"
-            "# Task\n"
-            "Summarize the currently active simulation policy state and the grounded "
-            "active policy source pages.\n\n"
-            "# Inputs\n"
-            "## Current Policy State\n"
-            f"{self._current_policy_prompt}\n\n"
-            "## Active Policy Source Pages\n"
-            f"{full_page_result}\n\n"
-            "# Instructions\n"
-            "1. Summarize only policies that are currently active.\n"
-            "2. Ground every policy summary in the supplied active policy source pages.\n"
-            "3. Focus on concrete implications for negotiation behavior and constraints.\n"
-            "4. Do not mention inactive or hypothetical policies.\n\n"
-            "# Output Format\n"
-            "Return markdown with exactly these sections:\n"
-            "- `## Current Policy State`\n"
-            "- `## Relevant Policy Summaries`\n"
-            "- `## Overall Policy Guidance`\n"
+        prompt = self._fit_policy_summary_prompt(
+            current_policy_prompt=self._current_policy_prompt,
+            full_page_result=full_page_result,
         )
         for _ in range(self._tool_call_retries):
             try:
                 return chat(
-                    [{"role": "user", "content": self._maybe_truncate_prompt(prompt)}],
+                    [{"role": "user", "content": prompt}],
                     max_tokens=POLICY_SUMMARY_MAX_TOKENS,
                 ).strip()
             except Exception:
@@ -805,6 +498,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                 "policy_index_paths": [
                     self._display_path(path) for path in self._policy_index_paths
                 ],
+                "policy_index_signature": list(self._policy_index_signature()),
                 "active_source_paths": active_source_paths,
                 "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
             },
@@ -840,20 +534,14 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
 
     def update(self) -> None:
         super().update()
-        self._last_cache_key = None
-        self._last_cache_value = None
 
     def get_state(self) -> entity_component.ComponentState:
         return {
-            "observation_component_key": self._observation_component_key,
-            "memory_component_key": self._memory_component_key,
-            "num_memories_to_retrieve": self._num_memories_to_retrieve,
             "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
             "policy_directory": str(self._policy_directory),
             "max_directory_candidates": self._max_directory_candidates,
             "max_page_chars": self._max_page_chars,
             "max_prompt_chars": self._max_prompt_chars,
-            "max_current_policy_chars": self._max_current_policy_chars,
             "max_component_chars": self._max_component_chars,
             "tool_call_retries": self._tool_call_retries,
             "current_policy_prompt": self._current_policy_prompt,
@@ -865,15 +553,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         }
 
     def set_state(self, state: entity_component.ComponentState) -> None:
-        if "observation_component_key" in state:
-            self._observation_component_key = str(state["observation_component_key"])
-        if "memory_component_key" in state:
-            self._memory_component_key = str(state["memory_component_key"])
-        if "num_memories_to_retrieve" in state:
-            self._num_memories_to_retrieve = max(
-                1,
-                int(state["num_memories_to_retrieve"]),
-            )
         if "policy_jsonl_filenames" in state:
             self._policy_jsonl_filenames = tuple(
                 str(filename).strip()
@@ -898,13 +577,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             self._max_prompt_chars = (
                 max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
             )
-        if "max_current_policy_chars" in state:
-            max_current_policy_chars = int(state["max_current_policy_chars"])
-            self._max_current_policy_chars = (
-                max(500, max_current_policy_chars)
-                if max_current_policy_chars > 0
-                else 0
-            )
         if "max_component_chars" in state:
             max_component_chars = int(state["max_component_chars"])
             self._max_component_chars = (
@@ -916,7 +588,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             self._tool_call_retries = max(1, int(state["tool_call_retries"]))
         if "current_policy_prompt" in state:
             current_policy_prompt = str(state["current_policy_prompt"]).strip()
-            self._current_policy_prompt = self._maybe_truncate_current_policy_prompt(
+            self._current_policy_prompt = (
                 current_policy_prompt or DEFAULT_CURRENT_POLICY_PROMPT
             )
         if "active_source_paths" in state:

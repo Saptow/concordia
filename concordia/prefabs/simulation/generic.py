@@ -26,6 +26,7 @@ from concordia.associative_memory import basic_associative_memory as associative
 from concordia.environment import engine as engine_lib
 from concordia.environment.engines import sequential
 from concordia.language_model import language_model
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 from concordia.typing import prefab as prefab_lib
@@ -108,8 +109,7 @@ class Simulation(simulation_lib.Simulation):
         if entity_cfg.role == Role.INITIALIZER
     ]
 
-    for entity_config in entities_configs:
-      self.add_entity(entity_config)
+    self.add_entities(entities_configs)
 
     for gm_config in initializer_configs + gm_configs:
       self.add_game_master(gm_config)
@@ -188,16 +188,119 @@ class Simulation(simulation_lib.Simulation):
     if instance_config.role != Role.ENTITY:
       raise ValueError("Instance config role must be ENTITY")
 
+    prepared_entity = self._prepare_entity_build(instance_config)
+    self._apply_entity_initialization_batches((prepared_entity,))
+    _, entity_prefab, memory_bank = prepared_entity
+    entity = entity_prefab.build(
+        model=self._agent_model, memory_bank=memory_bank
+    )
+    self._register_built_entity(
+        instance_config=instance_config,
+        entity=entity,
+        state=state,
+    )
+
+  def add_entities(
+      self,
+      instance_configs: list[prefab_lib.InstanceConfig],
+  ):
+    """Add multiple entities, batching compatible prefab initialization."""
+    if not instance_configs:
+      return
+    prepared_entities = tuple(
+        self._prepare_entity_build(instance_config)
+        for instance_config in instance_configs
+    )
+    self._apply_entity_initialization_batches(prepared_entities)
+    for instance_config, entity_prefab, memory_bank in prepared_entities:
+      entity = entity_prefab.build(
+          model=self._agent_model, memory_bank=memory_bank
+      )
+      self._register_built_entity(
+          instance_config=instance_config,
+          entity=entity,
+      )
+
+  def _prepare_entity_build(
+      self,
+      instance_config: prefab_lib.InstanceConfig,
+  ) -> tuple[
+      prefab_lib.InstanceConfig,
+      prefab_lib.Prefab,
+      associative_memory.AssociativeMemoryBank,
+  ]:
+    if instance_config.role != Role.ENTITY:
+      raise ValueError("Instance config role must be ENTITY")
     entity_prefab = copy.deepcopy(self._config.prefabs[instance_config.prefab])
     entity_prefab.params = instance_config.params
 
     memory_bank = associative_memory.AssociativeMemoryBank(
         sentence_embedder=self._embedder,
     )
-    entity = entity_prefab.build(
-        model=self._agent_model, memory_bank=memory_bank
-    )
+    return instance_config, entity_prefab, memory_bank
 
+  def _apply_entity_initialization_batches(
+      self,
+      prepared_entities: tuple[
+          tuple[
+              prefab_lib.InstanceConfig,
+              prefab_lib.Prefab,
+              associative_memory.AssociativeMemoryBank,
+          ],
+          ...,
+      ],
+  ) -> None:
+    pending_structured_updates: list[
+        tuple[
+            prefab_lib.Prefab,
+            list[structured_setup_batching.StructuredSetupRequest],
+        ]
+    ] = []
+    all_requests: list[structured_setup_batching.StructuredSetupRequest] = []
+
+    for _, entity_prefab, _ in prepared_entities:
+      build_requests = getattr(
+          entity_prefab, 'build_initialization_requests', None
+      )
+      apply_responses = getattr(
+          entity_prefab, 'apply_initialization_responses', None
+      )
+      if not callable(build_requests) or not callable(apply_responses):
+        continue
+      prefab_requests = list(
+          build_requests(model=self._agent_model) or ()
+      )
+      if not prefab_requests:
+        continue
+      pending_structured_updates.append((entity_prefab, prefab_requests))
+      all_requests.extend(prefab_requests)
+
+    raw_responses = structured_setup_batching.execute_setup_requests(
+        all_requests
+    )
+    response_index = 0
+    for entity_prefab, prefab_requests in pending_structured_updates:
+      response_count = len(prefab_requests)
+      prefab_responses = raw_responses[
+          response_index: response_index + response_count
+      ]
+      response_index += response_count
+      entity_prefab.apply_initialization_responses(
+          {
+              request.response_key: response
+              for request, response in zip(
+                  prefab_requests, prefab_responses
+              )
+          }
+      )
+
+  def _register_built_entity(
+      self,
+      *,
+      instance_config: prefab_lib.InstanceConfig,
+      entity: entity_lib.Entity,
+      state: entity_component.EntityState | None = None,
+  ) -> None:
     if any(e.name == entity.name for e in self.entities):
       logging.info("Entity %s already exists.", entity.name)
       return

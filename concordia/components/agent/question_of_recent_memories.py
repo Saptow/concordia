@@ -15,8 +15,10 @@
 """Agent component for asking questions about the agent's recent memories."""
 
 from collections.abc import Callable, Collection, Sequence
+import dataclasses
 import datetime
-from typing import Literal, override
+import json
+from typing import Any, Literal, override
 from pydantic import BaseModel, Field, RootModel, create_model
 
 from concordia.components.agent import action_spec_ignored
@@ -50,6 +52,24 @@ BEST_OPTION_PERCEPTION_QUESTION = (
 )
 
 
+@dataclasses.dataclass(frozen=True)
+class StructuredPreActRequest:
+  """One structured phase-1 chooser request that can be batched."""
+
+  component: 'QuestionOfRecentMemoriesStructured'
+  prompt_text: str
+  prompt_context: str
+  question_text: str
+  answer_prefix: str
+  output_schema: Any
+  json_schema: dict[str, Any]
+  max_tokens: int = 1000
+  terminators: tuple[str, ...] = ('\n',)
+  temperature: float = language_model.DEFAULT_TEMPERATURE
+  top_p: float = language_model.DEFAULT_TOP_P
+  top_k: int = language_model.DEFAULT_TOP_K
+
+
 class QuestionOfRecentMemories(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
 ):
@@ -74,6 +94,7 @@ class QuestionOfRecentMemories(
       terminators: Collection[str] = ('\n',),
       clock_now: Callable[[], datetime.datetime] | None = None,
       num_memories_to_retrieve: int = 25,
+      persist_pre_act_value_across_updates: bool = False,
   ):
     """Initializes the QuestionOfRecentMemories component.
 
@@ -92,6 +113,8 @@ class QuestionOfRecentMemories(
         emitted by the model the response will be truncated before them.
       clock_now: time callback to use.
       num_memories_to_retrieve: The number of recent memories to retrieve.
+      persist_pre_act_value_across_updates: Whether to keep the generated
+        pre-act value across update cycles instead of recomputing it each turn.
     """
     super().__init__(pre_act_label)
     self._model = model
@@ -104,6 +127,9 @@ class QuestionOfRecentMemories(
     self._answer_prefix = answer_prefix
     self._add_to_memory = add_to_memory
     self._memory_tag = memory_tag
+    self._persist_pre_act_value_across_updates = bool(
+        persist_pre_act_value_across_updates
+    )
 
   def get_component_pre_act_label(self, component_name: str) -> str:
     """Returns the pre-act label of a named component of the parent entity."""
@@ -209,6 +235,9 @@ class QuestionOfRecentMemories(
           'components': list(self._components),
           'terminators': list(self._terminators),
           'num_memories_to_retrieve': self._num_memories_to_retrieve,
+          'persist_pre_act_value_across_updates': (
+              self._persist_pre_act_value_across_updates
+          ),
           'pre_act_label': self.get_pre_act_label(),
       }
 
@@ -231,6 +260,16 @@ class QuestionOfRecentMemories(
         self._terminators = tuple(state['terminators'])
       if 'num_memories_to_retrieve' in state:
         self._num_memories_to_retrieve = state['num_memories_to_retrieve']
+      if 'persist_pre_act_value_across_updates' in state:
+        self._persist_pre_act_value_across_updates = bool(
+            state['persist_pre_act_value_across_updates']
+        )
+
+  @override
+  def update(self) -> None:
+    if self._persist_pre_act_value_across_updates:
+      return
+    super().update()
 
 # QuestionOfRecentMemories component with structured outputs
 class QuestionOfRecentMemoriesStructured(
@@ -302,11 +341,49 @@ class QuestionOfRecentMemoriesStructured(
       self._runtime_choice_responses = runtime_choices
     return super().pre_act(action_spec)
 
-  @override
-  def _make_pre_act_value(self) -> str:
-    """Returns the answer to the question in a structured format."""
-    agent_name = self.get_entity().name
+  def _get_active_choice_responses(self) -> tuple[str, ...]:
+    return (
+        self._runtime_choice_responses
+        if self._runtime_choice_responses
+        else self._choice_responses
+    )
 
+  def _resolve_output_schema(
+      self,
+      active_choice_responses: Sequence[str],
+  ) -> Any:
+    output_schema = self._output_schema
+    if not active_choice_responses or output_schema is None:
+      return output_schema
+    if 'chosen_action_type' not in getattr(output_schema, 'model_fields', {}):
+      return output_schema
+    literal_choices = Literal.__getitem__(tuple(active_choice_responses))
+    field_info = output_schema.model_fields['chosen_action_type']
+    return create_model(
+        f'{output_schema.__name__}RuntimeChoices',
+        __base__=output_schema,
+        chosen_action_type=(
+            literal_choices,
+            Field(
+                ...,
+                description=field_info.description,
+            ),
+        ),
+    )
+
+  def build_pre_act_request(
+      self,
+      action_spec: entity_lib.ActionSpec | None = None,
+  ) -> StructuredPreActRequest:
+    """Build a batchable structured chooser request for this component."""
+    if action_spec is not None:
+      runtime_choices = None
+      if action_spec.output_type in entity_lib.CHOICE_ACTION_TYPES:
+        runtime_choices = tuple(str(x) for x in action_spec.options if str(x))
+      with self._lock:
+        self._runtime_choice_responses = runtime_choices
+
+    agent_name = self.get_entity().name
     memory = self.get_entity().get_component(
         self._memory_component_key, type_=memory_component.Memory
     )
@@ -331,99 +408,185 @@ class QuestionOfRecentMemoriesStructured(
     if perception_keys:
       for key in perception_keys:
         prompt.statement(
-          f"{self.get_component_pre_act_label(key)}:\n"
-          f"{self.get_named_component_pre_act_value(key)}\n"
+            f"{self.get_component_pre_act_label(key)}:\n"
+            f"{self.get_named_component_pre_act_value(key)}\n"
         )
 
     prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
-    prompt.statement('') # Ensure there's a newline before the question, which can help with formatting in some cases.
+    prompt.statement('')
     if self._clock_now is not None:
       prompt.statement(f'Current time: {self._clock_now()}.\n')
-    # `ActionSpecIgnored.get_pre_act_value()` already holds `_lock` while calling
-    # `_make_pre_act_value()`, so reacquiring it here would deadlock.
-    self._last_prompt_context = prompt.view().text().strip()
-    
+
+    prompt_context = prompt.view().text().strip()
     question = self._question.format(agent_name=agent_name)
-    active_choice_responses = (
-        self._runtime_choice_responses
-        if self._runtime_choice_responses
-        else self._choice_responses
-    )
+    answer_prefix = self._answer_prefix.format(agent_name=agent_name)
+    active_choice_responses = self._get_active_choice_responses()
+    output_schema = self._resolve_output_schema(active_choice_responses)
     if active_choice_responses:
-      if self._output_schema is not None:
-        output_schema = self._output_schema
-        if 'chosen_action_type' in getattr(output_schema, 'model_fields', {}):
-          literal_choices = Literal.__getitem__(tuple(active_choice_responses))
-          field_info = output_schema.model_fields['chosen_action_type']
-          output_schema = create_model(
-              f'{output_schema.__name__}RuntimeChoices',
-              __base__=output_schema,
-              chosen_action_type=(
-                  literal_choices,
-                  Field(
-                      ...,
-                      description=field_info.description,
-                  ),
-              ),
-          )
-    #     allowed_choices_block = '\n'.join(
-    #         f'- {choice}' for choice in active_choice_responses
-    #     )
-        result = prompt.structured_question(
-            question=(
-                f'{question}\n'
-                'Return a structured response that selects exactly one of the '
-                'allowed action types and explains the decision briefly.'
-            ),
-            answer_prefix=self._answer_prefix.format(agent_name=agent_name),
-            max_tokens=1000,
-            terminators=self._terminators,
-            output_schema=output_schema,
-        )
-      else:
-        idx = prompt.structured_multiple_choice_question(
-            question=question,
-            choices=active_choice_responses,
-        )
-        result = active_choice_responses[idx]
-    else:
-      if self._output_schema is None:
+      if output_schema is None:
         raise ValueError(
-            'QuestionOfRecentMemoriesStructured requires either '
-            '`choice_responses` or `output_schema`.'
+            'QuestionOfRecentMemoriesStructured requires an output schema when '
+            'batched phase-1 selection uses structured choices.'
         )
-      result = prompt.structured_question(
-          question,
-          answer_prefix=self._answer_prefix.format(agent_name=agent_name),
-          max_tokens=1000,
-          terminators=self._terminators,
-          output_schema=self._output_schema
+      question = (
+          f'{question}\n'
+          'Return a structured response that selects exactly one of the '
+          'allowed action types and explains the decision briefly.'
       )
-    result_str = self._answer_prefix.format(agent_name=agent_name) + result
+    elif output_schema is None:
+      raise ValueError(
+          'QuestionOfRecentMemoriesStructured requires either '
+          '`choice_responses` or `output_schema`.'
+      )
+
+    prompt_text = (
+        f'{prompt.view().text()}Question: {question}\n'
+        f'Answer: {answer_prefix}'
+    )
+    return StructuredPreActRequest(
+        component=self,
+        prompt_text=prompt_text,
+        prompt_context=prompt_context,
+        question_text=question,
+        answer_prefix=answer_prefix,
+        output_schema=output_schema,
+        json_schema=output_schema.model_json_schema(),
+    )
+
+  def _parse_pre_act_response(
+      self,
+      request: StructuredPreActRequest,
+      raw_response: str,
+  ) -> str:
+    """Validate and normalize one structured chooser response."""
+    try:
+      parsed_response = request.output_schema.model_validate_json(raw_response)
+      response = parsed_response.model_dump_json()
+    except Exception:
+      response = raw_response
+    return f'{request.answer_prefix}{response}'
+
+  def apply_pre_act_response(
+      self,
+      request: StructuredPreActRequest,
+      raw_response: str,
+  ) -> str:
+    """Persist one structured chooser response into the component cache."""
+    result_str = self._parse_pre_act_response(request, raw_response)
+    memory = self.get_entity().get_component(
+        self._memory_component_key, type_=memory_component.Memory
+    )
     if self._add_to_memory:
       memory.add(f'{self._memory_tag} {result_str}')
-    
+
+    self._last_prompt_context = request.prompt_context
+    self._pre_act_value = result_str
+
     log = {
         'Key': self.get_pre_act_label(),
-        'Summary': question,
+        'Summary': request.question_text,
         'State': result_str,
-        'Chain of thought': prompt.view().text().splitlines(),
+        'Chain of thought': (
+            request.prompt_text.splitlines()
+            + ['']
+            + [f'Answer: {result_str}']
+        ),
     }
     if self._clock_now is not None:
       log['Time'] = self._clock_now()
-    
-    self._logging_channel(log)
 
+    self._logging_channel(log)
     return result_str
+
+  def execute_pre_act_request(
+      self,
+      request: StructuredPreActRequest,
+  ) -> str:
+    """Execute one structured chooser request through the language model."""
+    raw_response = self._model.sample_text(
+        prompt=request.prompt_text,
+        max_tokens=request.max_tokens,
+        terminators=request.terminators,
+        json_schema=request.json_schema,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        top_k=request.top_k,
+    )
+    return self.apply_pre_act_response(request, raw_response)
+
+  @classmethod
+  def execute_pre_act_requests(
+      cls,
+      requests: Sequence[StructuredPreActRequest],
+  ) -> list[str]:
+    """Execute structured chooser requests, batching compatible groups."""
+    if not requests:
+      return []
+
+    outputs = [''] * len(requests)
+    grouped_requests: dict[
+        tuple[Any, ...],
+        list[tuple[int, StructuredPreActRequest]],
+    ] = {}
+    for index, request in enumerate(requests):
+      group_key = (
+          id(request.component._model),
+          json.dumps(request.json_schema, sort_keys=True, ensure_ascii=False),
+          request.max_tokens,
+          request.terminators,
+          request.temperature,
+          request.top_p,
+          request.top_k,
+      )
+      grouped_requests.setdefault(group_key, []).append((index, request))
+
+    for grouped in grouped_requests.values():
+      model = grouped[0][1].component._model
+      batch_sampler = getattr(model, 'sample_text_batch', None)
+      use_batch = callable(batch_sampler) and len(grouped) > 1
+      if not use_batch:
+        for index, request in grouped:
+          outputs[index] = request.component.execute_pre_act_request(request)
+        continue
+      try:
+        raw_responses = batch_sampler(
+            [request.prompt_text for _, request in grouped],
+            max_tokens=grouped[0][1].max_tokens,
+            terminators=grouped[0][1].terminators,
+            json_schema=grouped[0][1].json_schema,
+            temperature=grouped[0][1].temperature,
+            top_p=grouped[0][1].top_p,
+            top_k=grouped[0][1].top_k,
+        )
+      except Exception:
+        raw_responses = []
+      if len(raw_responses) != len(grouped):
+        for index, request in grouped:
+          outputs[index] = request.component.execute_pre_act_request(request)
+        continue
+      for (index, request), raw_response in zip(grouped, raw_responses):
+        outputs[index] = request.component.apply_pre_act_response(
+            request,
+            raw_response,
+        )
+    return outputs
+
+  @override
+  def _make_pre_act_value(self) -> str:
+    """Returns the answer to the question in a structured format."""
+    request = self.build_pre_act_request()
+    return self.execute_pre_act_request(request)
 
   @override
   def update(self) -> None:
     with self._lock:
       self._runtime_choice_responses = None
       self._last_prompt_context = ''
-      # Mirror `ActionSpecIgnored.update()` here so we do not reacquire `_lock`
-      # through `super().update()`, which would deadlock with a non-reentrant lock.
-      self._pre_act_value = None
+      if not self._persist_pre_act_value_across_updates:
+        # Mirror `ActionSpecIgnored.update()` here so we do not reacquire
+        # `_lock` through `super().update()`, which would deadlock with a
+        # non-reentrant lock.
+        self._pre_act_value = None
       
 class QuestionOfRecentMemoriesWithoutPreAct(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging

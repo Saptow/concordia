@@ -2,13 +2,16 @@
 
 from collections.abc import Mapping, Sequence
 import json
+import types
 from typing import Any
 
 from absl import logging
+from configs import NegotiationComponentConfig
 from concordia.agents import entity_agent
 from concordia.components.agent import hdb_acting_component
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
+from concordia.components.agent import question_of_recent_memories
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation import structured_setup_batching
@@ -928,6 +931,39 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           'force_close': False,
       }
 
+    try:
+      chooser_component = entity.get_component(
+          NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY,
+          type_=question_of_recent_memories.QuestionOfRecentMemoriesStructured,
+      )
+    except Exception:
+      chooser_component = None
+
+    if chooser_component is not None:
+      prepared_act = entity.prepare_act_with_deferred_components(
+          action_spec,
+          deferred_component_names=(
+              NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY,
+          ),
+      )
+      try:
+        phase1_request = chooser_component.build_pre_act_request(action_spec)
+      except Exception:
+        entity.cancel_prepared_act(prepared_act)
+        raise
+      return {
+          'player_id': player_id,
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+          'action_spec': action_spec,
+          'entity': entity,
+          'prepared_act': prepared_act,
+          'phase1_component': chooser_component,
+          'phase1_request': phase1_request,
+          'request': None,
+          'force_close': False,
+      }
+
     prepared_act = entity.prepare_act(action_spec)
     act_component = entity.get_act_component()
     request_builder = getattr(act_component, 'build_action_attempt_request', None)
@@ -955,13 +991,77 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self,
       prepared_turns: Sequence[dict[str, Any]],
   ) -> list[dict[str, Any]]:
-    """Finalize prepared turns, batching compatible phase-2 requests."""
+    """Finalize prepared turns, batching phase-1 chooser and phase-2 payloads."""
     if not prepared_turns:
       return []
 
+    mutable_prepared_turns = [dict(turn) for turn in prepared_turns]
+
+    phase1_request_indexes: list[int] = []
+    phase1_requests: list[question_of_recent_memories.StructuredPreActRequest] = []
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      phase1_request = prepared_turn.get('phase1_request')
+      if isinstance(
+          phase1_request,
+          question_of_recent_memories.StructuredPreActRequest,
+      ):
+        phase1_request_indexes.append(index)
+        phase1_requests.append(phase1_request)
+
+    if phase1_requests:
+      phase1_outputs = (
+          question_of_recent_memories.QuestionOfRecentMemoriesStructured
+          .execute_pre_act_requests(phase1_requests)
+      )
+      for index, phase1_output in zip(phase1_request_indexes, phase1_outputs):
+        prepared_turn = mutable_prepared_turns[index]
+        prepared_act = prepared_turn.get('prepared_act')
+        if prepared_act is None:
+          mutable_prepared_turns[index] = prepared_turn
+          continue
+        merged_contexts = dict(prepared_act.contexts)
+        merged_contexts[NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY] = (
+            phase1_output
+        )
+        prepared_turn['prepared_act'] = entity_agent.PreparedAct(
+            action_spec=prepared_act.action_spec,
+            contexts=types.MappingProxyType(merged_contexts),
+        )
+        entity = prepared_turn.get('entity')
+        if entity is not None:
+          act_component = entity.get_act_component()
+          request_builder = getattr(
+              act_component,
+              'build_action_attempt_request',
+              None,
+          )
+          if callable(request_builder):
+            try:
+              prepared_turn['request'] = request_builder(
+                  prepared_turn['prepared_act'].contexts,
+                  prepared_turn['action_spec'],
+              )
+            except Exception as error:  # pylint: disable=broad-exception-caught
+              logging.error(
+                  'Failed to build phase-2 request for %s: %s',
+                  prepared_turn.get('player_id'),
+                  error,
+              )
+              entity.cancel_prepared_act(prepared_turn['prepared_act'])
+              mutable_prepared_turns[index] = dict(
+                  prepared_turn,
+                  event=None,
+                  force_close=True,
+                  entity=None,
+                  prepared_act=None,
+                  request=None,
+              )
+              continue
+        mutable_prepared_turns[index] = prepared_turn
+
     request_indexes: list[int] = []
     requests: list[hdb_acting_component.StructuredActionAttemptRequest] = []
-    for index, prepared_turn in enumerate(prepared_turns):
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
       request = prepared_turn.get('request')
       if isinstance(request, hdb_acting_component.StructuredActionAttemptRequest):
         request_indexes.append(index)
@@ -977,7 +1077,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       request_outputs = dict(zip(request_indexes, batched_outputs))
 
     finalized_turns: list[dict[str, Any]] = []
-    for index, prepared_turn in enumerate(prepared_turns):
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
       entity = prepared_turn.get('entity')
       prepared_act = prepared_turn.get('prepared_act')
       action_attempt = request_outputs.get(index)

@@ -15,7 +15,7 @@
 """A modular entity agent using the new component system."""
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent import futures
 import functools
 import threading
@@ -170,6 +170,40 @@ class EntityAgent(entity_component.EntityWithComponents):
 
     return types.MappingProxyType(final_results)
 
+  def _parallel_call_filtered_(
+      self,
+      method_name: str,
+      *args,
+      excluded_component_names: Sequence[str] = (),
+      executor: futures.ThreadPoolExecutor | None = None,
+  ) -> entity_component.ComponentContextMapping:
+    """Calls the named method on all non-excluded components in parallel."""
+    excluded_names = {str(name) for name in excluded_component_names if str(name)}
+    if not excluded_names:
+      return self._parallel_call_(method_name, *args, executor=executor)
+
+    filtered_components = {
+        name: component
+        for name, component in self._context_components.items()
+        if name not in excluded_names
+    }
+    unique_components = list(set(filtered_components.values()))
+    tasks_for_unique = {
+        str(id(component)): functools.partial(
+            getattr(component, method_name), *args
+        )
+        for component in unique_components
+    }
+    results_by_component_id = concurrency.run_tasks(
+        tasks_for_unique, executor=executor
+    )
+
+    final_results: dict[str, str] = {}
+    for name, component in filtered_components.items():
+      final_results[name] = results_by_component_id[str(id(component))]
+
+    return types.MappingProxyType(final_results)
+
   @override
   def act(
       self, action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC
@@ -186,6 +220,35 @@ class EntityAgent(entity_component.EntityWithComponents):
     try:
       self._set_phase(entity_component.Phase.PRE_ACT)
       contexts = self._parallel_call_('pre_act', action_spec)
+      contexts = types.MappingProxyType(contexts)
+      self._context_processor.pre_act(contexts)
+      return PreparedAct(action_spec=action_spec, contexts=contexts)
+    except Exception:
+      self.set_phase(entity_component.Phase.READY)
+      self._control_lock.release()
+      raise
+
+  def prepare_act_with_deferred_components(
+      self,
+      action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC,
+      *,
+      deferred_component_names: Sequence[str] = (),
+  ) -> PreparedAct:
+    """Prepare an action while deferring selected context components."""
+    deferred_names = tuple(
+        str(name) for name in deferred_component_names if str(name)
+    )
+    if not deferred_names:
+      return self.prepare_act(action_spec)
+
+    self._control_lock.acquire()
+    try:
+      self._set_phase(entity_component.Phase.PRE_ACT)
+      contexts = self._parallel_call_filtered_(
+          'pre_act',
+          action_spec,
+          excluded_component_names=deferred_names,
+      )
       contexts = types.MappingProxyType(contexts)
       self._context_processor.pre_act(contexts)
       return PreparedAct(action_spec=action_spec, contexts=contexts)
