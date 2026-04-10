@@ -69,6 +69,7 @@ class UncertainSeller(
             0.0, min(1.0, float(counterpart_confidence))
         )
         self._last_observation_hash: int | None = None
+        self._pending_observations: List[str] = []
         self._debug_trace: List[str] = []
 
         # Belief state tracking
@@ -199,6 +200,7 @@ class UncertainSeller(
         # clear pair-local uncertainty artifacts instead of carrying them over.
         self._issue_bank = []
         self._last_observation_hash = None
+        self._pending_observations = []
         self._debug_trace = []
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         seller_distribution = seller_state.effective_reservation
@@ -426,14 +428,14 @@ class UncertainSeller(
         self._issue_bank = uncertain_helper.sanitize_issue_bank(issues)
         return list(self._issue_bank)
 
-    def _update_counterpart_reservation_from_context(self, context: str) -> str:
-        """Update beliefs based on new context information."""
+    def _build_counterpart_reservation_update_prompt(self, context: str) -> str:
+        """Build the structured prompt for a seller counterpart-belief update."""
         truncated_context = uncertain_helper.truncate_prompt_text(
             context,
             max_chars=SELLER_OBSERVATION_PROMPT_MAX_CHARS,
             middle=True,
         )
-        prompt = (
+        return (
             "# Role\n"
             "You are a seller in an HDB resale negotiation.\n\n"
             "# Task\n"
@@ -472,15 +474,15 @@ class UncertainSeller(
             "- Return JSON only.\n"
             "- Match the provided schema exactly.\n"
         )
-        response = self._model.sample_text(
-            prompt,
-            json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
-            max_tokens=SELLER_BELIEF_UPDATE_MAX_TOKENS,
-        )
 
-        # Ignore malformed model output so one bad response does not crash the turn.
+    def _apply_counterpart_reservation_update_response(self, response: str) -> str:
+        """Apply one seller counterpart-belief update response."""
         try:
-            info_update = negotiation_schemas.UpdateOpposingBeliefInfo.model_validate_json(response)
+            info_update = (
+                negotiation_schemas.UpdateOpposingBeliefInfo.model_validate_json(
+                    response
+                )
+            )
         except ValidationError:
             return 'Counterpart reservation unchanged: model output was invalid.'
         if info_update.budget_info:
@@ -496,7 +498,7 @@ class UncertainSeller(
                 f'using estimate={uncertain_helper.format_money(info_update.budget_info.estimate)} '
                 f'confidence={info_update.budget_info.confidence:.2f}.'
             )
-        elif info_update.trust_info: # if there is no explicit budget info, we update our beliefs based on the trust level of the counterpart instead.
+        if info_update.trust_info:
             self._beliefs['counterpart_reservation'].update_trust(
                 info_update.trust_info.trust_level
             )
@@ -505,6 +507,15 @@ class UncertainSeller(
                 f'trust_level={info_update.trust_info.trust_level:.2f}.'
             )
         return 'Counterpart reservation unchanged: no budget or trust signal extracted.'
+
+    def _update_counterpart_reservation_from_context(self, context: str) -> str:
+        """Update beliefs based on new context information."""
+        response = self._model.sample_text(
+            self._build_counterpart_reservation_update_prompt(context),
+            json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
+            max_tokens=SELLER_BELIEF_UPDATE_MAX_TOKENS,
+        )
+        return self._apply_counterpart_reservation_update_response(response)
 
     def _generate_scenarios(self) -> List[uncertain_helper.ScenarioAnalysis]:
         """
@@ -669,7 +680,7 @@ class UncertainSeller(
         return ""
 
     def pre_observe(self, observation: str) -> str:
-        """Process incoming observation text to update beliefs."""
+        """Record incoming observations and defer LLM belief updates."""
         observation_text = observation.strip()
         if not observation_text:
             uncertain_helper.append_debug_trace(self._debug_trace, 'Skipped empty observation.')
@@ -700,11 +711,43 @@ class UncertainSeller(
                 'Listing handoff observation recorded without duplicate belief update.',
             )
             return ""
+        self._pending_observations.append(observation_text)
         uncertain_helper.append_debug_trace(
             self._debug_trace,
-            self._update_counterpart_reservation_from_context(observation),
+            'Queued observation for batched belief update.',
         )
         return ""
+
+    def build_observation_requests(
+        self,
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
+        requests: list[structured_setup_batching.StructuredSetupRequest] = []
+        for index, observation in enumerate(self._pending_observations):
+            requests.append(
+                structured_setup_batching.StructuredSetupRequest(
+                    component=self,
+                    response_key=f'counterpart_reservation::{index}',
+                    prompt_text=self._build_counterpart_reservation_update_prompt(
+                        observation
+                    ),
+                    specific_schema=negotiation_schemas.UpdateOpposingBeliefInfo,
+                    max_tokens=SELLER_BELIEF_UPDATE_MAX_TOKENS,
+                )
+            )
+        return requests
+
+    def apply_observation_responses(
+        self,
+        responses_by_key: Dict[str, str],
+    ) -> None:
+        for index, _ in enumerate(self._pending_observations):
+            uncertain_helper.append_debug_trace(
+                self._debug_trace,
+                self._apply_counterpart_reservation_update_response(
+                    responses_by_key.get(f'counterpart_reservation::{index}', '')
+                ),
+            )
+        self._pending_observations = []
 
     def get_state(self) -> Dict[str, Any]:
         """Get component state."""
@@ -742,6 +785,7 @@ class UncertainSeller(
                 issue.model_dump()
                 for issue in self._issue_bank
             ],
+            'pending_observations': list(self._pending_observations),
             'action_confidence': action_confidence,
             'avg_confidence': action_confidence,
             'uncertainty_level': 1.0 - action_confidence,
@@ -794,6 +838,9 @@ class UncertainSeller(
                     belief.a = max(1e-6, belief_data.get('a', belief.a))
                     belief.b = max(1e-6, belief_data.get('b', belief.b))
         self._issue_bank = uncertain_helper.restore_issue_bank(state.get('issue_bank', []))
+        self._pending_observations = [
+            str(item) for item in state.get('pending_observations', [])
+        ]
 
 
     def update(self) -> None:

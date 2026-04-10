@@ -11,6 +11,7 @@ from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.uncertain_negotiator import (
     batch_update_agents_from_listings,
 )
@@ -669,6 +670,61 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return
     entity.observe(self._sanitize_event_for_counterparty(event))
 
+  def _flush_pending_observation_updates(
+      self,
+      observer_ids: Sequence[str],
+  ) -> None:
+    """Batch-flush deferred uncertainty updates after observations land."""
+    pending_updates: list[
+        tuple[
+            object,
+            list[structured_setup_batching.StructuredSetupRequest],
+        ]
+    ] = []
+    all_requests: list[structured_setup_batching.StructuredSetupRequest] = []
+    seen_ids: set[str] = set()
+
+    for observer_id in observer_ids:
+      observer_key = str(observer_id)
+      if not observer_key or observer_key in seen_ids:
+        continue
+      seen_ids.add(observer_key)
+      entity = self._entities_by_id.get(observer_key)
+      if entity is None:
+        continue
+      for component_name in ('uncertain_buyer', 'uncertain_seller'):
+        try:
+          component = entity.get_component(component_name)
+        except Exception:
+          continue
+        build_requests = getattr(component, 'build_observation_requests', None)
+        apply_responses = getattr(component, 'apply_observation_responses', None)
+        if not callable(build_requests) or not callable(apply_responses):
+          continue
+        component_requests = list(build_requests() or ())
+        if not component_requests:
+          continue
+        pending_updates.append((component, component_requests))
+        all_requests.extend(component_requests)
+
+    raw_responses = structured_setup_batching.execute_setup_requests(all_requests)
+    response_index = 0
+    for component, component_requests in pending_updates:
+      response_count = len(component_requests)
+      component_responses = raw_responses[
+          response_index: response_index + response_count
+      ]
+      response_index += response_count
+      component.apply_observation_responses(
+          {
+              request.response_key: response
+              for request, response in zip(
+                  component_requests,
+                  component_responses,
+              )
+          }
+      )
+
   def _advance_pair_round_for_entity(self, player_id: str) -> None:
     """Advance pair-local elapsed time once for the entity after a full week."""
     entity = self._entities_by_id.get(player_id)
@@ -1187,6 +1243,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     buyer_turns = self._execute_turn_stage(buyer_turn_specs)
 
     seller_turn_specs: list[dict[str, Any]] = []
+    seller_observer_ids: list[str] = []
     for buyer_turn in buyer_turns:
       buyer_id = str(buyer_turn['buyer_id'])
       seller_id = str(buyer_turn['seller_id'])
@@ -1215,6 +1272,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       )
       if not local_is_closed and not pair_result['force_close']:
         self._observe_event(seller_id, buyer_event)
+        seller_observer_ids.append(seller_id)
         seller_turn_specs.append({
             'player_id': seller_id,
             'buyer_id': buyer_id,
@@ -1222,7 +1280,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             'has_active_offer': local_has_active_offer,
         })
 
+    self._flush_pending_observation_updates(seller_observer_ids)
+
     seller_turns = self._execute_turn_stage(seller_turn_specs)
+    buyer_observer_ids: list[str] = []
     for seller_turn in seller_turns:
       buyer_id = str(seller_turn['buyer_id'])
       seller_id = str(seller_turn['seller_id'])
@@ -1240,6 +1301,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           'event': seller_event,
       })
       self._observe_event(buyer_id, seller_event)
+      buyer_observer_ids.append(buyer_id)
+
+    self._flush_pending_observation_updates(buyer_observer_ids)
 
     for buyer_id, seller_id in open_pairs:
       pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
