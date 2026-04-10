@@ -11,9 +11,35 @@ class _FakePolicyOverwriteModel:
   def __init__(self, response: str):
     self._response = response
     self.prompts: list[str] = []
+    self.sample_kwargs: list[dict[str, object]] = []
 
   def sample_text(self, prompt: str, **kwargs) -> str:
-    del kwargs
+    self.prompts.append(prompt)
+    self.sample_kwargs.append(dict(kwargs))
+    return self._response
+
+
+class _LegacyPolicyOverwriteModel:
+
+  def __init__(self, response: str):
+    self._response = response
+    self.prompts: list[str] = []
+    self.call_count = 0
+
+  def sample_text(
+      self,
+      prompt: str,
+      *,
+      max_tokens: int,
+      terminators=(),
+      temperature=0.5,
+      top_p=0.95,
+      top_k=64,
+      timeout=60,
+      seed=None,
+  ) -> str:
+    del max_tokens, terminators, temperature, top_p, top_k, timeout, seed
+    self.call_count += 1
     self.prompts.append(prompt)
     return self._response
 
@@ -204,6 +230,7 @@ class PolicyLayerComponentTest(unittest.TestCase):
     self.assertEqual(len(model.prompts), 1)
     self.assertIn('Grants and Subsidies', model.prompts[0])
     self.assertNotIn('Transaction Rules/Processes', model.prompts[0])
+    self.assertIn('json_schema', model.sample_kwargs[0])
 
   def test_overwrite_falls_back_to_injected_policies_when_model_output_invalid(self):
     policy_yaml_path = self._write_policy_yaml(
@@ -237,6 +264,51 @@ class PolicyLayerComponentTest(unittest.TestCase):
     self.assertIn('Replacement grant becomes active this week.', week_2_message)
     self.assertNotIn('Legacy grant amount remains in force.', week_2_message)
     self.assertIn('Existing loan cap remains in force.', week_2_message)
+
+  def test_overwrite_reassessment_retries_without_json_schema_for_legacy_models(self):
+    policy_yaml_path = self._write_policy_yaml(
+        """
+        initial_state:
+          - policy_type: Grants and Subsidies
+            policy_text: Legacy grant amount remains in force.
+          - policy_type: Transaction Rules/Processes
+            policy_text: Existing OTP workflow remains in force.
+        policies:
+          - week: 2
+            overwrite: true
+            policies:
+              - policy_type: Grants and Subsidies
+                policy_text: New grant amount replaces the legacy grant.
+        """
+    )
+    model = _LegacyPolicyOverwriteModel(
+        """
+        {
+          "policies": [
+            {
+              "policy_type": "Grants and Subsidies",
+              "policy_text": "New grant amount replaces the legacy grant."
+            }
+          ]
+        }
+        """
+    )
+    component = policy_layer.PolicyLayerComponent(
+        policy_yaml_path=policy_yaml_path,
+        model=model,
+        enabled=True,
+    )
+
+    week_2 = component.announce_policies_for_week(
+        week_number=2,
+        active_player_ids=['buyer_1'],
+    )
+    week_2_message = week_2['buyer_1'][0]
+
+    self.assertIn('New grant amount replaces the legacy grant.', week_2_message)
+    self.assertNotIn('Legacy grant amount remains in force.', week_2_message)
+    self.assertIn('Existing OTP workflow remains in force.', week_2_message)
+    self.assertEqual(model.call_count, 1)
 
 
 if __name__ == '__main__':

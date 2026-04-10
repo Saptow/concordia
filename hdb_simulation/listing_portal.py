@@ -151,18 +151,22 @@ class ListingPortalRetriever:
         """
         Search active listings and apply portal-specific post-filters.
 
-        Retrieval happens in Qdrant, while active-state and budget filtering stay
-        local so the portal can evolve those rules without rebuilding the index.
+        Retrieval now filters to active listings in Qdrant so inactive or
+        currently negotiating sellers do not consume raw top-k slots. Budget
+        filtering still stays local so the portal can evolve those rules
+        without rebuilding the index.
         """
         dense_query = self._embed_dense_text(query)
         sparse_query = self._embed_sparse_text(query)
         search_limit = max(10, 3 * limit)
+        active_filter = qdrant_schemas.active_listing_filter()
         with self._client_lock:
             if sparse_query is None:
                 results = self._client.query_points(
                     collection_name=self._collection_name,
                     query=dense_query,
                     using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                    query_filter=active_filter,
                     limit=search_limit,
                     with_payload=True,
                 )
@@ -173,17 +177,20 @@ class ListingPortalRetriever:
                         qdrant_models.Prefetch(
                             query=qdrant_schemas.sparse_embedding_to_vector(sparse_query),
                             using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
+                            filter=active_filter,
                             limit=2 * limit,
                         ),
                         qdrant_models.Prefetch(
                             query=dense_query,
                             using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                            filter=active_filter,
                             limit=2 * limit,
                         ),
                     ],
                     query=qdrant_models.RrfQuery(
                         rrf=self._rrf_ranker()
                     ),
+                    query_filter=active_filter,
                     limit=search_limit,
                     with_payload=True,
                 )

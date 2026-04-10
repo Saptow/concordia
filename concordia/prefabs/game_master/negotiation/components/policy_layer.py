@@ -16,7 +16,7 @@ from concordia.hdb_simulation.models.schemas.policy.schema import (
 )
 from concordia.language_model import language_model
 from concordia.typing import entity_component
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 import yaml
 
 
@@ -24,6 +24,12 @@ ACTIVE_POLICY_SOURCES_BLOCK_PREFIX = '[[POLICY_ACTIVE_SOURCES_JSON]]'
 ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX = '[[/POLICY_ACTIVE_SOURCES_JSON]]'
 POLICY_REASSESSMENT_PROMPT_MAX_CHARS = 3_200
 POLICY_REASSESSMENT_MAX_TOKENS = 384
+
+
+class _PolicyReassessmentResponse(BaseModel):
+  """Structured response schema for overwrite reconciliation."""
+
+  policies: list[PolicyStateEntry] = Field(default_factory=list)
 
 
 def _truncate_middle_text(text: object, *, max_chars: int) -> str:
@@ -357,13 +363,7 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
         f'{json.dumps(injected_policies, ensure_ascii=False, indent=2)}\n'
     )
     try:
-      response = self._model.sample_text(
-          _truncate_middle_text(
-              prompt,
-              max_chars=POLICY_REASSESSMENT_PROMPT_MAX_CHARS,
-          ),
-          max_tokens=POLICY_REASSESSMENT_MAX_TOKENS,
-      )
+      response = self._sample_policy_reassessment_text(prompt)
       parsed_response = json.loads(response)
       normalized_policies: list[PolicyStateEntry] = []
       for raw_policy in parsed_response.get('policies', []):
@@ -384,6 +384,33 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
           error,
       )
     return self._fallback_overwrite_policies(schedule=schedule)
+
+  def _sample_policy_reassessment_text(self, prompt: str) -> str:
+    """Request a policy reassessment, preferring structured output support."""
+    truncated_prompt = _truncate_middle_text(
+        prompt,
+        max_chars=POLICY_REASSESSMENT_PROMPT_MAX_CHARS,
+    )
+    sample_kwargs = {
+        'max_tokens': POLICY_REASSESSMENT_MAX_TOKENS,
+        'json_schema': _PolicyReassessmentResponse.model_json_schema(),
+    }
+    try:
+      return self._model.sample_text(
+          truncated_prompt,
+          **sample_kwargs,
+      )
+    except TypeError as error:
+      if 'json_schema' not in str(error):
+        raise
+      logging.info(
+          'Policy layer reassessment model does not accept json_schema; '
+          'retrying without structured outputs.'
+      )
+      return self._model.sample_text(
+          truncated_prompt,
+          max_tokens=POLICY_REASSESSMENT_MAX_TOKENS,
+      )
 
   def _apply_weekly_policy_updates(
       self,

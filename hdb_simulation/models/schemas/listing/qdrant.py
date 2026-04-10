@@ -39,6 +39,17 @@ def seller_filter(seller_id: str) -> models.Filter:
     )
 
 
+def active_listing_filter() -> models.Filter:
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key='active',
+                match=models.MatchValue(value=True),
+            ),
+        ],
+    )
+
+
 def sparse_embedding_to_vector(sparse_embedding: Any) -> models.SparseVector:
     return models.SparseVector(
         indices=[int(index) for index in sparse_embedding.indices],

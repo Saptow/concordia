@@ -22,6 +22,7 @@ from concordia.typing import entity_component
 BUYER_WALK_AWAY_URGENCY_THRESHOLD = 0.8
 SELLER_EXPLORATION_URGENCY_THRESHOLD = 0.7
 DEFAULT_URGENCY_LEVEL = 0.5
+MIN_WEEKS_BEFORE_WALK_AWAY = 1
 SELF_ACTION_TAG = '[self_action]'
 
 class UrgencyLevel(BaseModel):
@@ -780,6 +781,13 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 return "[IMPORTANT] An active offer is on the table and uncertainty is low enough to close. ACCEPT_OFFER or REJECT_OFFER now."
             return "[IMPORTANT] Shift away from open-ended exploration and toward concrete closing actions. MAKE_OFFER or ACCEPT_OFFER now."
         if not has_active_offer and not should_gather_info:
+            if self._state.rounds_elapsed < MIN_WEEKS_BEFORE_WALK_AWAY:
+                return (
+                    "[IMPORTANT] No active offer is on the table yet. During the first "
+                    "negotiation week, do not rush into MAKE_OFFER just because uncertainty "
+                    "looks manageable; keep gathering lightweight information or probing "
+                    "interest instead."
+                )
             return (
                 "[IMPORTANT] No active offer is on the table and additional "
                 "information gathering is not justified. MAKE_OFFER now."
@@ -845,7 +853,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
         # The prompt policy is state-gated: unresolved uncertainty permits one
         # more information-gathering turn; otherwise active offers should move
-        # toward closure, and urgent buyers may walk away.
+        # toward closure, and urgent buyers may walk away after at least one
+        # completed negotiation week.
         numeric_fields = self._compute_deterministic_numeric_fields()
         has_active_offer = str(numeric_fields.get('HasActiveOffer', '')).strip().lower() == 'true'
         uncertainty_summary = self._get_uncertainty_strategy_summary(
@@ -864,8 +873,12 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             urgency_level=current_urgency_level,
         )
         should_close = has_active_offer and not should_gather_info
+        can_walk_away = (
+            self._state.rounds_elapsed >= MIN_WEEKS_BEFORE_WALK_AWAY
+        )
         should_walk_away = (
             self._role == RoleType.BUYER
+            and can_walk_away
             and current_urgency_level >= self._buyer_walkaway_threshold
             and not should_gather_info
         )
@@ -910,6 +923,14 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 urgency_rule = (
                     "[IMPORTANT] Your urgency level is now high enough that "
                     "you should prefer WALK_AWAY instead of extending the negotiation."
+                )
+            elif (
+                current_urgency_level >= self._buyer_walkaway_threshold
+                and not can_walk_away
+            ):
+                urgency_rule = (
+                    "[IMPORTANT] Do not choose WALK_AWAY during the first negotiation week. "
+                    "Use this period to gather information or make concrete progress instead.\n"
                 )
             elif should_close:
                 urgency_rule = (

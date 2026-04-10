@@ -119,6 +119,11 @@ def build_market_profiles(
         'description': ' '.join(description_parts),
         'preferences': buyer['preferences'],
         'budget': buyer['budget'],
+        'reservation_price_prior': (
+            float(buyer['reservation_price_prior'])
+            if isinstance(buyer.get('reservation_price_prior'), (int, float))
+            else None
+        ),
     }
 
   seller_profiles: dict[str, dict[str, object]] = {}
@@ -172,6 +177,29 @@ def build_market_profiles(
   return buyer_profiles, seller_profiles
 
 
+def _buyer_negotiation_reservation_price(payload: Mapping[str, Any]) -> float:
+  """Use the hedonic prior as buyer reservation, clamped to budget bounds."""
+  budget = payload.get('budget', {})
+  if not isinstance(budget, Mapping):
+    budget = {}
+
+  min_price = float(budget.get('min_price', 0.0) or 0.0)
+  max_price = float(budget.get('max_price', 0.0) or 0.0)
+  if max_price > 0.0 and min_price > max_price:
+    min_price = max_price
+
+  hedonic_prior = payload.get('reservation_price_prior')
+  reservation_price = (
+      float(hedonic_prior)
+      if isinstance(hedonic_prior, (int, float))
+      else max_price
+  )
+  if max_price > 0.0:
+    reservation_price = min(reservation_price, max_price)
+  reservation_price = max(min_price, reservation_price)
+  return reservation_price
+
+
 def build_entity_params(
     buyer_profiles: Mapping[str, Mapping[str, Any]],
     seller_profiles: Mapping[str, Mapping[str, Any]],
@@ -181,6 +209,7 @@ def build_entity_params(
   participant_specs: dict[str, dict[str, object]] = {}
 
   for buyer_id, payload in buyer_profiles.items():
+    buyer_reservation_price = _buyer_negotiation_reservation_price(payload)
     buyer_params = {
         'id': buyer_id,
         'role': 'buyer',
@@ -192,13 +221,13 @@ def build_entity_params(
             'preferences': payload['preferences'],
             'own_confidence': 0.75,
             'counterpart_confidence': 0.5,
-            'own_reservation_': payload['budget']['max_price'],
+            'own_reservation_': buyer_reservation_price,
             'own_reservation_std': 1000,
             'cp_reservation_': payload['budget']['max_price'] * 0.95,
             'lambda_': 1.0,
             'a': 5.0,
             'b': 100,
-            'reservation_value': str(payload['budget']['max_price']),
+            'reservation_value': str(buyer_reservation_price),
             'flat_listing': '{}',
             'initial_observations': [],
         },
