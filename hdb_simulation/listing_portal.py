@@ -508,12 +508,9 @@ class ListingPortal:
         ) -> SearchAndRequestResult:
         """
         Buyer method to search for listings and send negotiation requests to sellers.
-         - Search results are based on the buyer's preferences and effective reservation price.
+         - Search results are based on the buyer's preferences and affordability.
         """
-        max_budget = min(
-            float(buyer.budget.max_price),
-            self.effective_reservation_price_for_buyer(buyer),
-        )
+        max_budget = float(buyer.budget.max_price)
         effective_query = self._derive_query_from_preferences(buyer, '')
         results = self.retriever.search(
             effective_query,
