@@ -161,16 +161,7 @@ def build_market_profiles(
         'flat': flat,
         'expectations': seller['expectations'],
         'initial_market_state': seller.get('initial_market_state', ''),
-        'initialization_order': int(seller.get('initialization_order', 0) or 0),
-        'relative_transaction_timing': float(
-            seller.get('relative_transaction_timing', 0.0) or 0.0
-        ),
-        'transaction_date': str(seller.get('transaction_date', '') or ''),
-        'transaction_year_month': str(seller.get('transaction_year_month', '') or ''),
         'listing_release_week': int(seller.get('listing_release_week', 1) or 1),
-        'observed_resale_price': float(
-            flat.get('observed_resale_price', 0.0) or 0.0
-        ),
         'linked_flat_id': str(seller.get('linked_flat_id', '') or ''),
     }
 
