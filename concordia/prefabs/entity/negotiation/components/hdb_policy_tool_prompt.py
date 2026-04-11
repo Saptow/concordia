@@ -21,6 +21,8 @@ DEFAULT_CURRENT_POLICY_PROMPT = (
     "No simulation-specific policies are currently in effect."
 )
 POLICY_SUMMARY_MAX_TOKENS = 768
+PRE_ACT_POLICY_STATE_MAX_CHARS = 220
+PRE_ACT_POLICY_GUIDANCE_MAX_CHARS = 420
 
 
 class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
@@ -414,11 +416,19 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._last_cache_value = None
 
     def _compose_pre_act_value(self, policy_guidance: str) -> str:
-        return self._fit_pre_act_component_text(
-            current_policy_prompt=self._current_policy_prompt,
-            policy_guidance=self._dedupe_policy_guidance(
+        compact_state = self._truncate_tail_text(
+            self._current_policy_prompt,
+            max_chars=PRE_ACT_POLICY_STATE_MAX_CHARS,
+        )
+        compact_guidance = self._truncate_tail_text(
+            self._dedupe_policy_guidance(
                 policy_guidance or self._no_relevant_policy_summary()
             ),
+            max_chars=PRE_ACT_POLICY_GUIDANCE_MAX_CHARS,
+        )
+        return self._fit_pre_act_component_text(
+            current_policy_prompt=compact_state,
+            policy_guidance=compact_guidance,
         )
 
     @staticmethod

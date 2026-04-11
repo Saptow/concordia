@@ -24,6 +24,7 @@ SELLER_EXPLORATION_URGENCY_THRESHOLD = 0.7
 DEFAULT_URGENCY_LEVEL = 0.5
 MIN_WEEKS_BEFORE_WALK_AWAY = 1
 SELF_ACTION_TAG = '[self_action]'
+MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS = 360
 
 class UrgencyLevel(BaseModel):
     """Schema for urgency level output."""
@@ -882,6 +883,18 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             )
         return summary
 
+    @staticmethod
+    def _compact_strategy_summary(summary: str) -> str:
+        normalized_lines = [
+            " ".join(str(line).split())
+            for line in str(summary or "").splitlines()
+            if str(line).strip()
+        ]
+        normalized = " | ".join(normalized_lines)
+        if len(normalized) <= MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS:
+            return normalized
+        return normalized[: MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS - 3].rstrip() + '...'
+
     def _make_pre_act_value(self) -> str:
         """Provide simple strategy guidance before each action."""
         action_context = ''
@@ -927,18 +940,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             'scenario_summary', 'Unknown'
         )
         self._last_numeric_fields = dict(numeric_fields)
-        numeric_summary = self._numeric_fact_summary(numeric_fields)
-        negotiation_numbers = (
-            f"(DO NOT REVEAL/DISCUSS) Current Reservation Price (in SGD):{self._state.current_position:.2f}\n"
-            f"(DO NOT REVEAL/DISCUSS) Opponent Reservation Price (in SGD) :{self._display_position(self._state.opponent_position)}\n"
-            f"Number of weeks since negotiation started:{self._state.rounds_elapsed}\n"
-            f"Failed Negotiations Count:{self._failed_negotiations_count}\n"
-            f"Current Urgency Level (0-1):{current_urgency_level}\n"
-            f"Buyer Walk-Away Threshold (0-1):{self._buyer_walkaway_threshold}\n"
-            f"Seller Exploration Threshold (0-1):{self._seller_exploration_threshold}\n"
-            f"{numeric_summary}\n"
-        )
-
         # Get negotiation strategy guidance based on urgency and role
         information_focus = self._build_information_focus(
             uncertainty_summary,
@@ -1004,10 +1005,32 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
 
 
         self.strategy_summary = base_strategy + urgency_rule
-        return ('\n'
-            f"{negotiation_numbers}"
-            f"Strategy Summary:{self.strategy_summary}\n"
+        lines = [
+            f"WeeksElapsed={self._state.rounds_elapsed}",
+            f"FailedNegotiations={self._failed_negotiations_count}",
+            f"UrgencyLevel={current_urgency_level:.2f}",
+            (
+                f"UrgencyThreshold={self._buyer_walkaway_threshold:.2f}"
+                if self._role == RoleType.BUYER
+                else f"UrgencyThreshold={self._seller_exploration_threshold:.2f}"
+            ),
+            f"HasActiveOffer={numeric_fields.get('HasActiveOffer', 'False')}",
+            f"ActiveOfferPrice={numeric_fields.get('ActiveOfferPrice', 'NA')}",
+            f"OwnVsOpponentReservation={numeric_fields.get('OwnVsOpponentReservation', 'Unknown')}",
+            f"DealOutlook={self._deal_outlook_summary(numeric_fields)}",
+            f"StrategySummary={self._compact_strategy_summary(self.strategy_summary)}",
+        ]
+        offer_key = (
+            'OfferWithinOwnReservation'
+            if self._role == RoleType.BUYER
+            else 'OfferMeetsOwnReservation'
         )
+        if offer_key in numeric_fields:
+            lines.insert(
+                6,
+                f"{offer_key}={numeric_fields.get(offer_key, 'Unknown')}",
+            )
+        return '\n'.join(lines) + '\n'
 
     def post_act(self, action_attempt: str) -> str:
         """Update strategy state after each action."""
