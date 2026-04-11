@@ -53,7 +53,7 @@ HDB_CONTEXT_ANCHOR = (
 )
 ACTION_REASONING_MEMORY_WINDOW = 6
 MIN_ACTION_REASONING_MEMORY_WINDOW = 4
-MAX_ACTION_REASONING_MEMORY_WINDOW = 10
+MAX_ACTION_REASONING_MEMORY_WINDOW = 8
 
 
 def _clamp_memory_window(value: object) -> int:
@@ -95,29 +95,32 @@ def _build_action_reasoning_memory_window_prompt(
     agent_name: str,
     description: str,
 ) -> str:
+    lower = MIN_ACTION_REASONING_MEMORY_WINDOW
+    upper = MAX_ACTION_REASONING_MEMORY_WINDOW
+    balanced = ACTION_REASONING_MEMORY_WINDOW
     return (
         '# Role\n'
         'You decide how many recent memories a negotiator should review before acting.\n\n'
         '# Task\n'
-        'Return `num_memories_to_retrieve` as a single integer between 4 and 12.\n'
+        f'Return `num_memories_to_retrieve` as a single integer between {lower} and {upper}.\n'
         'The choice must be based only on the negotiator persona in the description.\n\n'
         '# Heuristic\n'
         '- Careful, reflective, analytical, detail-heavy, strategic, or cautious personas should get longer memory windows.\n'
         '- Spontaneous, impulsive, present-focused, low-deliberation, or decisive personas should get shorter memory windows.\n'
-        '- Balanced or ambiguous personas should stay near 6.\n\n'
+        f'- Balanced or ambiguous personas should stay near {balanced}.\n\n'
         '# Few-shot examples\n'
         'Example 1\n'
         'Description: A careful planner who double-checks details, thinks through trade-offs, remembers prior conversations, and dislikes making rushed decisions.\n'
-        'Output: {"num_memories_to_retrieve": 10}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {upper}}}\n\n'
         'Example 2\n'
         'Description: Lives in the moment, reacts quickly, dislikes overthinking, and prefers to decide based on the latest signal rather than long context.\n'
-        'Output: {"num_memories_to_retrieve": 4}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {lower}}}\n\n'
         'Example 3\n'
         'Description: Generally practical and balanced. Reviews some recent context before acting, but does not dwell too long on the past.\n'
-        'Output: {"num_memories_to_retrieve": 6}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {balanced}}}\n\n'
         'Example 4\n'
         'Description: Highly strategic and methodical, tracks patterns across prior exchanges, and adjusts carefully based on accumulated context.\n'
-        'Output: {"num_memories_to_retrieve": 11}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {upper}}}\n\n'
         '# Rules\n'
         '- Use only the description below.\n'
         '- Return JSON only.\n'
@@ -360,6 +363,7 @@ class Entity(prefab_lib.Prefab):
             answer_prefix=f'{agent_name} is a {role} who',
             add_to_memory=False,
             memory_tag='[self perception]',
+            num_memories_to_retrieve=action_reasoning_memory_window,
             persist_pre_act_value_across_updates=True,
         )
 
@@ -373,7 +377,8 @@ class Entity(prefab_lib.Prefab):
             answer_prefix=f'{agent_name} is currently',
             add_to_memory=False,
             memory_tag='[situation perception]',
-            components = [uncertain_key]
+            components = [uncertain_key],
+            num_memories_to_retrieve=action_reasoning_memory_window,
         )
 
         has_active_offer = (
