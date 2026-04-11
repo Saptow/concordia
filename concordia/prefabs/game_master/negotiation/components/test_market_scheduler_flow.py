@@ -1,5 +1,4 @@
 import copy
-import json
 import unittest
 
 from concordia.hdb_simulation.models.schemas import common as common_schemas
@@ -558,20 +557,10 @@ class NegotiationListingObservationTest(unittest.TestCase):
         'Listing handoff context for this negotiation:',
         observation,
     )
-    _, _, payload_text = observation.partition(
+    _, _, listing_summary = observation.partition(
         'Listing handoff context for this negotiation:\n'
     )
-    handoff_state = json.loads(payload_text)
-    self.assertEqual(
-        handoff_state['listing_record']['listing_id'],
-        'listing::seller_2023_00006',
-    )
-    self.assertEqual(
-        handoff_state['listing_record']['listing_summary'],
-        listing_record.listing_summary,
-    )
-    self.assertEqual(handoff_state['buyer_state']['id'], 'buyer_2023_00001')
-    self.assertEqual(handoff_state['seller_state']['id'], 'seller_2023_00006')
+    self.assertEqual(listing_summary, listing_record.listing_summary)
 
 
 class ListingReleaseTest(unittest.TestCase):

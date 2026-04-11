@@ -38,6 +38,9 @@ from concordia.hdb_simulation.pipeline.financial_feasibility import (
     compute_buyer_financials,
     resolve_income_band_upper,
 )
+from concordia.hdb_simulation.pipeline.resident_population_processing import (
+    build_planning_area_age_groups,
+)
 
 
 DEFAULT_LLM_RETRIES = 3
@@ -47,6 +50,27 @@ MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
 MARKET_QUANTILE_DOMINANCE_GRID = (0.2, 0.4, 0.6, 0.8)
 MIN_FEASIBLE_RETAINED_BUYERS_PER_SELLER = 5
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
+DEFAULT_SURVEY_ARCHETYPES_DIR = (
+    Path(__file__).resolve().parents[3] / "data" / "processed" / "survey"
+)
+DEFAULT_BUYER_ARCHETYPES_PATH = DEFAULT_SURVEY_ARCHETYPES_DIR / "buyer_archetypes.json"
+DEFAULT_SELLER_ARCHETYPES_PATH = (
+    DEFAULT_SURVEY_ARCHETYPES_DIR / "seller_archetypes.json"
+)
+BUYER_AGE_PRIOR_GROUPS = (
+    "20 - 24",
+    "25 - 29",
+    "30 - 34",
+    "35 - 39",
+    "40 - 44",
+    "45 - 49",
+    "50 - 54",
+    "55 - 59",
+    "60 - 64",
+    "65 - 69",
+    "70 - 74",
+    "75 - 79",
+)
 
 
 FLAT_TYPE_LABELS = {
@@ -70,53 +94,6 @@ FLAT_TYPE_DWELLING_LABELS = {
         "HDB Dwellings",
     ],
 }
-
-DEFAULT_BUYER_ARCHETYPES = [ # Dummy ones for now until the real data is plugged in
-    {
-        "archetype_type": "family",
-        "description": "Values space, school access, and practical family-oriented amenities.",
-        "preferences": ["larger flat types", "good school access", "nearby hawker centres"],
-    },
-    {
-        "archetype_type": "convenience_seeker",
-        "description": "Prioritises MRT access, town convenience, and day-to-day transport.",
-        "preferences": ["near MRT", "near malls", "convenient commute"],
-    },
-    {
-        "archetype_type": "value_guard",
-        "description": "Emphasises affordability, nearby comparables, and avoiding overpaying.",
-        "preferences": ["lower price", "strong comparables", "budget discipline"],
-    },
-    {
-        "archetype_type": "investor",
-        "description": "Prefers stronger remaining lease and larger usable floor area.",
-        "preferences": ["longer remaining lease", "more floor area", "overall livability"],
-    },
-]
-
-DEFAULT_SELLER_ARCHETYPES = [ # Dummy ones for now until the real data is plugged in
-    {
-        "archetype_type": "upgrader",
-        "description": "Selling to move to a larger or better-located home.",
-        "reasons": ["needs more space", "wants a better location", "timing an upgrade"],
-    },
-    {
-        "archetype_type": "rightsizer",
-        "description": "Selling to move into a smaller and more manageable home.",
-        "reasons": ["children moved out", "lower upkeep", "simpler living arrangement"],
-    },
-    {
-        "archetype_type": "relocator",
-        "description": "Selling because of a relocation in work, family, or caregiving needs.",
-        "reasons": ["job relocation", "caregiving responsibilities", "closer to family"],
-    },
-    {
-        "archetype_type": "liquidity_seeker",
-        "description": "Selling to unlock liquidity or improve household finances.",
-        "reasons": ["free up cash", "reduce financial pressure", "rebalance household finances"],
-    },
-]
-
 
 def _clean_amenity_name(value: Any) -> str:
     """Normalize amenity names and drop placeholder/null-like values."""
@@ -144,6 +121,48 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+def _coerce_planning_areas(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        text = str(value or "").strip()
+        items = [text] if text else []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = _normalize_text(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    return tuple(cleaned)
+
+
+def _planning_area_keys(value: Any) -> set[str]:
+    return {_normalize_text(item) for item in _coerce_planning_areas(value)}
+
+
+def _matches_planning_area(value: Any, planning_areas: Any) -> bool:
+    normalized_value = _normalize_text(value)
+    if not normalized_value:
+        return False
+    return normalized_value in _planning_area_keys(planning_areas)
+
+
+def _planning_area_label(value: Any) -> str:
+    planning_areas = _coerce_planning_areas(value)
+    if not planning_areas:
+        return ""
+    if len(planning_areas) == 1:
+        return planning_areas[0]
+    return ", ".join(planning_areas)
+
+
 def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +177,24 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+
+def _load_archetype_config(
+    path: Path,
+    *,
+    label: str,
+) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{label} archetype JSON not found at {path}. "
+            "Generate it with analysis/generate_survey_archetypes.py or "
+            "provide a valid config path."
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(f"{label} archetype config must be a non-empty JSON list.")
+    logging.info("Loaded %s %s archetype entries from %s.", len(payload), label, path)
+    return payload
 
 
 def _flat_type_from_row(value: Any) -> str:
@@ -200,6 +237,13 @@ def _income_age_group_for_band(age_band: str, rng: random.Random) -> str:
     if lower >= 85:
         return "85 Years & Over"
     return f"{lower} - {upper} Years"
+
+
+def _canonical_buyer_age_prior_group(value: Any) -> str:
+    allowed_labels = {
+        _normalize_text(label): label for label in BUYER_AGE_PRIOR_GROUPS
+    }
+    return allowed_labels.get(_normalize_text(value), "")
 
 
 def _age_matches_target(value: Any, *, age: int) -> bool:
@@ -274,7 +318,7 @@ def _sample_nemotron_donor(
     donors: pd.DataFrame,
     *,
     rng: random.Random,
-    planning_area: str,
+    planning_area: Any,
     age: int | None = None,
     marital_status: str | None = None,
     education_level: str | None = None,
@@ -282,11 +326,11 @@ def _sample_nemotron_donor(
 ) -> dict[str, Any]:
     """Sample a donor row, narrowing by planning area and available profile fields."""
     candidates = donors.copy()
-    target_planning_area = _normalize_text(planning_area)
+    target_planning_areas = _planning_area_keys(planning_area)
 
-    if target_planning_area:
+    if target_planning_areas:
         subset = candidates[
-            candidates["planning_area"].map(_normalize_text) == target_planning_area
+            candidates["planning_area"].map(_normalize_text).isin(target_planning_areas)
         ]
         if not subset.empty:
             candidates = subset
@@ -353,13 +397,13 @@ def _hedonic_feature_frame(flats: list[dict[str, Any]]) -> pd.DataFrame:
 def _select_hedonic_training_flats(
     training_flats: list[dict[str, Any]],
     *,
-    town: str,
+    town: Any,
     preferred_flat_types: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Filter the fixed pre-window hedonic pool to town, then to preferred flat types if available."""
     target_flat_types = {flat_type for flat_type in (preferred_flat_types or []) if flat_type}
     town_flats = [
-        flat for flat in training_flats if _normalize_text(flat["town"]) == _normalize_text(town)
+        flat for flat in training_flats if _matches_planning_area(flat["town"], town)
     ]
     if not target_flat_types:
         return town_flats
@@ -854,6 +898,7 @@ def _constrain_buyer_preferences_to_reachable_market(
         for value in reachable_market_summary.get("reachable_towns", ())
         if str(value).strip()
     ]
+    allowed_town_keys = _planning_area_keys(allowed_towns)
 
     constrained_items: list[BuyerPreferenceItem] = []
     original_flat_type_items = preferences.items_for("flat_type")
@@ -864,7 +909,7 @@ def _constrain_buyer_preferences_to_reachable_market(
                 constrained_items.append(item)
             continue
         if item.category == "town":
-            if item.description.strip() in allowed_towns:
+            if _normalize_text(item.description) in allowed_town_keys:
                 constrained_items.append(item)
             continue
         constrained_items.append(item)
@@ -905,10 +950,12 @@ def _load_town_transactions(config: SegmentConfig) -> pd.DataFrame:
     """Load all successful resale transactions for the configured town."""
     frame = pd.read_csv(config.resale_path)
     town_rows = frame[
-        frame["town"].map(_normalize_text) == _normalize_text(config.town)
+        frame["town"].map(lambda value: _matches_planning_area(value, config.town))
     ].copy()
     if town_rows.empty:
-        raise ValueError(f"No resale rows found for town={config.town!r}.")
+        raise ValueError(
+            f"No resale rows found for planning_area={_planning_area_label(config.town)!r}."
+        )
 
     town_rows["Date"] = pd.to_datetime(town_rows["Date"])
     town_rows["flat_type_label"] = town_rows["flat_type"].map(_flat_type_from_row)
@@ -924,7 +971,7 @@ def _load_transactions(config: SegmentConfig) -> pd.DataFrame:
     if filtered.empty:
         raise ValueError(
             "No successful resale rows found for "
-            f"town={config.town!r} year={config.year} "
+            f"planning_area={_planning_area_label(config.town)!r} year={config.year} "
             f"segment={config.segment_label!r}."
         )
     return filtered.reset_index(drop=True)
@@ -934,9 +981,47 @@ def _restrain_transactions(
     transactions: pd.DataFrame,
     *,
     restrained_seller_count: int | None,
+    sampled_flat_ratio: float | None = None,
     rng: random.Random | None = None,
 ) -> pd.DataFrame:
     """Downsample transactions while preserving the observed flat-type mix."""
+    if sampled_flat_ratio is not None:
+        if not (0 < sampled_flat_ratio <= 1):
+            raise ValueError("sampled_flat_ratio must be within (0, 1].")
+        if sampled_flat_ratio >= 1:
+            return transactions.reset_index(drop=True)
+
+        selected_frames: list[pd.DataFrame] = []
+        normalized_towns = transactions["town"].map(_normalize_text)
+        ordered_towns = list(dict.fromkeys(normalized_towns.tolist()))
+        for normalized_town in ordered_towns:
+            town_rows = transactions[normalized_towns == normalized_town].copy()
+            if town_rows.empty:
+                continue
+            town_target_count = max(
+                1,
+                math.ceil(len(town_rows) * sampled_flat_ratio),
+            )
+            if town_target_count >= len(town_rows):
+                selected_frames.append(town_rows)
+                continue
+            selected_frames.append(
+                _restrain_transactions(
+                    town_rows,
+                    restrained_seller_count=town_target_count,
+                    sampled_flat_ratio=None,
+                    rng=rng,
+                )
+            )
+
+        if not selected_frames:
+            return transactions.iloc[0:0].copy().reset_index(drop=True)
+        return (
+            pd.concat(selected_frames, ignore_index=True)
+            .sort_values(["Date", "sale_id"])
+            .reset_index(drop=True)
+        )
+
     if restrained_seller_count is None:
         return transactions.reset_index(drop=True)
     if restrained_seller_count <= 0:
@@ -1004,13 +1089,13 @@ def _restrain_transactions(
 def _build_hedonic_training_flats(
     transactions: pd.DataFrame,
     *,
-    town: str,
+    town: Any,
     window_start: pd.Timestamp,
 ) -> list[dict[str, Any]]:
     """Build the fixed 6-month pre-window pool used for hedonic calibration."""
     cutoff_date = window_start - pd.Timedelta(days=183)
     training_rows = transactions[
-        (transactions["town"].map(_normalize_text) == _normalize_text(town))
+        (transactions["town"].map(lambda value: _matches_planning_area(value, town)))
         & (transactions["Date"] < window_start)
         & (transactions["Date"] >= cutoff_date)
     ].copy()
@@ -1019,7 +1104,7 @@ def _build_hedonic_training_flats(
     for row in training_rows.itertuples(index=False):
         training_flats.append(
             {
-                "town": town,
+                "town": str(row.town).strip(),
                 "transaction_date": pd.Timestamp(row.Date).date().isoformat(),
                 "flat_type": str(row.flat_type_label),
                 "flat_model": str(row.flat_model).strip(),
@@ -1166,13 +1251,13 @@ def _build_flat_universe(
         observed_price = float(row.resale_price)
         past_price_trends = _build_past_price_trends(
             town_transactions,
-            town=config.town,
+            town=str(row.town).strip(),
             flat_type=str(row.flat_type_label),
             reference_date=transaction_date,
             fallback_price=observed_price,
         )
 
-        normalized_town = _normalize_text(config.town).replace(" ", "_")
+        normalized_town = _normalize_text(row.town).replace(" ", "_")
         flat_id_prefix = f"{config.year}_{normalized_town}"
         if not config.is_full_year_segment:
             flat_id_prefix = f"{flat_id_prefix}_{config.segment_label}"
@@ -1180,7 +1265,7 @@ def _build_flat_universe(
         flats.append(
             {
                 "flat_id": flat_id,
-                "town": config.town,
+                "town": str(row.town).strip(),
                 "year": int(config.year),
                 "segment": config.segment_label,
                 "transaction_date": transaction_date.date().isoformat(),
@@ -1397,19 +1482,35 @@ def _build_sellers(
 
 def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
     """Load the town-level buyer age prior used to seed the broad buyer pool."""
+    planning_areas = _coerce_planning_areas(town)
     frame = pd.read_csv(path).fillna("")
+    if not {"planning_area", "age_group", "population"}.issubset(frame.columns):
+        frame = pd.concat(
+            [build_planning_area_age_groups(planning_area) for planning_area in planning_areas],
+            ignore_index=True,
+        ).fillna("")
     subset = frame[
-        (frame["planning_area"].map(_normalize_text) == _normalize_text(town))
-        & (frame["age_group"].map(_normalize_text) != "total")
+        frame["planning_area"].map(lambda value: _matches_planning_area(value, town))
     ].copy()
+    subset["age_group"] = subset["age_group"].map(_canonical_buyer_age_prior_group)
+    subset = subset[subset["age_group"].astype(bool)].copy()
     if subset.empty:
-        raise ValueError(f"No buyer age prior found for planning area={town!r}.")
+        raise ValueError(
+            "No buyer age prior found for planning_area="
+            f"{_planning_area_label(town)!r} within the supported age range "
+            f"{BUYER_AGE_PRIOR_GROUPS[0]!r} to {BUYER_AGE_PRIOR_GROUPS[-1]!r}."
+        )
+    age_group_order = {
+        label: index for index, label in enumerate(BUYER_AGE_PRIOR_GROUPS)
+    }
     grouped = (
         subset.groupby("age_group", as_index=False)["population"]
         .sum()
-        .sort_values("age_group")
         .reset_index(drop=True)
     )
+    grouped["age_group_order"] = grouped["age_group"].map(age_group_order)
+    grouped = grouped.sort_values("age_group_order").reset_index(drop=True)
+    grouped = grouped.drop(columns=["age_group_order"])
     grouped["population"] = grouped["population"].astype(float)
     return grouped[grouped["population"] > 0].copy()
 
@@ -1583,6 +1684,15 @@ def _build_broad_buyers(
             planning_area=config.town,
             age=age,
         )
+        donor_planning_area = str(donor.get("planning_area", "")).strip()
+        planning_areas = _coerce_planning_areas(config.town)
+        if donor_planning_area and _matches_planning_area(
+            donor_planning_area,
+            planning_areas,
+        ):
+            buyer_town = donor_planning_area
+        else:
+            buyer_town = planning_areas[0] if planning_areas else str(config.town)
 
         marital_status = (
             str(donor.get("marital_status", "")).strip()
@@ -1620,7 +1730,7 @@ def _build_broad_buyers(
 
         buyer_record = {
             "buyer_id": f"buyer_{config.year}_{index:05d}",
-            "town": config.town,
+            "town": buyer_town,
             "age": age,
             "income_band": income_band,
             "marital_status": marital_status,
@@ -2008,7 +2118,10 @@ def _rank_candidate_buyer_ids_for_seller(
             continue
         if preference_profile and flat.get("flat_type") in preference_profile.values_for("flat_type"):
             score += 3
-        if preference_profile and flat.get("town") in preference_profile.values_for("town"):
+        if preference_profile and _matches_planning_area(
+            flat.get("town"),
+            preference_profile.values_for("town"),
+        ):
             score += 2
         price_gap = abs(
             float(buyer.get("financials", {}).get("effective_ceiling", 0.0))
@@ -2311,8 +2424,8 @@ def build_transaction_conditioned_segment(
 ) -> dict[str, Any]:
     """Run the end-to-end preprocessing pipeline for one town-year market segment."""
     logging.info(
-        "Building transaction-conditioned market segment for town=%s year=%s segment=%s.",
-        config.town,
+        "Building transaction-conditioned market segment for planning_area=%s year=%s segment=%s.",
+        _planning_area_label(config.town),
         config.year,
         config.segment_label,
     )
@@ -2330,37 +2443,18 @@ def build_transaction_conditioned_segment(
         "Loaded demographic priors and distribution tables from configured CSV inputs."
     )
     donors = _load_nemotron_pool(config.nemotron_dir)
-    if config.survey_archetypes_path is None:
-        archetypes = DEFAULT_BUYER_ARCHETYPES
-        logging.info(
-            "Using default buyer archetypes because no survey archetypes path was provided."
-        )
-    else:
-        archetypes = json.loads(config.survey_archetypes_path.read_text(encoding="utf-8"))
-        if not isinstance(archetypes, list) or not archetypes:
-            raise ValueError("Buyer archetype config must be a non-empty JSON list.")
-        logging.info(
-            "Loaded %s buyer archetype entries from %s.",
-            len(archetypes),
-            config.survey_archetypes_path,
-        )
-
-    if config.seller_archetypes_path is None:
-        seller_archetypes = DEFAULT_SELLER_ARCHETYPES
-        logging.info(
-            "Using default seller archetypes because no seller archetypes path was provided."
-        )
-    else:
-        seller_archetypes = json.loads(
-            config.seller_archetypes_path.read_text(encoding="utf-8")
-        )
-        if not isinstance(seller_archetypes, list) or not seller_archetypes:
-            raise ValueError("Seller archetype config must be a non-empty JSON list.")
-        logging.info(
-            "Loaded %s seller archetype entries from %s.",
-            len(seller_archetypes),
-            config.seller_archetypes_path,
-        )
+    buyer_archetypes_path = config.survey_archetypes_path or DEFAULT_BUYER_ARCHETYPES_PATH
+    seller_archetypes_path = (
+        config.seller_archetypes_path or DEFAULT_SELLER_ARCHETYPES_PATH
+    )
+    archetypes = _load_archetype_config(
+        buyer_archetypes_path,
+        label="buyer",
+    )
+    seller_archetypes = _load_archetype_config(
+        seller_archetypes_path,
+        label="seller",
+    )
 
     town_transactions = _load_town_transactions(config)
     transactions = _load_transactions(config)
@@ -2382,10 +2476,13 @@ def build_transaction_conditioned_segment(
     )
     sampled_transaction_count: int | None = None
     if config.sampled_flat_ratio is not None and config.sampled_flat_ratio < 1:
-        sampled_transaction_count = max(
-            1,
-            math.ceil(len(transactions) * config.sampled_flat_ratio),
+        planning_area_sample_counts = (
+            transactions["town"]
+            .map(_normalize_text)
+            .value_counts(sort=False)
+            .map(lambda count: max(1, math.ceil(int(count) * config.sampled_flat_ratio)))
         )
+        sampled_transaction_count = int(planning_area_sample_counts.sum())
         if sampled_transaction_count >= len(transactions):
             sampled_transaction_count = None
     seller_market_attempts = (
@@ -2403,11 +2500,12 @@ def build_transaction_conditioned_segment(
         restrained_transactions = _restrain_transactions(
             transactions,
             restrained_seller_count=sampled_transaction_count,
+            sampled_flat_ratio=config.sampled_flat_ratio if sampled_transaction_count is not None else None,
             rng=rng if sampled_transaction_count is not None else None,
         )
         if sampled_transaction_count is not None:
             logging.info(
-                "Seller market sample %s/%s restrained seller pool to %s transaction(s) using sampled_flat_ratio=%s; oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
+                "Seller market sample %s/%s restrained seller pool to %s transaction(s) using per-planning-area sampled_flat_ratio=%s; oversampled buyer pool multiplier=%s and retained buyer pool multiplier=%s.",
                 seller_attempt,
                 seller_market_attempts,
                 len(restrained_transactions),
@@ -2513,7 +2611,26 @@ def save_segment_outputs(bundle: dict[str, Any], output_dir: Path) -> dict[str, 
     _write_jsonl(buyers_retained_path, bundle["buyers_retained"])
 
     manifest = {
-        "town": bundle["flats"][0]["town"] if bundle["flats"] else "",
+        "town": (
+            bundle["flats"][0]["town"]
+            if len({str(flat.get("town", "")).strip() for flat in bundle["flats"]}) <= 1
+            else _planning_area_label(
+                sorted(
+                    {
+                        str(flat.get("town", "")).strip()
+                        for flat in bundle["flats"]
+                        if str(flat.get("town", "")).strip()
+                    }
+                )
+            )
+        ) if bundle["flats"] else "",
+        "planning_areas": sorted(
+            {
+                str(flat.get("town", "")).strip()
+                for flat in bundle["flats"]
+                if str(flat.get("town", "")).strip()
+            }
+        ),
         "year": bundle["flats"][0]["year"] if bundle["flats"] else "",
         "segment": bundle["flats"][0]["segment"] if bundle["flats"] else "full_year",
         "market_segment_name": output_dir.name,

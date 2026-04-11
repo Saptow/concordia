@@ -360,13 +360,16 @@ def extract_listing_handoff_state(observation: str) -> Dict[str, Any] | None:
     if marker not in text:
         return None
     _, _, payload = text.partition(marker)
+    payload_text = str(payload).strip()
+    if not payload_text:
+        return {}
     payload_json = extract_first_json_object(payload)
     if not payload_json:
-        return None
+        return {'listing_summary': payload_text}
     try:
         parsed = json.loads(payload_json)
     except json.JSONDecodeError:
-        return None
+        return {'listing_summary': payload_text}
     return parsed if isinstance(parsed, dict) else None
 
 

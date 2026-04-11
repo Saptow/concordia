@@ -18,7 +18,6 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -284,6 +283,8 @@ def _encode_texts(
     batch_size: int,
     local_files_only: bool,
 ) -> np.ndarray:
+    from sentence_transformers import SentenceTransformer
+
     LOGGER.info("Loading embedding model %s on %s.", model_name, device)
     model = SentenceTransformer(
         model_name,

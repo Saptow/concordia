@@ -14,7 +14,6 @@ from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components.uncertain_buyer import UncertainBuyer
 from concordia.prefabs.entity.negotiation.components.uncertain_seller import UncertainSeller
-from concordia.typing import entity_component
 
 # Calibrated threshold: literature supports a monotonic link between high time
 # pressure and impasse/exit risk, but not a specific numeric cutoff. We use 0.8
@@ -126,34 +125,18 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             if self._prefilled_seller_exploration_threshold is not None
             else SELLER_EXPLORATION_URGENCY_THRESHOLD
         )
+        self._state = SimpleStrategyState()
         self._urgency_level = DEFAULT_URGENCY_LEVEL
         self._failed_negotiations_count = 0
-        self._initialise_strategy(uncertain_context)
-    
-    def _initialise_strategy(self, uncertain_context: Union[UncertainBuyer, UncertainSeller]):
-        """Initialize reservation beliefs and cached threshold defaults."""
-        if self._role == RoleType.BUYER:
-            current_position = uncertain_context._beliefs['own_reservation'].get_expected_mean
-            counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
-        else:
-            current_position = uncertain_context._beliefs['own_reservation'].get_expected_mean
-            counterpart_position = uncertain_context._beliefs['counterpart_reservation'].get_expected_mean
+        self._sync_positions_from_beliefs()
 
-        self._state = SimpleStrategyState(
-            current_position=current_position,
-            opponent_position=counterpart_position,
+    def _sync_positions_from_beliefs(self) -> None:
+        """Refresh cached reservation positions from the uncertainty component."""
+        beliefs = self._uncertainty_context._beliefs
+        self._state.current_position = beliefs['own_reservation'].get_expected_mean
+        self._state.opponent_position = (
+            beliefs['counterpart_reservation'].get_expected_mean
         )
-        self._urgency_level = DEFAULT_URGENCY_LEVEL
-        if self._role == RoleType.BUYER:
-            if self._prefilled_buyer_walkaway_threshold is not None:
-                self._buyer_walkaway_threshold = (
-                    self._prefilled_buyer_walkaway_threshold
-                )
-        elif self._role == RoleType.SELLER:
-            if self._prefilled_seller_exploration_threshold is not None:
-                self._seller_exploration_threshold = (
-                    self._prefilled_seller_exploration_threshold
-                )
 
     @staticmethod
     def _coerce_probability(value: Any) -> float | None:
@@ -254,66 +237,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 )
             return 0.5
 
-    def _judge_walkaway_threshold(self) -> float:
-        """Infer how much urgency this buyer tolerates before walking away."""
-        if self._role != RoleType.BUYER:
-            return BUYER_WALK_AWAY_URGENCY_THRESHOLD
-
-        prompt = self._build_walkaway_threshold_prompt(
-            agent_name=self._agent_name,
-            description=self._description,
-        )
-
-        try:
-            response = self._model.sample_text(
-                prompt=prompt,
-                json_schema=WalkAwayThreshold.model_json_schema(),
-                max_tokens=120,
-            )
-            return self._parse_walkaway_threshold_response(
-                response,
-                agent_name=self._agent_name,
-                verbose=self._verbose,
-            )
-        except Exception as error:
-            if self._verbose:
-                print(
-                    f'[{self._agent_name}] Failed to parse walk-away threshold, defaulting to '
-                    f'{BUYER_WALK_AWAY_URGENCY_THRESHOLD:.2f}. Error: {error}'
-                )
-            return BUYER_WALK_AWAY_URGENCY_THRESHOLD
-
-    def _judge_seller_exploration_threshold(self) -> float:
-        """Infer seller urgency tolerance for exploratory questioning."""
-        if self._role != RoleType.SELLER:
-            return SELLER_EXPLORATION_URGENCY_THRESHOLD
-
-        prompt = self._build_seller_exploration_threshold_prompt(
-            agent_name=self._agent_name,
-            description=self._description,
-            initial_window_position=self._initial_window_position,
-            initial_window_size=self._initial_window_size,
-        )
-
-        try:
-            response = self._model.sample_text(
-                prompt=prompt,
-                json_schema=SellerExplorationThreshold.model_json_schema(),
-                max_tokens=120,
-            )
-            return self._parse_seller_exploration_threshold_response(
-                response,
-                agent_name=self._agent_name,
-                verbose=self._verbose,
-            )
-        except Exception as error:
-            if self._verbose:
-                print(
-                    f'[{self._agent_name}] Failed to parse seller exploration threshold, '
-                    f'defaulting to {SELLER_EXPLORATION_URGENCY_THRESHOLD:.2f}. Error: {error}'
-                )
-            return SELLER_EXPLORATION_URGENCY_THRESHOLD
-
     @staticmethod
     def _build_walkaway_threshold_prompt(
         *,
@@ -409,42 +332,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "# Output\n"
             "- Match the schema exactly.\n"
         )
-
-    @staticmethod
-    def _parse_walkaway_threshold_response(
-        response: str,
-        *,
-        agent_name: str,
-        verbose: bool = False,
-    ) -> float:
-        try:
-            parsed = WalkAwayThreshold.model_validate_json(response)
-            return parsed.walkaway_threshold
-        except Exception as error:
-            if verbose:
-                print(
-                    f'[{agent_name}] Failed to parse walk-away threshold, defaulting to '
-                    f'{BUYER_WALK_AWAY_URGENCY_THRESHOLD:.2f}. Error: {error}'
-                )
-            return BUYER_WALK_AWAY_URGENCY_THRESHOLD
-
-    @staticmethod
-    def _parse_seller_exploration_threshold_response(
-        response: str,
-        *,
-        agent_name: str,
-        verbose: bool = False,
-    ) -> float:
-        try:
-            parsed = SellerExplorationThreshold.model_validate_json(response)
-            return parsed.exploration_threshold
-        except Exception as error:
-            if verbose:
-                print(
-                    f'[{agent_name}] Failed to parse seller exploration threshold, defaulting to '
-                    f'{SELLER_EXPLORATION_URGENCY_THRESHOLD:.2f}. Error: {error}'
-                )
-            return SELLER_EXPLORATION_URGENCY_THRESHOLD
 
     def apply_listing_handoff(
         self,
@@ -898,12 +785,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     def _make_pre_act_value(self) -> str:
         """Provide simple strategy guidance before each action."""
         action_context = ''
-        if self._role == RoleType.BUYER:
-            self._state.current_position = self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
-            self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
-        elif self._role == RoleType.SELLER:
-            self._state.current_position = self._uncertainty_context._beliefs['own_reservation'].get_expected_mean
-            self._state.opponent_position = self._uncertainty_context._beliefs['counterpart_reservation'].get_expected_mean
+        self._sync_positions_from_beliefs()
 
         # The prompt policy is state-gated: unresolved uncertainty permits one
         # more information-gathering turn; otherwise active offers should move
@@ -1066,7 +948,9 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         super().update()
     def get_pre_act_label(self) -> str:
         return 'Negotiation Strategy State and Numeric Facts'
-
+    def get_pre_act_value(self) -> str:
+        return super().get_pre_act_value()
+    
     @staticmethod
     def _display_position(value: float | None) -> str:
         if not isinstance(value, (int, float)):
@@ -1076,10 +960,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             return 'Unknown'
         return f'{parsed:.2f}'
     
-    def get_pre_act_value(self) -> str:
-        '''Get pre-act value with strategy state and numeric facts for prompting.'''
-        return super().get_pre_act_value()
-
     def get_state(self)-> str:
         '''Get component state for saving /restoring.'''
         numeric_facts = self._numeric_fact_summary(self._last_numeric_fields)

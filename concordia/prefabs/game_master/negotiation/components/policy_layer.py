@@ -24,6 +24,8 @@ ACTIVE_POLICY_SOURCES_BLOCK_PREFIX = '[[POLICY_ACTIVE_SOURCES_JSON]]'
 ACTIVE_POLICY_SOURCES_BLOCK_SUFFIX = '[[/POLICY_ACTIVE_SOURCES_JSON]]'
 POLICY_REASSESSMENT_PROMPT_MAX_CHARS = 3_200
 POLICY_REASSESSMENT_MAX_TOKENS = 384
+CURRENT_POLICY_SUMMARY_MAX_CHARS = 120
+CURRENT_POLICY_SUMMARY_MAX_TOKENS = 128
 
 
 class _PolicyReassessmentResponse(BaseModel):
@@ -81,6 +83,9 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
     self._active_source_counts: dict[str, int] = {}
     self._active_source_order: list[str] = []
     self._rebuild_active_sources()
+    self._compact_current_policy_prompt = self._summarize_current_policy_prompt(
+        self._format_current_policy_prompt(current_policies=self._current_policies)
+    )
 
   @staticmethod
   def _policy_key(policy: PolicyStateEntry) -> str:
@@ -412,6 +417,59 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
           max_tokens=POLICY_REASSESSMENT_MAX_TOKENS,
       )
 
+  def _summarize_current_policy_prompt(self, prompt: str) -> str:
+    """Builds a compact coordinator-owned summary for entity policy prompts."""
+    normalized_prompt = str(prompt or '').strip()
+    if not normalized_prompt:
+      return ''
+    if len(normalized_prompt) <= CURRENT_POLICY_SUMMARY_MAX_CHARS:
+      return normalized_prompt
+    if self._model is None:
+      return _truncate_middle_text(
+          normalized_prompt,
+          max_chars=CURRENT_POLICY_SUMMARY_MAX_CHARS,
+      )
+
+    summary_prompt = (
+        'You are compressing the current HDB resale policy state for agents.\n'
+        'Summarize the active policy state into one compact plain-text block.\n'
+        f'Keep the final answer within {CURRENT_POLICY_SUMMARY_MAX_CHARS} '
+        'characters.\n'
+        'Requirements:\n'
+        '- Keep only active rules that materially affect negotiation.\n'
+        '- Preserve important constraints, caps, deadlines, or eligibility rules.\n'
+        '- Prefer concise plain text over markdown.\n'
+        '- Do not add information not present in the input.\n'
+        '- Return only the compact summary text.\n\n'
+        'Current policy state:\n'
+        f'{_truncate_middle_text(normalized_prompt, max_chars=POLICY_REASSESSMENT_PROMPT_MAX_CHARS)}'
+    )
+    try:
+      summary = str(
+          self._model.sample_text(
+              summary_prompt,
+              max_tokens=CURRENT_POLICY_SUMMARY_MAX_TOKENS,
+          )
+      ).strip()
+    except Exception:  # pylint: disable=broad-exception-caught
+      summary = ''
+    if not summary:
+      return _truncate_middle_text(
+          normalized_prompt,
+          max_chars=CURRENT_POLICY_SUMMARY_MAX_CHARS,
+      )
+    if len(summary) > CURRENT_POLICY_SUMMARY_MAX_CHARS:
+      return _truncate_middle_text(
+          summary,
+          max_chars=CURRENT_POLICY_SUMMARY_MAX_CHARS,
+      )
+    return summary
+
+  def _refresh_compact_current_policy_prompt(self) -> None:
+    self._compact_current_policy_prompt = self._summarize_current_policy_prompt(
+        self._format_current_policy_prompt(current_policies=self._current_policies)
+    )
+
   def _apply_weekly_policy_updates(
       self,
       *,
@@ -456,6 +514,7 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
         self._append_policy(policy)
         existing_policy_keys.add(policy_key)
     self._applied_policy_weeks.add(int(week_number))
+    self._refresh_compact_current_policy_prompt()
     return due_schedules
 
   @classmethod
@@ -539,6 +598,9 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
         current_policies=self._current_policies,
     )
 
+  def get_compact_current_policy_prompt(self) -> str:
+    return str(self._compact_current_policy_prompt or '').strip()
+
   def announce_policies_for_week(
       self,
       *,
@@ -603,6 +665,7 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
         'current_policies': [
             policy.model_dump() for policy in self._current_policies
         ],
+        'compact_current_policy_prompt': self._compact_current_policy_prompt,
         'applied_policy_weeks': sorted(self._applied_policy_weeks),
         'announced_weeks': sorted(self._announced_weeks),
         'last_announcements': list(self._last_announcements),
@@ -652,6 +715,12 @@ class PolicyLayerComponent(action_spec_ignored.ActionSpecIgnored):
       for week_number in replayed_weeks:
         self._apply_weekly_policy_updates(week_number=week_number)
     self._rebuild_active_sources()
+    if 'compact_current_policy_prompt' in state:
+      self._compact_current_policy_prompt = str(
+          state.get('compact_current_policy_prompt', '')
+      ).strip()
+    else:
+      self._refresh_compact_current_policy_prompt()
     self._last_announcements = [
         dict(item) for item in state.get('last_announcements', [])
         if isinstance(item, Mapping)
