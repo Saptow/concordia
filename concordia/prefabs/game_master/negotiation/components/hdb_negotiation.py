@@ -36,6 +36,36 @@ def _empty_outcome() -> dict[str, Any]:
   }
 
 
+def _build_compact_handoff_payload(
+    pair_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+) -> dict[str, Any]:
+  """Builds a compact listing-to-negotiation handoff payload for memory."""
+  listing_record = pair_payload.listing_record
+  flat = getattr(listing_record, 'flat', None)
+  if flat is not None and hasattr(flat, 'to_compact_description'):
+    listing_summary = str(flat.to_compact_description())
+  else:
+    listing_summary = 'Listing summary unavailable.'
+
+  return {
+      'match_id': str(pair_payload.match_id),
+      'week_matched': int(pair_payload.week_matched),
+      'buyer': {
+          'id': str(pair_payload.buyer_state.id),
+          'name': str(pair_payload.buyer_state.name),
+      },
+      'seller': {
+          'id': str(pair_payload.seller_state.id),
+          'name': str(pair_payload.seller_state.name),
+      },
+      'listing': {
+          'listing_id': str(getattr(listing_record, 'listing_id', '')),
+          'listing_price': float(getattr(listing_record, 'listing_price', 0.0)),
+          'summary': listing_summary,
+      },
+  }
+
+
 def _normalize_max_workers(value: object) -> int | None:
   """Parse worker counts while allowing `None` to use executor defaults."""
   if value is None:
@@ -286,7 +316,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._pair_start_weeks.setdefault(pair_key, int(pair_payload.week_matched))
     buyer_name = pair_payload.buyer_state.name
     seller_name = pair_payload.seller_state.name
-    handoff_payload = json.dumps(pair_payload.model_dump(mode='json'))
+    handoff_payload = json.dumps(
+        _build_compact_handoff_payload(pair_payload),
+        ensure_ascii=False,
+    )
     buyer_observation = (
         f"{buyer_name}, you submitted a negotiation request for {seller_name}'s flat, "
         f"and {seller_name} accepted it. You are now negotiating directly as the buyer.\n\n"

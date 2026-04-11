@@ -473,8 +473,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return self._no_relevant_policy_summary()
         if not pages:
             return self._no_relevant_policy_summary()
-        chat = getattr(self._model, "chat", None)
-        if not callable(chat):
+        sample_text = getattr(self._model, "sample_text", None)
+        if not callable(sample_text):
             return self._no_relevant_policy_summary()
 
         full_page_result = self._run_full_page_retrieval_tool(
@@ -490,8 +490,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         )
         for _ in range(self._tool_call_retries):
             try:
-                return chat(
-                    [{"role": "user", "content": prompt}],
+                return sample_text(
+                    prompt,
                     max_tokens=POLICY_SUMMARY_MAX_TOKENS,
                 ).strip()
             except Exception:
