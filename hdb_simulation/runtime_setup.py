@@ -36,6 +36,7 @@ def initialise_model() -> VLLMLanguageModel:
         "TRUST_REMOTE_CODE": "trust_remote_code",
         "GPU_MEMORY_UTILIZATION": "gpu_memory_utilization",
         "MAX_MODEL_LEN": "max_model_len",
+        "MAX_NUM_BATCHED_TOKENS": "max_num_batched_tokens",
         "MAX_NUM_SEQS": "max_num_seqs",
         "LIMIT_MM_PER_PROMPT": "limit_mm_per_prompt",
         "TENSOR_PARALLEL_SIZE": "tensor_parallel_size",
