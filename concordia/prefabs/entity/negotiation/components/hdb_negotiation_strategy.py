@@ -492,7 +492,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
         responses_by_key: Dict[str, str],
     ) -> None:
-        del listing_payload
         self._urgency_level = self._parse_urgency_response(
             responses_by_key.get('urgency', '')
         )
@@ -501,7 +500,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             if self._role == RoleType.BUYER
             else listing_payload.seller_state
         )
-        self._failed_negotiations_count = len(participant_state.negotiation_history)
+        negotiation_history = getattr(participant_state, 'negotiation_history', ())
+        self._failed_negotiations_count = len(negotiation_history)
 
     def _build_listing_handoff_urgency_context(
         self,

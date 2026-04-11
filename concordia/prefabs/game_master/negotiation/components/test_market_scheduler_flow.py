@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 
 from concordia.hdb_simulation.models.schemas import common as common_schemas
@@ -541,37 +542,36 @@ class NegotiationListingObservationTest(unittest.TestCase):
     module = hdb_negotiation.NegotiationModule(
         entities=(buyer_entity, seller_entity),
         participant_specs=participant_specs,
+        negotiation_pairs=(('buyer_2023_00001', 'seller_2023_00006'),),
         enabled=True,
     )
-    original_update_agent = hdb_negotiation.update_agent_from_listing
-    hdb_negotiation.update_agent_from_listing = lambda entity, pair_payload: None
+    original_batch_update = hdb_negotiation.batch_update_agents_from_listings
+    hdb_negotiation.batch_update_agents_from_listings = lambda pairs: None
     try:
-      module._apply_listing_transfer_payload(
-          payload,
-          buyer_id='buyer_2023_00001',
-          seller_id='seller_2023_00006',
-      )
+      module._bind_entities_for_pairs([payload])
     finally:
-      hdb_negotiation.update_agent_from_listing = original_update_agent
+      hdb_negotiation.batch_update_agents_from_listings = original_batch_update
 
     self.assertLen(buyer_entity.observations, 1)
     observation = buyer_entity.observations[0]
-    self.assertIn(listing_record.listing_summary, observation)
-    self.assertIn('## Key Details', listing_record.listing_summary)
-    self.assertIn('## Nearby Amenities', listing_record.listing_summary)
-    self.assertIn('## Price Trends', listing_record.listing_summary)
-    self.assertIn('**Listing Price:** $553,357', listing_record.listing_summary)
     self.assertIn(
-        '- Block / Address: 809A CHOA CHU KANG AVE 1',
+        'Listing handoff context for this negotiation:',
+        observation,
+    )
+    _, _, payload_text = observation.partition(
+        'Listing handoff context for this negotiation:\n'
+    )
+    handoff_state = json.loads(payload_text)
+    self.assertEqual(
+        handoff_state['listing_record']['listing_id'],
+        'listing::seller_2023_00006',
+    )
+    self.assertEqual(
+        handoff_state['listing_record']['listing_summary'],
         listing_record.listing_summary,
     )
-    self.assertIn(
-        '- MRT / LRT: Keat Hong, Teck Whye, South View',
-        listing_record.listing_summary,
-    )
-    self.assertIn('Price Range: $388,000 to $600,000', listing_record.listing_summary)
-    self.assertNotIn('Full listing:', observation)
-    self.assertNotIn('"listing_id"', observation)
+    self.assertEqual(handoff_state['buyer_state']['id'], 'buyer_2023_00001')
+    self.assertEqual(handoff_state['seller_state']['id'], 'seller_2023_00006')
 
 
 class ListingReleaseTest(unittest.TestCase):

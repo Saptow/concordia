@@ -282,19 +282,22 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       seller_id: str,
   ) -> list[tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]]:
     """Applies listing-to-negotiation context once per pair."""
-    listing_record = pair_payload.listing_record
     pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
     self._pair_start_weeks.setdefault(pair_key, int(pair_payload.week_matched))
     buyer_name = pair_payload.buyer_state.name
     seller_name = pair_payload.seller_state.name
+    handoff_payload = json.dumps(pair_payload.model_dump(mode='json'))
     buyer_observation = (
         f"{buyer_name}, you submitted a negotiation request for {seller_name}'s flat, "
         f"and {seller_name} accepted it. You are now negotiating directly as the buyer.\n\n"
-        f"{listing_record.listing_summary}"
+        "Listing handoff context for this negotiation:\n"
+        f"{handoff_payload}"
     )
     seller_observation = (
         f"{seller_name}, you accepted {buyer_name}'s negotiation request for your flat. "
-        f"You are now negotiating directly as the seller."
+        "You are now negotiating directly as the seller.\n\n"
+        "Listing handoff context for this negotiation:\n"
+        f"{handoff_payload}"
     )
     pending_updates: list[
         tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]
@@ -341,9 +344,12 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             (buyer_id, seller_id),
         )
         continue
-      pair_already_exists = self._pair_exists(buyer_id, seller_id)
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      should_apply_transfer = (
+          transfer_payload is not None and pair_key not in self._pair_start_weeks
+      )
       self._register_pair(buyer_id, seller_id)
-      if not pair_already_exists and transfer_payload is not None:
+      if should_apply_transfer and transfer_payload is not None:
         pending_listing_updates.extend(
             self._apply_listing_transfer_payload(
                 transfer_payload,
