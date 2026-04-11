@@ -1065,12 +1065,14 @@ def _build_flat_universe(
         month_index = month_index_by_period[transaction_month]
         if transaction_month in initial_window_months:
             initial_window_position += 1
+            current_initial_window_position = initial_window_position
             if initial_window_position <= negotiating_cutoff:
                 initial_state = "negotiating"
             else:
                 initial_state = "listed"
             listing_release_week = 1
         else:
+            current_initial_window_position = 0
             initial_state = "not_yet_listed"
             # Expand the active transaction window by one calendar month every
             # four simulation weeks after the week-1 bootstrap window.
@@ -1154,6 +1156,8 @@ def _build_flat_universe(
                 "initialization_order": order_index,
                 "relative_transaction_timing": relative_timing,
                 "initial_market_state": initial_state,
+                "initial_window_position": int(current_initial_window_position),
+                "initial_window_size": int(initial_window_transaction_count),
                 "listing_release_week": int(max(1, listing_release_week)),
                 "address": str(row.address).strip(),
                 "flat_type": str(row.flat_type_label),
@@ -1326,6 +1330,8 @@ def _build_sellers(
             "linked_flat_id": flat["flat_id"],
             "initialization_order": flat["initialization_order"],
             "initial_market_state": flat["initial_market_state"],
+            "initial_window_position": int(flat.get("initial_window_position", 0) or 0),
+            "initial_window_size": int(flat.get("initial_window_size", 0) or 0),
             "listing_release_week": int(flat.get("listing_release_week", 1) or 1),
             "transaction_year_month": str(flat.get("transaction_year_month", "")).strip(),
             "age": demographics["age"],

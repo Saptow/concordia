@@ -206,6 +206,8 @@ class BuildMarketProfilesTest(unittest.TestCase):
             'seller_motivations': {'motivation_summary': 'Downsizing.'},
             'initial_market_state': 'not_yet_listed',
             'initialization_order': 7,
+            'initial_window_position': 3,
+            'initial_window_size': 12,
         }],
     }
 
@@ -221,6 +223,14 @@ class BuildMarketProfilesTest(unittest.TestCase):
     self.assertEqual(
         seller_profiles['seller_999']['initialization_order'],
         7,
+    )
+    self.assertEqual(
+        seller_profiles['seller_999']['initial_window_position'],
+        3,
+    )
+    self.assertEqual(
+        seller_profiles['seller_999']['initial_window_size'],
+        12,
     )
 
   def test_generates_name_from_persona_with_model_when_name_missing(self):
@@ -367,6 +377,25 @@ class BuildMarketProfilesTest(unittest.TestCase):
         '(Buyer',
         buyer_profiles['buyer_2023_00854']['name'],
     )
+
+class BuildEntityParamsTest(unittest.TestCase):
+
+  def test_seller_initial_window_metadata_is_passed_to_negotiation_config(self):
+    early_seller_profile = _seller_profile(name='Early Seller')
+    early_seller_profile['initial_window_position'] = 1
+    early_seller_profile['initial_window_size'] = 8
+
+    _, participant_specs = hdb_initializer_gm.build_entity_params(
+        buyer_profiles={},
+        seller_profiles={
+            'seller_early': early_seller_profile,
+        },
+    )
+
+    negotiation_config = participant_specs['seller_early']['negotiation_config']
+    self.assertEqual(negotiation_config['initial_window_position'], 1)
+    self.assertEqual(negotiation_config['initial_window_size'], 8)
+    self.assertNotIn('seller_exploration_threshold', negotiation_config)
 
 
 class NegotiationListingObservationTest(unittest.TestCase):

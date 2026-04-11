@@ -78,6 +78,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         uncertain_context: Union[UncertainBuyer, UncertainSeller],
         buyer_walkaway_threshold: float | None = None,
         seller_exploration_threshold: float | None = None,
+        initial_window_position: int | None = None,
+        initial_window_size: int | None = None,
         memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
         max_observations: int = 80,
         verbose: bool = False,
@@ -106,6 +108,12 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         )
         self._prefilled_seller_exploration_threshold = self._coerce_probability(
             seller_exploration_threshold
+        )
+        self._initial_window_position = self._coerce_positive_int(
+            initial_window_position
+        )
+        self._initial_window_size = self._coerce_positive_int(
+            initial_window_size
         )
         self._buyer_walkaway_threshold = (
             self._prefilled_buyer_walkaway_threshold
@@ -157,6 +165,16 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         if not math.isfinite(parsed):
             return None
         return min(1.0, max(0.0, parsed))
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
 
     def _judge_urgency_level(
         self,
@@ -272,6 +290,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         prompt = self._build_seller_exploration_threshold_prompt(
             agent_name=self._agent_name,
             description=self._description,
+            initial_window_position=self._initial_window_position,
+            initial_window_size=self._initial_window_size,
         )
 
         try:
@@ -335,7 +355,18 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         *,
         agent_name: str,
         description: str,
+        initial_window_position: int | None = None,
+        initial_window_size: int | None = None,
     ) -> str:
+        initial_window_context = "Not provided."
+        if (
+            initial_window_position is not None
+            and initial_window_size is not None
+        ):
+            initial_window_context = (
+                f"Seller entered in initial window position "
+                f"{initial_window_position} of {initial_window_size}."
+            )
         return (
             "# Role\n"
             "You infer when a seller should stop exploratory questioning and move "
@@ -348,18 +379,28 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "# Few-shot examples\n"
             "Example 1\n"
             "Description: Needs to sell quickly because a new property purchase is already lined up and carrying costs are rising.\n"
-            'Output: {"exploration_threshold": 0.28}\n\n'
+            "Initial window position: 1 of 12.\n"
+            'Output: {"exploration_threshold": 0.24}\n\n'
             "Example 2\n"
             "Description: Hopes for a good sale but is not under severe time pressure and can wait a bit for the right buyer.\n"
-            'Output: {"exploration_threshold": 0.57}\n\n'
+            "Initial window position: 3 of 12.\n"
+            'Output: {"exploration_threshold": 0.46}\n\n'
             "Example 3\n"
+            "Description: Motivated to transact within a reasonable horizon but still open to learning from buyers before locking into price discussions.\n"
+            "Initial window position: 7 of 12.\n"
+            'Output: {"exploration_threshold": 0.63}\n\n'
+            "Example 4\n"
             "Description: Selling opportunistically, highly patient, and comfortable testing the market before committing.\n"
+            "Initial window position: 11 of 12.\n"
             'Output: {"exploration_threshold": 0.84}\n\n'
             "# Input\n"
             "## Seller Description\n"
             f"{description}\n\n"
+            "## Initial Window Context\n"
+            f"{initial_window_context}\n\n"
             "# Rules\n"
-            "- Use only the seller description.\n"
+            "- Use the seller description and initial window context when available.\n"
+            "- Earlier initial-window positions should generally suggest lower exploration thresholds than later ones, all else equal.\n"
             "- Focus on time pressure, urgency to transact, flexibility, and willingness to keep probing before pricing.\n"
             "- Calibrate your answer relative to the examples above.\n"
             "- Return JSON only.\n"

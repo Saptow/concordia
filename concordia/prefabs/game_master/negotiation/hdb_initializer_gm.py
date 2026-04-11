@@ -161,6 +161,9 @@ def build_market_profiles(
         'flat': flat,
         'expectations': seller['expectations'],
         'initial_market_state': seller.get('initial_market_state', ''),
+        'initialization_order': int(seller.get('initialization_order', 0) or 0),
+        'initial_window_position': int(seller.get('initial_window_position', 0) or 0),
+        'initial_window_size': int(seller.get('initial_window_size', 0) or 0),
         'listing_release_week': int(seller.get('listing_release_week', 1) or 1),
         'linked_flat_id': str(seller.get('linked_flat_id', '') or ''),
     }
@@ -251,6 +254,12 @@ def build_entity_params(
             'b': 100,
             'reservation_value': str(payload['expectations']['min_price']),
             'flat_listing': json.dumps(payload['flat'], ensure_ascii=False),
+            'initial_window_position': int(
+                payload.get('initial_window_position', 0) or 0
+            ),
+            'initial_window_size': int(
+                payload.get('initial_window_size', 0) or 0
+            ),
         },
     }
     participant_specs[seller_id] = seller_params

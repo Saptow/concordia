@@ -627,8 +627,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     """Reopens failed negotiation pairs back into the listing workflow.
 
     Each reopened pair removes the buyer and seller from the portal's closed
-    participant sets. The seller's listing stays inactive until a later
-    listing week relists it through the normal `list_flat` flow.
+    participant sets and immediately reactivates the seller's listing in the
+    portal so the flat is available again without waiting for the next listing
+    week.
 
     Args:
       pair_records: Closed-pair summary records, typically from negotiation.
@@ -703,6 +704,11 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       )
       portal.closed_buyers.discard(buyer_id)
       portal.closed_sellers.discard(seller_id)
+      portal.list_flat(
+          seller,
+          week=max(1, int(payload.negotiation_history.end_week or 1)),
+          listing_price=_listing_price_for_seller(seller),
+      )
       reopened_pairs.append(payload.model_dump(mode='json'))
     return reopened_pairs
 

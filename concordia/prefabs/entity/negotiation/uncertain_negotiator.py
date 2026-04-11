@@ -341,6 +341,12 @@ class Entity(prefab_lib.Prefab):
                 seller_exploration_threshold=negotiation_config.get(
                     'seller_exploration_threshold'
                 ),
+                initial_window_position=negotiation_config.get(
+                    'initial_window_position'
+                ),
+                initial_window_size=negotiation_config.get(
+                    'initial_window_size'
+                ),
             )
         # Build a formatting-safe self-description prompt block.
         safe_description = _escape_format_braces(description)
@@ -555,6 +561,12 @@ class Entity(prefab_lib.Prefab):
                         ._build_seller_exploration_threshold_prompt(
                             agent_name=agent_name,
                             description=description,
+                            initial_window_position=negotiation_config.get(
+                                'initial_window_position'
+                            ),
+                            initial_window_size=negotiation_config.get(
+                                'initial_window_size'
+                            ),
                         )
                     ),
                     specific_schema=(
