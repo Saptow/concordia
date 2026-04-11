@@ -879,6 +879,14 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
     negotiation_module = _FakeNegotiationModule(
         open_pairs=[('buyer_001', 'seller_001')],
     )
+    negotiation_module.pair_states = [{
+        'buyer_id': 'buyer_001',
+        'seller_id': 'seller_001',
+        'buyer_name': 'Buyer 1',
+        'seller_name': 'Seller 1',
+        'closed': True,
+        'outcome': 'SUCCESS',
+    }]
     negotiation_module.relisting_payloads = [{
         'buyer_id': 'buyer_001',
         'seller_id': 'seller_001',
@@ -920,6 +928,7 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
 
     self.assertEqual(listing_module.reopened_payloads, [[]])
     self.assertEqual(summary['reopened_listing_pairs'], [])
+    self.assertEqual(summary['negotiation']['pair_states'], [])
 
   def test_state_round_trip_preserves_pending_matches_for_next_week(self):
     listing_module = _FakeListingModule(

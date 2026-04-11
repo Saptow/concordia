@@ -456,9 +456,30 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     negotiation_summary = (
         dict(negotiation_outcome) if negotiation_outcome is not None else {}
     )
-    negotiation_summary['pair_states'] = negotiation.get_pair_state_snapshots(
+    successful_pair_ids = {
+        (
+            str(record.get('buyer_id', '')).strip(),
+            str(record.get('seller_id', '')).strip(),
+        )
+        for record in self._sequence_or_empty(
+            negotiation_summary.get('successful_pairs', ())
+        )
+        if isinstance(record, Mapping)
+    }
+    pair_states = negotiation.get_pair_state_snapshots(
         self._module_assignments.get('negotiation', ())
     )
+    if successful_pair_ids:
+      pair_states = [
+          state
+          for state in pair_states
+          if isinstance(state, Mapping)
+          and (
+              str(state.get('buyer_id', '')).strip(),
+              str(state.get('seller_id', '')).strip(),
+          ) not in successful_pair_ids
+      ]
+    negotiation_summary['pair_states'] = pair_states
 
     # Logging
     self._last_week_summary = {

@@ -103,6 +103,30 @@ class HDBSimulationEngine(engine_lib.Engine):
       )
     return True
 
+  @staticmethod
+  def _successful_closed_player_ids(
+      summary: Mapping[str, Any],
+  ) -> set[str]:
+    """Returns player ids for negotiations that closed successfully this week."""
+    negotiation = summary.get('negotiation', {})
+    if not isinstance(negotiation, Mapping):
+      return set()
+    successful_pairs = negotiation.get('successful_pairs', ())
+    if not isinstance(successful_pairs, Sequence) or isinstance(successful_pairs, str):
+      return set()
+
+    player_ids: set[str] = set()
+    for record in successful_pairs:
+      if not isinstance(record, Mapping):
+        continue
+      buyer_id = str(record.get('buyer_id', '')).strip()
+      seller_id = str(record.get('seller_id', '')).strip()
+      if buyer_id:
+        player_ids.add(buyer_id)
+      if seller_id:
+        player_ids.add(seller_id)
+    return player_ids
+
   def _collect_entity_logs(
       self,
       *,
@@ -110,18 +134,32 @@ class HDBSimulationEngine(engine_lib.Engine):
       entities: Sequence[entity_lib.Entity],
       active_negotiation_player_ids: Sequence[str],
       listing_player_ids: Sequence[str],
+      successful_closed_player_ids: Sequence[str] = (),
   ) -> dict[str, Mapping[str, Any]]:
     """Collects logs from module-owned agents before falling back to outer ones."""
     collected_logs: dict[str, Mapping[str, Any]] = {}
     negotiation_module = coordinator.get_negotiation_module()
     listing_module = coordinator.get_listing_module()
+    excluded_player_ids = {
+        str(player_id)
+        for player_id in successful_closed_player_ids
+        if str(player_id).strip()
+    }
     negotiation_player_ids = (
-        tuple(str(player_id) for player_id in active_negotiation_player_ids)
+        tuple(
+            str(player_id)
+            for player_id in active_negotiation_player_ids
+            if str(player_id) not in excluded_player_ids
+        )
         if getattr(negotiation_module, 'is_enabled', lambda: True)()
         else ()
     )
     listing_active_player_ids = (
-        tuple(str(player_id) for player_id in listing_player_ids)
+        tuple(
+            str(player_id)
+            for player_id in listing_player_ids
+            if str(player_id) not in excluded_player_ids
+        )
         if getattr(listing_module, 'is_enabled', lambda: True)()
         else ()
     )
@@ -233,6 +271,7 @@ class HDBSimulationEngine(engine_lib.Engine):
           entities=entities,
           active_negotiation_player_ids=active_negotiation_player_ids,
           listing_player_ids=listing_player_ids,
+          successful_closed_player_ids=self._successful_closed_player_ids(summary),
       )
       if log is not None:
         log_entry: dict[str, Any] = {
