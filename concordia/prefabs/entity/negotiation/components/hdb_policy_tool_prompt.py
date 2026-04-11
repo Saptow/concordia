@@ -21,8 +21,8 @@ DEFAULT_CURRENT_POLICY_PROMPT = (
     "No simulation-specific policies are currently in effect."
 )
 POLICY_SUMMARY_MAX_TOKENS = 768
-PRE_ACT_POLICY_STATE_MAX_CHARS = 220
-PRE_ACT_POLICY_GUIDANCE_MAX_CHARS = 420
+PRE_ACT_POLICY_STATE_MAX_CHARS = 120
+PRE_ACT_POLICY_GUIDANCE_MAX_CHARS = 240
 
 
 class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):

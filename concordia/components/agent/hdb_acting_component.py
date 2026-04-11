@@ -123,10 +123,16 @@ class HDBStructuredActComponent(
     def _build_action_context(
         self, contexts: entity_component.ComponentContextMapping
     ) -> str:
-        """Build prompt context while excluding the action-choice component."""
+        """Build prompt context while excluding duplicated high-volume context."""
+        excluded_keys = {
+            self._structured_component_key,
+            "observation",
+            "situation_perception",
+            "self_perception",
+        }
         lines = []
         for k in self._get_ordered_context_keys(contexts):
-            if k == self._structured_component_key:
+            if k in excluded_keys:
                 continue
             v = contexts.get(k)
             if v:

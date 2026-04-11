@@ -387,10 +387,12 @@ class QuestionOfRecentMemoriesStructured(
     memory = self.get_entity().get_component(
         self._memory_component_key, type_=memory_component.Memory
     )
-    mems = '\n'.join([
-        mem
-        for mem in memory.retrieve_recent(limit=self._num_memories_to_retrieve)
-    ])
+    mems = ''
+    if self._num_memories_to_retrieve > 0:
+      mems = '\n'.join([
+          mem
+          for mem in memory.retrieve_recent(limit=self._num_memories_to_retrieve)
+      ])
     prompt = interactive_document.InteractiveDocument(self._model)
     component_states = '\n'.join(
         [
@@ -412,8 +414,9 @@ class QuestionOfRecentMemoriesStructured(
             f"{self.get_named_component_pre_act_value(key)}\n"
         )
 
-    prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
-    prompt.statement('')
+    if mems:
+      prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
+      prompt.statement('')
     if self._clock_now is not None:
       prompt.statement(f'Current time: {self._clock_now()}.\n')
 

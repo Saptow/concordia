@@ -51,7 +51,7 @@ HDB_CONTEXT_ANCHOR = (
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
 )
-ACTION_REASONING_MEMORY_WINDOW = 6
+ACTION_REASONING_MEMORY_WINDOW = 4
 MIN_ACTION_REASONING_MEMORY_WINDOW = 4
 MAX_ACTION_REASONING_MEMORY_WINDOW = 8
 
@@ -434,7 +434,7 @@ class Entity(prefab_lib.Prefab):
             components=action_components,
             output_schema=common_schemas.ActionChoiceWithRationale,
             choice_responses=role_action_types,
-            num_memories_to_retrieve=action_reasoning_memory_window
+            num_memories_to_retrieve=0,
         )
         
         # TODO: look into more refined strategy integration on later stage
