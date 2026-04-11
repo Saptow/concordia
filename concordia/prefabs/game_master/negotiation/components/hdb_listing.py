@@ -47,6 +47,23 @@ def _normalize_max_workers(value: object) -> int | None:
   return parsed
 
 
+def _chunk_pairs_evenly[T](
+    values: Sequence[T],
+    *,
+    max_chunks: int | None,
+) -> list[list[T]]:
+  """Split a sequence into up to `max_chunks` non-empty chunks."""
+  if not values:
+    return []
+  if max_chunks is None or max_chunks <= 0:
+    return [list(values)]
+  chunk_count = max(1, min(int(max_chunks), len(values)))
+  chunks: list[list[T]] = [[] for _ in range(chunk_count)]
+  for index, value in enumerate(values):
+    chunks[index % chunk_count].append(value)
+  return [chunk for chunk in chunks if chunk]
+
+
 def _derive_failed_negotiation_learning_signal(
     *,
     payload: negotiation_schemas.NegotiationToListingPayload,
@@ -148,15 +165,19 @@ def execute_listing_week(
       for buyer_id, buyer in buyers.items()
       if buyer_id in assigned_ids and not portal.is_player_closed(buyer_id)
   ]
+  buyer_chunks = _chunk_pairs_evenly(
+      eligible_buyers,
+      max_chunks=buyer_search_max_workers,
+  )
   buyer_tasks = {
-      buyer_id: functools.partial(
-          portal.search_and_request,
-          buyer,
+      f'buyer_batch_{index}': functools.partial(
+          portal.search_and_request_many,
+          [buyer for _, buyer in buyer_chunk],
           week=week_number,
       )
-      for buyer_id, buyer in eligible_buyers
+      for index, buyer_chunk in enumerate(buyer_chunks)
   }
-  buyer_results, buyer_errors = (
+  buyer_batch_results, buyer_errors = (
       concurrency.run_tasks_in_background(
           buyer_tasks,
           max_workers=buyer_search_max_workers,
@@ -164,13 +185,21 @@ def execute_listing_week(
       if buyer_tasks
       else ({}, {})
   )
-  for buyer_id, error in buyer_errors.items():
+  for batch_key, error in buyer_errors.items():
     logging.error(
-        'Listing week %s: failed buyer %s portal search/request: %s',
+        'Listing week %s: failed %s portal search/request batch: %s',
         week_number,
-        buyer_id,
+        batch_key,
         error,
     )
+  buyer_results: dict[str, listing_portal_lib.SearchAndRequestResult] = {}
+  for batch_result in buyer_batch_results.values():
+    if not isinstance(batch_result, dict):
+      continue
+    buyer_results.update({
+        str(buyer_id): result
+        for buyer_id, result in batch_result.items()
+    })
 
   for buyer_id, buyer in eligible_buyers:
     if buyer_results.get(buyer_id) is None:

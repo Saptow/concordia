@@ -70,22 +70,41 @@ class ListingPortalRetriever:
                 'Create or preload it before using ListingPortalRetriever.'
             )
 
-    def _embed_dense_text(self, text: str) -> np.ndarray:
+    def _embed_dense_texts(self, texts: Sequence[str]) -> list[np.ndarray]:
         if self._dense_embedder is None:
             raise RuntimeError(
                 'Attempted to embed listing-portal text without a dense '
                 'embedding model.'
             )
-        return self._dense_embedder.encode(text)
+        if not texts:
+            return []
+        embeddings = self._dense_embedder.encode(
+            list(texts),
+            show_progress_bar=False,
+        )
+        return [np.asarray(embedding) for embedding in embeddings]
+
+    def _embed_dense_text(self, text: str) -> np.ndarray:
+        return self._embed_dense_texts([text])[0]
+
+    def _embed_sparse_texts(self, texts: Sequence[str]) -> list[Any | None]:
+        if not texts:
+            return []
+        if self._sparse_embedder is None:
+            return [None] * len(texts)
+        embeddings = list(self._sparse_embedder.embed(list(texts)))
+        if len(embeddings) != len(texts):
+            logging.warning(
+                'Sparse embedder returned %s embeddings for %s query texts.',
+                len(embeddings),
+                len(texts),
+            )
+            embeddings = embeddings[: len(texts)]
+            embeddings.extend([None] * (len(texts) - len(embeddings)))
+        return embeddings
 
     def _embed_sparse_text(self, text: str) -> Any | None:
-        if self._sparse_embedder is None:
-            return None
-        embeddings = list(self._sparse_embedder.embed([text]))
-        if not embeddings:
-            logging.warning('Sparse embedder returned no embedding for query text.')
-            return None
-        return embeddings[0]
+        return self._embed_sparse_texts([text])[0]
 
     def _rrf_ranker(self) -> qdrant_models.Rrf:
         """Build an RRF ranker compatible with the installed qdrant-client version."""
@@ -158,6 +177,21 @@ class ListingPortalRetriever:
         """
         dense_query = self._embed_dense_text(query)
         sparse_query = self._embed_sparse_text(query)
+        return self._search_with_embeddings(
+            dense_query=dense_query,
+            sparse_query=sparse_query,
+            max_budget=max_budget,
+            limit=limit,
+        )
+
+    def _search_with_embeddings(
+        self,
+        *,
+        dense_query: np.ndarray,
+        sparse_query: Any | None,
+        max_budget: float | None,
+        limit: int,
+    ) -> list[listing_schemas.PortalSearchResult]:
         search_limit = max(10, 3 * limit)
         active_filter = qdrant_schemas.active_listing_filter()
         with self._client_lock:
@@ -209,6 +243,45 @@ class ListingPortalRetriever:
                 break
 
         return filtered_results
+
+    def search_many(
+        self,
+        queries: Sequence[str],
+        *,
+        max_budgets: Sequence[float | None] | None = None,
+        limit: int = 5,
+    ) -> list[list[listing_schemas.PortalSearchResult]]:
+        """Search many buyer queries with one batched embedding pass."""
+        if not queries:
+            return []
+        dense_queries = self._embed_dense_texts(queries)
+        sparse_queries = self._embed_sparse_texts(queries)
+        if max_budgets is None:
+            normalized_budgets = [None] * len(queries)
+        else:
+            normalized_budgets = [
+                float(budget) if budget is not None else None
+                for budget in max_budgets
+            ]
+            if len(normalized_budgets) != len(queries):
+                raise ValueError(
+                    'max_budgets must align with queries when provided.'
+                )
+
+        return [
+            self._search_with_embeddings(
+                dense_query=dense_query,
+                sparse_query=sparse_query,
+                max_budget=max_budget,
+                limit=limit,
+            )
+            for dense_query, sparse_query, max_budget in zip(
+                dense_queries,
+                sparse_queries,
+                normalized_budgets,
+                strict=True,
+            )
+        ]
 
   
 class ListingPortal:
@@ -564,6 +637,82 @@ class ListingPortal:
             results=list(results),
             market_feedback=feedback,
         )
+
+    def search_and_request_many(
+        self,
+        buyers: Sequence[listing_schemas.PortalBuyer],
+        *,
+        week: int,
+    ) -> dict[str, SearchAndRequestResult]:
+        """Run buyer portal search/request with batched query embeddings."""
+        eligible_buyers = [
+            buyer
+            for buyer in buyers
+            if str(buyer.id).strip() and not self.is_player_closed(buyer.id)
+        ]
+        if not eligible_buyers:
+            return {}
+
+        queries = [
+            self._derive_query_from_preferences(buyer, '')
+            for buyer in eligible_buyers
+        ]
+        budgets = [float(buyer.budget.max_price) for buyer in eligible_buyers]
+        search_results = self.retriever.search_many(
+            queries,
+            max_budgets=budgets,
+            limit=PORTAL_SEARCH_LIMIT,
+        )
+
+        results_by_buyer: dict[str, SearchAndRequestResult] = {}
+        for buyer, results in zip(eligible_buyers, search_results, strict=True):
+            match_scores = self._listing_match_scores(
+                buyer,
+                results,
+            )
+            relevant_observations, market_reliability, relevant_prices = (
+                self._relevant_market_observations(results, match_scores)
+            )
+            feedback = self._market_feedback(
+                self.effective_reservation_price_for_buyer(buyer),
+                relevant_prices,
+            )
+            requested_listing_ids = self._top_valid_listing_ids_for_buyer(
+                buyer,
+                results,
+            )
+            buyer_id = buyer.id
+            with self._state_lock:
+                self.search_results_by_buyer[buyer_id] = list(results)
+                self._update_buyer_market_state(
+                    buyer,
+                    relevant_observations,
+                    market_reliability,
+                    relevant_prices,
+                    feedback,
+                )
+                self.market_feedback_by_buyer[buyer_id] = feedback
+
+            results_by_listing_id = {
+                result.listing_id: result for result in results
+            }
+            for listing_id in requested_listing_ids:
+                result = results_by_listing_id.get(listing_id)
+                if result is None:
+                    continue
+                self.submit_negotiation_request(
+                    buyer,
+                    seller_id=result.seller_id,
+                    week=week,
+                    listing_id=listing_id,
+                )
+
+            results_by_buyer[str(buyer_id)] = SearchAndRequestResult(
+                results=list(results),
+                market_feedback=feedback,
+            )
+
+        return results_by_buyer
 
     def submit_negotiation_request(
         self,
