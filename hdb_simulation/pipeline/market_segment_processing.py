@@ -202,6 +202,29 @@ def _income_age_group_for_band(age_band: str, rng: random.Random) -> str:
     return f"{lower} - {upper} Years"
 
 
+def _age_matches_target(value: Any, *, age: int) -> bool:
+    try:
+        if pd.isna(value):
+            return False
+    except TypeError:
+        pass
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) == age
+
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"\d+(?:\.0+)?", text):
+        return int(float(text)) == age
+
+    lowered = text.casefold()
+    lower, upper = _parse_age_band(text, adult_floor=0)
+    if "over" in lowered:
+        return age >= lower
+    return lower <= age <= upper
+
+
 def _weighted_choice(
     frame: pd.DataFrame, value_col: str, weight_col: str, rng: random.Random
 ) -> Any:
@@ -267,6 +290,19 @@ def _sample_nemotron_donor(
         ]
         if not subset.empty:
             candidates = subset
+
+    if age is not None:
+        for age_column in ("age", "age_group"):
+            if age_column not in candidates.columns:
+                continue
+            subset = candidates[
+                candidates[age_column].map(
+                    lambda value: _age_matches_target(value, age=age)
+                )
+            ]
+            if not subset.empty:
+                candidates = subset
+                break
 
     field_pairs = [
         ("marital_status", marital_status),

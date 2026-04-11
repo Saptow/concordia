@@ -99,24 +99,12 @@ def build_market_profiles(
         role_label='Buyer',
         seen_names=seen_names,
     )
-    description_parts = [
-        (
-            f"{buyer['age']}-year-old {buyer['occupation_category']} looking "
-            f"for an HDB resale flat in {town}."
-        ),
-    ]
-    if str(buyer.get('general_persona', '')).strip():
-      description_parts.append(str(buyer['general_persona']).strip())
-    preference_summary = common_schemas.summarize_buyer_features(
-        buyer.get('preferences')
-    )
-    if preference_summary:
-      description_parts.append(
-          'Housing priorities: ' + preference_summary
-      )
+    description = str(buyer.get('general_persona', '')).strip()
+    if not description:
+      description = f'Looking for an HDB resale flat in {town}.'
     buyer_profiles[buyer_id] = {
         'name': buyer_name,
-        'description': ' '.join(description_parts),
+        'description': description,
         'preferences': buyer['preferences'],
         'budget': buyer['budget'],
         'reservation_price_prior': (
