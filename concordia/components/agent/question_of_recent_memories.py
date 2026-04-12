@@ -14,7 +14,7 @@
 
 """Agent component for asking questions about the agent's recent memories."""
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 import dataclasses
 import datetime
 import json
@@ -294,6 +294,7 @@ class QuestionOfRecentMemoriesStructured(
       num_memories_to_retrieve: int = 25,
       output_schema: RootModel = None,
       choice_responses: Sequence[str] = (),
+      choice_response_descriptions: Mapping[str, str] | None = None,
       randomize_choice_responses: bool = False,
     ):
     """Initializes the QuestionOfRecentMemories component.
@@ -319,6 +320,11 @@ class QuestionOfRecentMemoriesStructured(
                      terminators, clock_now, num_memories_to_retrieve)
     self._output_schema = output_schema
     self._choice_responses = tuple(str(x) for x in choice_responses if str(x))
+    self._choice_response_descriptions = {
+        str(key).strip().upper(): str(value).strip()
+        for key, value in dict(choice_response_descriptions or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
     self._runtime_choice_responses: tuple[str, ...] | None = None
     self._randomize_choice_responses = bool(randomize_choice_responses)
     self._last_prompt_context: str = ''
@@ -370,6 +376,23 @@ class QuestionOfRecentMemoriesStructured(
             ),
         ),
     )
+
+  def _render_active_choice_descriptions(
+      self,
+      active_choice_responses: Sequence[str],
+  ) -> str:
+    if not active_choice_responses or not self._choice_response_descriptions:
+      return ''
+    lines: list[str] = []
+    for choice in active_choice_responses:
+      normalized_choice = str(choice).strip().upper()
+      if not normalized_choice:
+        continue
+      description = self._choice_response_descriptions.get(normalized_choice)
+      if not description:
+        continue
+      lines.append(f'- {normalized_choice}: {description}')
+    return '\n'.join(lines)
 
   def build_pre_act_request(
       self,
@@ -424,12 +447,21 @@ class QuestionOfRecentMemoriesStructured(
     question = self._question.format(agent_name=agent_name)
     answer_prefix = self._answer_prefix.format(agent_name=agent_name)
     active_choice_responses = self._get_active_choice_responses()
+    active_choice_descriptions = self._render_active_choice_descriptions(
+        active_choice_responses
+    )
     output_schema = self._resolve_output_schema(active_choice_responses)
     if active_choice_responses:
       if output_schema is None:
         raise ValueError(
             'QuestionOfRecentMemoriesStructured requires an output schema when '
             'batched phase-1 selection uses structured choices.'
+        )
+      if active_choice_descriptions:
+        question = (
+            f'{question}\n'
+            'Action type descriptions:\n'
+            f'{active_choice_descriptions}'
         )
       question = (
           f'{question}\n'

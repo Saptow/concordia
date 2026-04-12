@@ -97,7 +97,7 @@ def execute_listing_week(
   Phase order is fixed across the week:
   1. Unlisted active sellers activate their listing.
   2. Active buyers search and submit requests.
-  3. Previously listed sellers review requests and create matches.
+  3. Active listed sellers review requests and create matches.
 
   Each phase runs participant-local work concurrently, then collates the
   results into a single weekly outcome.
@@ -160,6 +160,12 @@ def execute_listing_week(
       continue
     newly_listed_listing_ids.append(listing_id)
 
+  seller_listing_status_after_listing = {
+      seller_id: portal.is_seller_listed(seller_id)
+      for seller_id in sellers
+      if seller_id in assigned_ids and not portal.is_player_closed(seller_id)
+  }
+
   eligible_buyers = [
       (buyer_id, buyer)
       for buyer_id, buyer in buyers.items()
@@ -212,7 +218,7 @@ def execute_listing_week(
       if (
           seller_id in assigned_ids
           and not portal.is_player_closed(seller_id)
-          and seller_listing_status_at_week_start.get(seller_id, False)
+          and seller_listing_status_after_listing.get(seller_id, False)
       )
   ]
   seller_review_tasks = {

@@ -381,37 +381,30 @@ class Entity(prefab_lib.Prefab):
             num_memories_to_retrieve=action_reasoning_memory_window,
         )
 
-        has_active_offer = (
-            str(strategy.fields.get('hasActiveOffer', 'False')).lower()
-            == 'true'
-        )
         if role == common_schemas.RoleType.BUYER:
-            role_action_types = (
-                negotiation_schemas.BUYER_OFFER_ACTIONS
-                if has_active_offer
-                else negotiation_schemas.BUYER_NON_OFFER_ACTIONS
+            role_action_types = tuple(
+                dict.fromkeys(
+                    negotiation_schemas.BUYER_NON_OFFER_ACTIONS
+                    + negotiation_schemas.BUYER_OFFER_ACTIONS
+                )
             )
         else:
-            role_action_types = (
-                negotiation_schemas.SELLER_OFFER_ACTIONS
-                if has_active_offer
-                else negotiation_schemas.SELLER_NON_OFFER_ACTIONS
+            role_action_types = tuple(
+                dict.fromkeys(
+                    negotiation_schemas.SELLER_NON_OFFER_ACTIONS
+                    + negotiation_schemas.SELLER_OFFER_ACTIONS
+                )
             )
-        negotiation_action_type_descriptions = negotiation_schemas.format_action_type_descriptions(
-            role_action_types
-        )
 
         if role == common_schemas.RoleType.SELLER:
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
-                f'Action type descriptions:\n{negotiation_action_type_descriptions}\n'
                 f'{HDB_CONTEXT_ANCHOR}\n'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
-                f'Action type descriptions:\n{negotiation_action_type_descriptions}\n'
                 f'{HDB_CONTEXT_ANCHOR}'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
                 f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
@@ -434,6 +427,9 @@ class Entity(prefab_lib.Prefab):
             components=action_components,
             output_schema=common_schemas.ActionChoiceWithRationale,
             choice_responses=role_action_types,
+            choice_response_descriptions=(
+                negotiation_schemas.NEGOTIATION_ACTION_TYPE_DESCRIPTIONS
+            ),
             num_memories_to_retrieve=0,
         )
         
