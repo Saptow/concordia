@@ -1017,7 +1017,7 @@ class _RecordingStrategyComponent:
   def apply_live_urgency_response(self, response: str) -> None:
     self._order_log.append(f'urgency_apply:{self._player_id}')
     print(
-        f'[test-debug] urgency layer cleared for {self._player_id}',
+        f'[test-debug] urgency response applied for {self._player_id}',
         flush=True,
     )
     self._urgency_response = response
@@ -1026,7 +1026,7 @@ class _RecordingStrategyComponent:
     del action_spec
     self._order_log.append(f'strategy_pre_act:{self._player_id}')
     print(
-        f'[test-debug] strategy layer cleared for {self._player_id}',
+        f'[test-debug] strategy context materialized for {self._player_id}',
         flush=True,
     )
     return (
@@ -1073,7 +1073,7 @@ class _RecordingDeferredTextComponent:
     )
     print(
         '[test-debug] '
-        f'{self._component_name} batch layer cleared for {self._player_id}',
+        f'{self._component_name} response applied for {self._player_id}',
         flush=True,
     )
     self._value = str(raw_response or self._value)
@@ -1086,7 +1086,7 @@ class _RecordingDeferredTextComponent:
     )
     print(
         '[test-debug] '
-        f'{self._component_name} pre-act layer cleared for {self._player_id}',
+        f'{self._component_name} context materialized for {self._player_id}',
         flush=True,
     )
     return f'{self._component_name}:\n{self._value}\n'
@@ -1102,7 +1102,8 @@ class _FakeTextBatchModel:
     prompt_list = [str(prompt) for prompt in prompts]
     self.batch_calls.append((prompt_list, dict(kwargs)))
     print(
-        f'[test-debug] text batch layer cleared for prompts={len(prompt_list)}',
+        '[test-debug] text batch submitted for prompts='
+        f'{len(prompt_list)} -> {prompt_list}',
         flush=True,
     )
     return [f'batch::{prompt}' for prompt in prompt_list]
@@ -1122,7 +1123,7 @@ class _RecordingChooserComponent:
     del action_spec
     self._order_log.append(f'chooser_build:{self._player_id}')
     print(
-        f'[test-debug] chooser layer cleared for {self._player_id}',
+        f'[test-debug] chooser request built for {self._player_id}',
         flush=True,
     )
     return question_of_recent_memories.StructuredPreActRequest(
@@ -1145,7 +1146,7 @@ class _RecordingActComponent:
   def build_action_attempt_request(self, contexts, action_spec):
     self._order_log.append(f'phase2_build:{self._player_id}')
     print(
-        f'[test-debug] phase2 layer cleared for {self._player_id}',
+        f'[test-debug] phase2 request built for {self._player_id}',
         flush=True,
     )
     return hdb_acting_component.StructuredActionAttemptRequest(
@@ -1294,48 +1295,77 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
           'force_close': False,
       })
 
+    def _mock_execute_setup_requests(requests):
+      print(
+          f'[test-debug] urgency batch submitted for requests={len(requests)}',
+          flush=True,
+      )
+      return [
+          '{"urgency": 0.63}',
+          '{"urgency": 0.41}',
+      ]
+
+    def _mock_execute_text_requests(requests):
+      print(
+          '[test-debug] deferred text batch collected for requests='
+          f'{len(requests)}',
+          flush=True,
+      )
+      return [
+          'seller timeline is flexible',
+          'grant rules narrow viable timelines',
+          'buyer is patient',
+          'cooling measures constrain fast flipping',
+      ]
+
+    def _mock_execute_phase1_requests(requests):
+      print(
+          f'[test-debug] chooser batch submitted for requests={len(requests)}',
+          flush=True,
+      )
+      return [
+          (
+              '{"chosen_action_type":"QUESTION_BUYER",'
+              '"decision_rationale":"Need timeline details."}'
+          ),
+          (
+              '{"chosen_action_type":"QUESTION_BUYER",'
+              '"decision_rationale":"Need seller timing."}'
+          ),
+      ]
+
+    def _mock_execute_phase2_requests(requests):
+      print(
+          f'[test-debug] phase2 batch submitted for requests={len(requests)}',
+          flush=True,
+      )
+      return [
+          (
+              '{"type":"QUESTION_BUYER","question":"When can you move?",'
+              '"internal_reasoning":"Need timeline."}'
+          ),
+          (
+              '{"type":"QUESTION_BUYER","question":"What timeline works for you?",'
+              '"internal_reasoning":"Clarify timing."}'
+          ),
+      ]
+
     with mock.patch.object(
         structured_setup_batching,
         'execute_setup_requests',
-        return_value=[
-            '{"urgency": 0.63}',
-            '{"urgency": 0.41}',
-        ],
+        side_effect=_mock_execute_setup_requests,
     ) as mock_urgency_batch, mock.patch.object(
         question_of_recent_memories,
         'execute_text_pre_act_requests',
-        return_value=[
-            'seller timeline is flexible',
-            'grant rules narrow viable timelines',
-            'buyer is patient',
-            'cooling measures constrain fast flipping',
-        ],
+        side_effect=_mock_execute_text_requests,
     ) as mock_text_batch, mock.patch.object(
         question_of_recent_memories.QuestionOfRecentMemoriesStructured,
         'execute_pre_act_requests',
-        return_value=[
-            (
-                '{"chosen_action_type":"QUESTION_BUYER",'
-                '"decision_rationale":"Need timeline details."}'
-            ),
-            (
-                '{"chosen_action_type":"QUESTION_BUYER",'
-                '"decision_rationale":"Need seller timing."}'
-            ),
-        ],
+        side_effect=_mock_execute_phase1_requests,
     ) as mock_phase1_batch, mock.patch.object(
         hdb_acting_component.HDBStructuredActComponent,
         'execute_action_attempt_requests',
-        return_value=[
-            (
-                '{"type":"QUESTION_BUYER","question":"When can you move?",'
-                '"internal_reasoning":"Need timeline."}'
-            ),
-            (
-                '{"type":"QUESTION_BUYER","question":"What timeline works for you?",'
-                '"internal_reasoning":"Clarify timing."}'
-            ),
-        ],
+        side_effect=_mock_execute_phase2_requests,
     ) as mock_phase2_batch:
       finalized_turns = module._finalize_prepared_turns(prepared_turns)
 
