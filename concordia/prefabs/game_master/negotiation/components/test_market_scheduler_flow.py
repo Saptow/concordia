@@ -1194,7 +1194,7 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
       )
       policy_component = _RecordingDeferredTextComponent(
           player_id,
-          'policy_tool_prompt',
+          NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY,
           order_log,
           batched=True,
       )
@@ -1218,14 +1218,16 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
           'deferred_context_components': {
               'self_perception': self_component,
               'situation_perception': situation_component,
-              'policy_tool_prompt': policy_component,
+              NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY: (
+                  policy_component
+              ),
           },
           'deferred_context_requests': {
               'self_perception': self_component.build_batched_pre_act_request(),
               'situation_perception': (
                   situation_component.build_batched_pre_act_request()
               ),
-              'policy_tool_prompt': (
+              NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY: (
                   policy_component.build_batched_pre_act_request()
               ),
           },
@@ -1309,10 +1311,12 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
           f'deferred_pre_act:situation_perception:{player_id}'
       )
       policy_apply_index = order_log.index(
-          f'deferred_apply:policy_tool_prompt:{player_id}'
+          'deferred_apply:'
+          f'{NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY}:{player_id}'
       )
       policy_index = order_log.index(
-          f'deferred_pre_act:policy_tool_prompt:{player_id}'
+          'deferred_pre_act:'
+          f'{NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY}:{player_id}'
       )
       urgency_index = order_log.index(f'urgency_apply:{player_id}')
       strategy_index = order_log.index(f'strategy_pre_act:{player_id}')
