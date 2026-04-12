@@ -128,6 +128,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self._state = SimpleStrategyState()
         self._urgency_level = DEFAULT_URGENCY_LEVEL
         self._failed_negotiations_count = 0
+        self._prefetched_live_strategy_state: Dict[str, Any] | None = None
+        self._prefetched_live_urgency_level: float | None = None
         self._sync_positions_from_beliefs()
 
     def _sync_positions_from_beliefs(self) -> None:
@@ -460,6 +462,42 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         )
         negotiation_history = getattr(participant_state, 'negotiation_history', ())
         self._failed_negotiations_count = len(negotiation_history)
+
+    def build_live_urgency_request(
+        self,
+    ) -> structured_setup_batching.StructuredSetupRequest:
+        self._sync_positions_from_beliefs()
+        numeric_fields = self._compute_deterministic_numeric_fields()
+        has_active_offer = (
+            str(numeric_fields.get('HasActiveOffer', '')).strip().lower() == 'true'
+        )
+        uncertainty_summary = self._get_uncertainty_strategy_summary('')
+        self._prefetched_live_strategy_state = {
+            'numeric_fields': dict(numeric_fields),
+            'has_active_offer': has_active_offer,
+            'uncertainty_summary': dict(uncertainty_summary),
+        }
+        self._prefetched_live_urgency_level = None
+        return structured_setup_batching.StructuredSetupRequest(
+            component=self,
+            response_key='live_urgency',
+            prompt_text=self._build_urgency_prompt(
+                number_of_failed_negotiations=self._failed_negotiations_count,
+                current_situation_summary=self._build_live_urgency_context(
+                    has_active_offer=has_active_offer,
+                    numeric_fields=numeric_fields,
+                ),
+            ),
+            specific_schema=UrgencyLevel,
+            max_tokens=100,
+        )
+
+    def apply_live_urgency_response(
+        self,
+        response: str,
+    ) -> None:
+        self._prefetched_live_urgency_level = self._parse_urgency_response(response)
+        self._urgency_level = self._prefetched_live_urgency_level
 
     def _build_listing_handoff_urgency_context(
         self,
@@ -855,24 +893,37 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     def _make_pre_act_value(self) -> str:
         """Provide simple strategy guidance before each action."""
         action_context = ''
-        self._sync_positions_from_beliefs()
+        prefetched_state = self._prefetched_live_strategy_state
+        prefetched_urgency = self._prefetched_live_urgency_level
+        if prefetched_state is not None and prefetched_urgency is not None:
+            numeric_fields = dict(prefetched_state.get('numeric_fields', {}))
+            has_active_offer = bool(prefetched_state.get('has_active_offer', False))
+            uncertainty_summary = dict(
+                prefetched_state.get('uncertainty_summary', {})
+            )
+            current_urgency_level = prefetched_urgency
+        else:
+            self._sync_positions_from_beliefs()
 
-        # The prompt policy is state-gated: unresolved uncertainty permits one
-        # more information-gathering turn; otherwise active offers should move
-        # toward closure, and urgent buyers may walk away after at least one
-        # completed negotiation week.
-        numeric_fields = self._compute_deterministic_numeric_fields()
-        has_active_offer = str(numeric_fields.get('HasActiveOffer', '')).strip().lower() == 'true'
-        uncertainty_summary = self._get_uncertainty_strategy_summary(
-            action_context,
-        )
-        current_urgency_level = self._judge_urgency_level(
-            number_of_failed_negotiations=self._failed_negotiations_count,
-            current_situation_summary=self._build_live_urgency_context(
-                has_active_offer=has_active_offer,
-                numeric_fields=numeric_fields,
-            ),
-        )
+            # The prompt policy is state-gated: unresolved uncertainty permits one
+            # more information-gathering turn; otherwise active offers should move
+            # toward closure, and urgent buyers may walk away after at least one
+            # completed negotiation week.
+            numeric_fields = self._compute_deterministic_numeric_fields()
+            has_active_offer = (
+                str(numeric_fields.get('HasActiveOffer', '')).strip().lower()
+                == 'true'
+            )
+            uncertainty_summary = self._get_uncertainty_strategy_summary(
+                action_context,
+            )
+            current_urgency_level = self._judge_urgency_level(
+                number_of_failed_negotiations=self._failed_negotiations_count,
+                current_situation_summary=self._build_live_urgency_context(
+                    has_active_offer=has_active_offer,
+                    numeric_fields=numeric_fields,
+                ),
+            )
         self._urgency_level = current_urgency_level
         should_gather_info = self._should_gather_info(
             uncertainty_summary,
@@ -982,6 +1033,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 6,
                 f"{offer_key}={numeric_fields.get(offer_key, 'Unknown')}",
             )
+        self._prefetched_live_strategy_state = None
+        self._prefetched_live_urgency_level = None
         return '\n'.join(lines) + '\n'
 
     def post_act(self, action_attempt: str) -> str:
@@ -1015,6 +1068,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     
     def update(self) -> None:
         """Periodic updates if needed."""
+        self._prefetched_live_strategy_state = None
+        self._prefetched_live_urgency_level = None
         super().update()
     def get_pre_act_label(self) -> str:
         return 'Negotiation Strategy State and Numeric Facts'

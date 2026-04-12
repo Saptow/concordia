@@ -36,6 +36,13 @@ def _empty_outcome() -> dict[str, Any]:
   }
 
 
+_DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS = (
+    'self_perception',
+    'situation_perception',
+    NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY,
+)
+
+
 def _normalize_max_workers(value: object) -> int | None:
   """Parse worker counts while allowing `None` to use executor defaults."""
   if value is None:
@@ -953,14 +960,48 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       prepared_act = entity.prepare_act_with_deferred_components(
           action_spec,
           deferred_component_names=(
+              *_DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS,
+              'NegotiationStrategy',
               NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY,
           ),
       )
+      deferred_context_requests: dict[
+          str,
+          question_of_recent_memories.TextPreActRequest | None,
+      ] = {}
+      deferred_context_components: dict[str, Any] = {}
+      for component_name in _DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS:
+        try:
+          component = entity.get_component(component_name)
+        except Exception:
+          continue
+        deferred_context_components[component_name] = component
+        request_builder = getattr(component, 'build_batched_pre_act_request', None)
+        deferred_request = None
+        if callable(request_builder):
+          try:
+            deferred_request = request_builder(action_spec)
+          except TypeError:
+            deferred_request = request_builder()
+        deferred_context_requests[component_name] = deferred_request
+      strategy_component = None
       try:
-        phase1_request = chooser_component.build_pre_act_request(action_spec)
+        strategy_component = entity.get_component('NegotiationStrategy')
       except Exception:
-        entity.cancel_prepared_act(prepared_act)
-        raise
+        strategy_component = None
+      live_urgency_request = None
+      if strategy_component is not None:
+        request_builder = getattr(
+            strategy_component,
+            'build_live_urgency_request',
+            None,
+        )
+        if callable(request_builder):
+          try:
+            live_urgency_request = request_builder()
+          except Exception:
+            entity.cancel_prepared_act(prepared_act)
+            raise
       return {
           'player_id': player_id,
           'buyer_id': buyer_id,
@@ -968,8 +1009,12 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           'action_spec': action_spec,
           'entity': entity,
           'prepared_act': prepared_act,
+          'deferred_context_components': deferred_context_components,
+          'deferred_context_requests': deferred_context_requests,
+          'strategy_component': strategy_component,
+          'live_urgency_request': live_urgency_request,
           'phase1_component': chooser_component,
-          'phase1_request': phase1_request,
+          'phase1_request': None,
           'request': None,
           'force_close': False,
       }
@@ -1006,6 +1051,128 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return []
 
     mutable_prepared_turns = [dict(turn) for turn in prepared_turns]
+
+    urgency_request_indexes: list[int] = []
+    urgency_requests: list[structured_setup_batching.StructuredSetupRequest] = []
+    text_request_indexes: list[tuple[int, str]] = []
+    text_requests: list[question_of_recent_memories.TextPreActRequest] = []
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      live_urgency_request = prepared_turn.get('live_urgency_request')
+      if isinstance(
+          live_urgency_request,
+          structured_setup_batching.StructuredSetupRequest,
+      ):
+        urgency_request_indexes.append(index)
+        urgency_requests.append(live_urgency_request)
+      deferred_context_requests = prepared_turn.get('deferred_context_requests', {})
+      if isinstance(deferred_context_requests, Mapping):
+        for component_name in _DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS:
+          deferred_request = deferred_context_requests.get(component_name)
+          if isinstance(
+              deferred_request,
+              question_of_recent_memories.TextPreActRequest,
+          ):
+            text_request_indexes.append((index, component_name))
+            text_requests.append(deferred_request)
+
+    urgency_outputs: dict[int, str] = {}
+    if urgency_requests:
+      batched_urgency_outputs = structured_setup_batching.execute_setup_requests(
+          urgency_requests
+      )
+      urgency_outputs = dict(zip(urgency_request_indexes, batched_urgency_outputs))
+
+    text_outputs: dict[tuple[int, str], str] = {}
+    if text_requests:
+      batched_text_outputs = (
+          question_of_recent_memories.execute_text_pre_act_requests(text_requests)
+      )
+      text_outputs = dict(zip(text_request_indexes, batched_text_outputs))
+
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      strategy_component = prepared_turn.get('strategy_component')
+      chooser_component = prepared_turn.get('phase1_component')
+      prepared_act = prepared_turn.get('prepared_act')
+      action_spec = prepared_turn.get('action_spec')
+      if (
+          strategy_component is None
+          or chooser_component is None
+          or prepared_act is None
+          or action_spec is None
+      ):
+        continue
+      try:
+        merged_contexts = dict(prepared_act.contexts)
+        deferred_context_components = prepared_turn.get(
+            'deferred_context_components',
+            {},
+        )
+        deferred_context_requests = prepared_turn.get(
+            'deferred_context_requests',
+            {},
+        )
+        if isinstance(deferred_context_components, Mapping):
+          for component_name in _DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS:
+            component = deferred_context_components.get(component_name)
+            if component is None:
+              continue
+            deferred_request = None
+            if isinstance(deferred_context_requests, Mapping):
+              deferred_request = deferred_context_requests.get(component_name)
+            if isinstance(
+                deferred_request,
+                question_of_recent_memories.TextPreActRequest,
+            ):
+              apply_batched_response = getattr(
+                  component,
+                  'apply_batched_pre_act_response',
+                  None,
+              )
+              raw_response = text_outputs.get((index, component_name), '')
+              if callable(apply_batched_response):
+                apply_batched_response(
+                    deferred_request,
+                    raw_response,
+                )
+            component_context = component.pre_act(action_spec)
+            merged_contexts[component_name] = component_context
+
+        urgency_response = urgency_outputs.get(index)
+        apply_live_urgency = getattr(
+            strategy_component,
+            'apply_live_urgency_response',
+            None,
+        )
+        if urgency_response is not None and callable(apply_live_urgency):
+          apply_live_urgency(urgency_response)
+        strategy_context = strategy_component.pre_act(action_spec)
+        merged_contexts['NegotiationStrategy'] = strategy_context
+        prepared_turn['prepared_act'] = entity_agent.PreparedAct(
+            action_spec=prepared_act.action_spec,
+            contexts=types.MappingProxyType(merged_contexts),
+        )
+        prepared_turn['phase1_request'] = chooser_component.build_pre_act_request(
+            action_spec
+        )
+        mutable_prepared_turns[index] = prepared_turn
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.error(
+            'Failed to prepare deferred strategy/chooser for %s: %s',
+            prepared_turn.get('player_id'),
+            error,
+        )
+        entity = prepared_turn.get('entity')
+        if entity is not None and prepared_turn.get('prepared_act') is not None:
+          entity.cancel_prepared_act(prepared_turn['prepared_act'])
+        mutable_prepared_turns[index] = dict(
+            prepared_turn,
+            event=None,
+            force_close=True,
+            entity=None,
+            prepared_act=None,
+            phase1_request=None,
+            request=None,
+        )
 
     phase1_request_indexes: list[int] = []
     phase1_requests: list[question_of_recent_memories.StructuredPreActRequest] = []

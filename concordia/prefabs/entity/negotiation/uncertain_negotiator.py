@@ -194,15 +194,19 @@ class Entity(prefab_lib.Prefab):
 
         agent_name = self.params.get('name', 'Negotiator')
         description = self.params.get('description', '')
-        action_reasoning_memory_window = _clamp_memory_window(
-            negotiation_config.get(
-                'action_reasoning_memory_window',
+        raw_action_reasoning_memory_window = negotiation_config.get(
+            'action_reasoning_memory_window'
+        )
+        if raw_action_reasoning_memory_window is None:
+            raw_action_reasoning_memory_window = (
                 _estimate_action_reasoning_memory_window(
                     model=model,
                     agent_name=agent_name,
                     description=description,
-                ),
+                )
             )
+        action_reasoning_memory_window = _clamp_memory_window(
+            raw_action_reasoning_memory_window
         )
         reservation = float(
             negotiation_config.get(

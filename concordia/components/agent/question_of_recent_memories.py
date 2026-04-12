@@ -53,6 +53,86 @@ BEST_OPTION_PERCEPTION_QUESTION = (
 
 
 @dataclasses.dataclass(frozen=True)
+class TextPreActRequest:
+  """One open-text pre-act request that can be batched."""
+
+  component: Any
+  prompt_text: str
+  question_text: str
+  answer_prefix: str
+  max_tokens: int = 1000
+  terminators: tuple[str, ...] = ('\n',)
+  temperature: float = language_model.DEFAULT_TEMPERATURE
+  top_p: float = language_model.DEFAULT_TOP_P
+  top_k: int = language_model.DEFAULT_TOP_K
+
+
+def execute_text_pre_act_request(
+    request: TextPreActRequest,
+) -> str:
+  """Execute one open-text pre-act request through the language model."""
+  return request.component._model.sample_text(
+      prompt=request.prompt_text,
+      max_tokens=request.max_tokens,
+      terminators=request.terminators,
+      temperature=request.temperature,
+      top_p=request.top_p,
+      top_k=request.top_k,
+  )
+
+
+def execute_text_pre_act_requests(
+    requests: Sequence[TextPreActRequest],
+) -> list[str]:
+  """Execute open-text pre-act requests, batching compatible groups."""
+  if not requests:
+    return []
+
+  outputs = [''] * len(requests)
+  grouped_requests: dict[
+      tuple[Any, ...],
+      list[tuple[int, TextPreActRequest]],
+  ] = {}
+  for index, request in enumerate(requests):
+    group_key = (
+        id(request.component._model),
+        request.max_tokens,
+        request.terminators,
+        request.temperature,
+        request.top_p,
+        request.top_k,
+    )
+    grouped_requests.setdefault(group_key, []).append((index, request))
+
+  for grouped in grouped_requests.values():
+    model = grouped[0][1].component._model
+    batch_sampler = getattr(model, 'sample_text_batch', None)
+    use_batch = callable(batch_sampler) and len(grouped) > 1
+    if not use_batch:
+      for index, request in grouped:
+        outputs[index] = execute_text_pre_act_request(request)
+      continue
+    try:
+      raw_responses = batch_sampler(
+          [request.prompt_text for _, request in grouped],
+          max_tokens=grouped[0][1].max_tokens,
+          terminators=grouped[0][1].terminators,
+          temperature=grouped[0][1].temperature,
+          top_p=grouped[0][1].top_p,
+          top_k=grouped[0][1].top_k,
+      )
+    except Exception:
+      raw_responses = []
+    if len(raw_responses) != len(grouped):
+      for index, request in grouped:
+        outputs[index] = execute_text_pre_act_request(request)
+      continue
+    for (index, _), raw_response in zip(grouped, raw_responses):
+      outputs[index] = raw_response
+  return outputs
+
+
+@dataclasses.dataclass(frozen=True)
 class StructuredPreActRequest:
   """One structured phase-1 chooser request that can be batched."""
 
@@ -146,8 +226,25 @@ class QuestionOfRecentMemories(
         f'{self.get_named_component_pre_act_value(key)}')
 
   def _make_pre_act_value(self) -> str:
-    agent_name = self.get_entity().name
+    request = self.build_batched_pre_act_request()
+    if request is None:
+      return self._pre_act_value or ''
+    raw_response = execute_text_pre_act_request(request)
+    return self.apply_batched_pre_act_response(request, raw_response)
 
+  def build_batched_pre_act_request(
+      self,
+      action_spec: entity_lib.ActionSpec | None = None,
+  ) -> TextPreActRequest | None:
+    del action_spec
+    with self._lock:
+      if (
+          self._persist_pre_act_value_across_updates
+          and self._pre_act_value is not None
+      ):
+        return None
+
+    agent_name = self.get_entity().name
     memory = self.get_entity().get_component(
         self._memory_component_key, type_=memory_component.Memory
     )
@@ -163,6 +260,7 @@ class QuestionOfRecentMemories(
     )
     prompt.statement(component_states)
 
+    mems = ''
     if self._num_memories_to_retrieve > 0:
       mems = '\n'.join([
           mem
@@ -177,50 +275,49 @@ class QuestionOfRecentMemories(
 
     question = self._question.format(agent_name=agent_name)
     answer_prefix = self._answer_prefix.format(agent_name=agent_name)
-    result = prompt.open_question(
-        question,
+    prompt_text = (
+        f'{prompt.view().text()}Question: {question}\n'
+        f'Answer: {answer_prefix}'
+    )
+    return TextPreActRequest(
+        component=self,
+        prompt_text=prompt_text,
+        question_text=question,
         answer_prefix=answer_prefix,
         max_tokens=1000,
-        terminators=self._terminators,
+        terminators=tuple(self._terminators),
     )
-    if not str(result).strip():
-      # Some backends terminate immediately when the first generated token is a
-      # newline. Retry once with relaxed terminators to avoid empty states.
-      relaxed_terminators = tuple(t for t in self._terminators if t != '\n')
-      if relaxed_terminators != self._terminators:
-        retry_prompt = interactive_document.InteractiveDocument(self._model)
-        retry_prompt.statement(component_states)
-        retry_prompt.statement(f'Recent observations of {agent_name}:\n{mems}')
-        if self._clock_now is not None:
-          retry_prompt.statement(f'Current time: {self._clock_now()}.\n')
-        retry_result = retry_prompt.open_question(
-            question,
-            answer_prefix=answer_prefix,
-            max_tokens=1000,
-            terminators=relaxed_terminators or (),
-        )
-        if str(retry_result).strip():
-          prompt = retry_prompt
-          result = retry_result
-      if not str(result).strip():
-        result = '[no response generated]'
-    result = self._answer_prefix.format(agent_name=agent_name) + result
 
+  def apply_batched_pre_act_response(
+      self,
+      request: TextPreActRequest,
+      raw_response: str,
+  ) -> str:
+    result = str(raw_response or '').strip()
+    if not result:
+      result = '[no response generated]'
+    result = request.answer_prefix + result
+
+    memory = self.get_entity().get_component(
+        self._memory_component_key, type_=memory_component.Memory
+    )
     if self._add_to_memory:
       memory.add(f'{self._memory_tag} {result}')
 
+    with self._lock:
+      self._pre_act_value = result
+
     log = {
         'Key': self.get_pre_act_label(),
-        'Summary': question,
+        'Summary': request.question_text,
         'State': result,
-        'Chain of thought': prompt.view().text().splitlines(),
+        'Chain of thought': request.prompt_text.splitlines() + [''],
     }
 
     if self._clock_now is not None:
       log['Time'] = self._clock_now()
 
     self._logging_channel(log)
-
     return result
 
   def get_state(self) -> entity_component.ComponentState:

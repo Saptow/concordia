@@ -10,6 +10,7 @@ from configs import NegotiationComponentConfig
 from configs import PolicyToolConfig
 from configs import REPO_ROOT
 from concordia.components.agent import action_spec_ignored
+from concordia.components.agent import question_of_recent_memories
 from concordia.hdb_simulation.models.schemas.policy.schema import FullPolicyPage
 from concordia.hdb_simulation.models.schemas.policy.schema import PolicyPage
 from concordia.hdb_simulation.models.schemas.policy.schema import RetrievedFullPolicyPages
@@ -71,6 +72,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._policy_pages_cache_signature: tuple[tuple[str, int], ...] | None = None
         self._current_policy_prompt = DEFAULT_CURRENT_POLICY_PROMPT
         self._synced_active_source_paths: list[str] | None = None
+        self._pending_batch_cache_key: str | None = None
 
     @property
     def name(self) -> str:
@@ -542,8 +544,92 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             ),
         )
 
+    def build_batched_pre_act_request(
+        self,
+        action_spec: Any | None = None,
+    ) -> question_of_recent_memories.TextPreActRequest | None:
+        del action_spec
+        active_source_paths = self._synced_active_source_paths
+        if active_source_paths == []:
+            self._pending_batch_cache_key = None
+            return None
+
+        cache_key = json.dumps(
+            {
+                "current_policy_prompt": self._current_policy_prompt,
+                "policy_index_paths": [
+                    self._display_path(path) for path in self._policy_index_paths
+                ],
+                "policy_index_signature": list(self._policy_index_signature()),
+                "active_source_paths": active_source_paths,
+                "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if cache_key == self._last_cache_key and self._last_cache_value is not None:
+            self._pending_batch_cache_key = None
+            return None
+
+        try:
+            pages = self._filter_pages_to_active_sources(
+                pages=self._load_policy_directory(),
+                active_source_paths=active_source_paths,
+            )
+        except Exception:
+            self._pending_batch_cache_key = None
+            return None
+
+        if not pages:
+            self._pending_batch_cache_key = None
+            return None
+
+        full_page_result = self._run_full_page_retrieval_tool(
+            active_source_paths or [page.path for page in pages],
+            pages,
+        )
+        if not full_page_result.strip():
+            self._pending_batch_cache_key = None
+            return None
+
+        sample_text = getattr(self._model, "sample_text", None)
+        if not callable(sample_text):
+            self._pending_batch_cache_key = None
+            return None
+
+        self._pending_batch_cache_key = cache_key
+        return question_of_recent_memories.TextPreActRequest(
+            component=self,
+            prompt_text=self._fit_policy_summary_prompt(
+                current_policy_prompt=self._current_policy_prompt,
+                full_page_result=full_page_result,
+            ),
+            question_text="Summarize the active policy source pages.",
+            answer_prefix="",
+            max_tokens=POLICY_SUMMARY_MAX_TOKENS,
+            terminators=(),
+        )
+
+    def apply_batched_pre_act_response(
+        self,
+        request: question_of_recent_memories.TextPreActRequest,
+        raw_response: str,
+    ) -> str:
+        del request
+        cache_key = self._pending_batch_cache_key
+        self._pending_batch_cache_key = None
+        result = self._compose_pre_act_value(
+            str(raw_response or "").strip() or self._no_relevant_policy_summary()
+        )
+        with self._lock:
+            self._pre_act_value = result
+        if cache_key is not None:
+            return self._cache_result(cache_key=cache_key, result=result)
+        return result
+
     def update(self) -> None:
         super().update()
+        self._pending_batch_cache_key = None
 
     def get_state(self) -> entity_component.ComponentState:
         return {

@@ -43,6 +43,7 @@ HDB_FIELD_GENERATION_INFO_GUARDRAILS = (
     "- Do not repeat or lightly rephrase a recent question if you already asked for the same information.\n"
     "- If the same issue was already raised recently, move the conversation forward instead of asking it again.\n"
 )
+STRUCTURED_ACTION_MAX_TOKENS = 1664
 
 
 def _log_error(message: str) -> None:
@@ -60,7 +61,7 @@ class StructuredActionAttemptRequest:
     prompt_text: str
     prompt_log_sections: tuple[str, ...]
     structured_question: str
-    max_tokens: int = 2200
+    max_tokens: int = STRUCTURED_ACTION_MAX_TOKENS
     terminators: tuple[str, ...] = ()
     temperature: float = language_model.DEFAULT_TEMPERATURE
     top_p: float = language_model.DEFAULT_TOP_P
@@ -709,14 +710,22 @@ class HDBStructuredActComponent(
             return action_spec.options[idx]
 
         if action_spec.output_type == entity_lib.OutputType.FLOAT:
-            sampled = prompt.open_question(call_to_action, max_tokens=2200, terminators=())
+            sampled = prompt.open_question(
+                call_to_action,
+                max_tokens=STRUCTURED_ACTION_MAX_TOKENS,
+                terminators=(),
+            )
             try:
                 return str(float(sampled))
             except ValueError:
                 return "nan"
 
         if action_spec.output_type in entity_lib.FREE_ACTION_TYPES:
-            return prompt.open_question(call_to_action, max_tokens=2200, terminators=())
+            return prompt.open_question(
+                call_to_action,
+                max_tokens=STRUCTURED_ACTION_MAX_TOKENS,
+                terminators=(),
+            )
 
         logging.error("Unsupported output type: %s", action_spec.output_type)
         return ""

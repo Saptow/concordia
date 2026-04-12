@@ -1,9 +1,18 @@
 import copy
+import types
 import unittest
+from unittest import mock
 
+from concordia.agents import entity_agent
+from concordia.components.agent import hdb_acting_component
+from concordia.components.agent import question_of_recent_memories
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.pipeline import flat_embedding
+from concordia.prefabs.entity.negotiation import structured_setup_batching
+from concordia.prefabs.entity.negotiation.components import (
+    hdb_negotiation_strategy,
+)
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_coordinator_helper,
     hdb_listing,
@@ -995,6 +1004,409 @@ class NegotiationSchedulerTest(unittest.TestCase):
         scheduler.get_pair_round_number('buyer_002', 'seller_002'),
         2,
     )
+
+
+class _RecordingStrategyComponent:
+
+  def __init__(self, player_id: str, order_log: list[str]):
+    self._player_id = player_id
+    self._order_log = order_log
+    self._urgency_response = ''
+
+  def apply_live_urgency_response(self, response: str) -> None:
+    self._order_log.append(f'urgency_apply:{self._player_id}')
+    self._urgency_response = response
+
+  def pre_act(self, action_spec) -> str:
+    del action_spec
+    self._order_log.append(f'strategy_pre_act:{self._player_id}')
+    return (
+        'Negotiation Strategy State and Numeric Facts:\n'
+        f'UrgencyResponse={self._urgency_response}\n'
+    )
+
+
+class _RecordingDeferredTextComponent:
+
+  def __init__(
+      self,
+      player_id: str,
+      component_name: str,
+      order_log: list[str],
+      *,
+      batched: bool,
+  ):
+    self._player_id = player_id
+    self._component_name = component_name
+    self._order_log = order_log
+    self._batched = batched
+    self._value = f'{component_name} value for {player_id}'
+
+  def build_batched_pre_act_request(self, action_spec=None):
+    del action_spec
+    if not self._batched:
+      return None
+    return question_of_recent_memories.TextPreActRequest(
+        component=self,
+        prompt_text=f'{self._component_name} prompt for {self._player_id}',
+        question_text=f'{self._component_name} question',
+        answer_prefix='',
+        max_tokens=64,
+        terminators=(),
+    )
+
+  def apply_batched_pre_act_response(self, request, raw_response: str) -> str:
+    del request
+    self._order_log.append(
+        f'deferred_apply:{self._component_name}:{self._player_id}'
+    )
+    self._value = str(raw_response or self._value)
+    return self._value
+
+  def pre_act(self, action_spec) -> str:
+    del action_spec
+    self._order_log.append(
+        f'deferred_pre_act:{self._component_name}:{self._player_id}'
+    )
+    return f'{self._component_name}:\n{self._value}\n'
+
+
+class _RecordingChooserComponent:
+
+  def __init__(self, player_id: str, order_log: list[str]):
+    self._player_id = player_id
+    self._order_log = order_log
+
+  def build_pre_act_request(self, action_spec):
+    del action_spec
+    self._order_log.append(f'chooser_build:{self._player_id}')
+    return question_of_recent_memories.StructuredPreActRequest(
+        component=self,
+        prompt_text=f'chooser prompt for {self._player_id}',
+        prompt_context='',
+        question_text='What is the best next action?',
+        answer_prefix='',
+        output_schema=common_schemas.ActionChoiceWithRationale,
+        json_schema=common_schemas.ActionChoiceWithRationale.model_json_schema(),
+    )
+
+
+class _RecordingActComponent:
+
+  def __init__(self, player_id: str, order_log: list[str]):
+    self._player_id = player_id
+    self._order_log = order_log
+
+  def build_action_attempt_request(self, contexts, action_spec):
+    self._order_log.append(f'phase2_build:{self._player_id}')
+    return hdb_acting_component.StructuredActionAttemptRequest(
+        component=self,
+        action_spec=action_spec,
+        preferred_action_type='QUESTION_BUYER',
+        specific_schema=negotiation_schemas.BuyerQuestion,
+        prompt_text=(
+            f'Build one QUESTION_BUYER payload for {self._player_id}. '
+            f'Contexts: {sorted(contexts.keys())}'
+        ),
+        prompt_log_sections=(),
+        structured_question='Return the question payload.',
+    )
+
+
+class _RecordingPreparedEntity:
+
+  def __init__(self, *, name: str, act_component: _RecordingActComponent):
+    self.name = name
+    self._act_component = act_component
+    self.cancelled = False
+
+  def get_act_component(self):
+    return self._act_component
+
+  def cancel_prepared_act(self, prepared_act):
+    del prepared_act
+    self.cancelled = True
+
+  def finalize_prepared_act(self, prepared_act, action_attempt=None):
+    del prepared_act
+    return action_attempt or '{}'
+
+
+class NegotiationBatchDependencyOrderTest(unittest.TestCase):
+
+  def test_finalize_prepared_turns_applies_live_urgency_before_chooser_build(self):
+    participant_specs = {
+        'buyer_001': {
+            'id': 'buyer_001',
+            'name': 'Buyer 1',
+            'role': 'buyer',
+            'description': 'Test buyer 1 profile.',
+            'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+            'budget': copy.deepcopy(_buyer_profile()['budget']),
+        },
+        'buyer_002': {
+            'id': 'buyer_002',
+            'name': 'Buyer 2',
+            'role': 'buyer',
+            'description': 'Test buyer 2 profile.',
+            'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+            'budget': copy.deepcopy(_buyer_profile()['budget']),
+        },
+    }
+    module = hdb_negotiation.NegotiationModule(
+        participant_specs=participant_specs,
+        enabled=True,
+    )
+    order_log: list[str] = []
+    action_spec = hdb_negotiation.entity_lib.choice_action_spec(
+        call_to_action='What should {name} do next?',
+        options=('QUESTION_BUYER',),
+    )
+
+    prepared_turns = []
+    for player_id in ('buyer_001', 'buyer_002'):
+      self_component = _RecordingDeferredTextComponent(
+          player_id,
+          'self_perception',
+          order_log,
+          batched=False,
+      )
+      situation_component = _RecordingDeferredTextComponent(
+          player_id,
+          'situation_perception',
+          order_log,
+          batched=True,
+      )
+      policy_component = _RecordingDeferredTextComponent(
+          player_id,
+          'policy_tool_prompt',
+          order_log,
+          batched=True,
+      )
+      strategy_component = _RecordingStrategyComponent(player_id, order_log)
+      chooser_component = _RecordingChooserComponent(player_id, order_log)
+      act_component = _RecordingActComponent(player_id, order_log)
+      entity = _RecordingPreparedEntity(
+          name=participant_specs[player_id]['name'],
+          act_component=act_component,
+      )
+      prepared_turns.append({
+          'player_id': player_id,
+          'buyer_id': player_id,
+          'seller_id': 'seller_stub',
+          'action_spec': action_spec,
+          'entity': entity,
+          'prepared_act': entity_agent.PreparedAct(
+              action_spec=action_spec,
+              contexts=types.MappingProxyType({}),
+          ),
+          'deferred_context_components': {
+              'self_perception': self_component,
+              'situation_perception': situation_component,
+              'policy_tool_prompt': policy_component,
+          },
+          'deferred_context_requests': {
+              'self_perception': self_component.build_batched_pre_act_request(),
+              'situation_perception': (
+                  situation_component.build_batched_pre_act_request()
+              ),
+              'policy_tool_prompt': (
+                  policy_component.build_batched_pre_act_request()
+              ),
+          },
+          'strategy_component': strategy_component,
+          'live_urgency_request': structured_setup_batching.StructuredSetupRequest(
+              component=strategy_component,
+              response_key='live_urgency',
+              prompt_text=f'urgency prompt for {player_id}',
+              specific_schema=hdb_negotiation_strategy.UrgencyLevel,
+              max_tokens=100,
+          ),
+          'phase1_component': chooser_component,
+          'phase1_request': None,
+          'request': None,
+          'force_close': False,
+      })
+
+    with mock.patch.object(
+        structured_setup_batching,
+        'execute_setup_requests',
+        return_value=[
+            '{"urgency": 0.63}',
+            '{"urgency": 0.41}',
+        ],
+    ) as mock_urgency_batch, mock.patch.object(
+        question_of_recent_memories,
+        'execute_text_pre_act_requests',
+        return_value=[
+            'seller timeline is flexible',
+            'grant rules narrow viable timelines',
+            'buyer is patient',
+            'cooling measures constrain fast flipping',
+        ],
+    ) as mock_text_batch, mock.patch.object(
+        question_of_recent_memories.QuestionOfRecentMemoriesStructured,
+        'execute_pre_act_requests',
+        return_value=[
+            (
+                '{"chosen_action_type":"QUESTION_BUYER",'
+                '"decision_rationale":"Need timeline details."}'
+            ),
+            (
+                '{"chosen_action_type":"QUESTION_BUYER",'
+                '"decision_rationale":"Need seller timing."}'
+            ),
+        ],
+    ) as mock_phase1_batch, mock.patch.object(
+        hdb_acting_component.HDBStructuredActComponent,
+        'execute_action_attempt_requests',
+        return_value=[
+            (
+                '{"type":"QUESTION_BUYER","question":"When can you move?",'
+                '"internal_reasoning":"Need timeline."}'
+            ),
+            (
+                '{"type":"QUESTION_BUYER","question":"What timeline works for you?",'
+                '"internal_reasoning":"Clarify timing."}'
+            ),
+        ],
+    ) as mock_phase2_batch:
+      finalized_turns = module._finalize_prepared_turns(prepared_turns)
+
+    self.assertEqual(mock_urgency_batch.call_count, 1)
+    self.assertLen(mock_urgency_batch.call_args.args[0], 2)
+    self.assertEqual(mock_text_batch.call_count, 1)
+    self.assertLen(mock_text_batch.call_args.args[0], 4)
+    self.assertEqual(mock_phase1_batch.call_count, 1)
+    self.assertLen(mock_phase1_batch.call_args.args[0], 2)
+    self.assertEqual(mock_phase2_batch.call_count, 1)
+    self.assertLen(mock_phase2_batch.call_args.args[0], 2)
+    self.assertLen(finalized_turns, 2)
+    self.assertIn('Buyer 1', finalized_turns[0]['event'])
+    self.assertIn('Buyer 2', finalized_turns[1]['event'])
+
+    for player_id in ('buyer_001', 'buyer_002'):
+      self_index = order_log.index(f'deferred_pre_act:self_perception:{player_id}')
+      situation_apply_index = order_log.index(
+          f'deferred_apply:situation_perception:{player_id}'
+      )
+      situation_index = order_log.index(
+          f'deferred_pre_act:situation_perception:{player_id}'
+      )
+      policy_apply_index = order_log.index(
+          f'deferred_apply:policy_tool_prompt:{player_id}'
+      )
+      policy_index = order_log.index(
+          f'deferred_pre_act:policy_tool_prompt:{player_id}'
+      )
+      urgency_index = order_log.index(f'urgency_apply:{player_id}')
+      strategy_index = order_log.index(f'strategy_pre_act:{player_id}')
+      chooser_index = order_log.index(f'chooser_build:{player_id}')
+      phase2_index = order_log.index(f'phase2_build:{player_id}')
+      self.assertLess(self_index, chooser_index)
+      self.assertLess(situation_apply_index, situation_index)
+      self.assertLess(situation_index, chooser_index)
+      self.assertLess(policy_apply_index, policy_index)
+      self.assertLess(policy_index, chooser_index)
+      self.assertLess(urgency_index, strategy_index)
+      self.assertLess(strategy_index, chooser_index)
+      self.assertLess(chooser_index, phase2_index)
+
+  def test_run_week_keeps_buyer_stage_before_seller_stage(self):
+    participant_specs = {
+        'buyer_001': {
+            'id': 'buyer_001',
+            'name': 'Buyer 1',
+            'role': 'buyer',
+            'description': 'Test buyer profile.',
+            'preferences': copy.deepcopy(_buyer_profile()['preferences']),
+            'budget': copy.deepcopy(_buyer_profile()['budget']),
+        },
+        'seller_001': {
+            'id': 'seller_001',
+            'name': 'Seller 1',
+            'role': 'seller',
+            'description': 'Test seller profile.',
+            'flat': copy.deepcopy(_seller_profile()['flat']),
+            'expectations': copy.deepcopy(_seller_profile()['expectations']),
+        },
+    }
+    module = hdb_negotiation.NegotiationModule(
+        participant_specs=participant_specs,
+        negotiation_pairs=(('buyer_001', 'seller_001'),),
+        enabled=True,
+    )
+
+    buyer_event = (
+        'Buyer 1: '
+        '{"type":"QUESTION_BUYER","question":"Can you share your timeline?"}'
+    )
+    seller_event = (
+        'Seller 1: '
+        '{"type":"QUESTION_SELLER","question":"What timeline works for you?"}'
+    )
+    order_log: list[str] = []
+
+    def _record_execute_turn_stage(turn_specs):
+      player_ids = [str(turn_spec['player_id']) for turn_spec in turn_specs]
+      if player_ids == ['buyer_001']:
+        order_log.append('stage:buyer')
+        return [{
+            'player_id': 'buyer_001',
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'event': buyer_event,
+            'force_close': False,
+        }]
+      if player_ids == ['seller_001']:
+        order_log.append('stage:seller')
+        return [{
+            'player_id': 'seller_001',
+            'buyer_id': 'buyer_001',
+            'seller_id': 'seller_001',
+            'event': seller_event,
+            'force_close': False,
+        }]
+      self.fail(f'Unexpected turn specs for staged execution: {player_ids}')
+
+    def _record_observe(observer_id: str, event: str) -> None:
+      del event
+      order_log.append(f'observe:{observer_id}')
+
+    def _record_flush(observer_ids: list[str]) -> None:
+      order_log.append(f'flush:{",".join(observer_ids)}')
+
+    with mock.patch.object(
+        module,
+        '_execute_turn_stage',
+        side_effect=_record_execute_turn_stage,
+    ) as mock_execute_stage, mock.patch.object(
+        module,
+        '_observe_event',
+        side_effect=_record_observe,
+    ) as mock_observe, mock.patch.object(
+        module,
+        '_flush_pending_observation_updates',
+        side_effect=_record_flush,
+    ) as mock_flush:
+      outcome = module.run_week(week_number=1)
+
+    self.assertEqual(mock_execute_stage.call_count, 2)
+    self.assertEqual(mock_observe.call_count, 2)
+    self.assertEqual(mock_flush.call_count, 2)
+    self.assertEqual(
+        order_log,
+        [
+            'stage:buyer',
+            'observe:seller_001',
+            'flush:seller_001',
+            'stage:seller',
+            'observe:buyer_001',
+            'flush:buyer_001',
+        ],
+    )
+    self.assertEqual(outcome['number_of_pairs_negotiated'], 1)
+    self.assertEqual(outcome['events'], [buyer_event, seller_event])
 
 
 if __name__ == '__main__':
