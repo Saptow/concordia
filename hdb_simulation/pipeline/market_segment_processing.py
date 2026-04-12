@@ -999,6 +999,8 @@ def _restrain_transactions(
     rng: random.Random | None = None,
 ) -> pd.DataFrame:
     """Downsample transactions while preserving the observed flat-type mix."""
+    transactions = transactions.reset_index(drop=True)
+
     if sampled_flat_ratio is not None:
         if not (0 < sampled_flat_ratio <= 1):
             raise ValueError("sampled_flat_ratio must be within (0, 1].")
