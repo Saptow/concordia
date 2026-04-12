@@ -333,6 +333,76 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "- Match the schema exactly.\n"
         )
 
+    @staticmethod
+    def _parse_structured_probability_response(
+        response: str,
+        *,
+        schema: type[BaseModel],
+        field_name: str,
+        fallback: float,
+        agent_name: str,
+        verbose: bool,
+        label: str,
+    ) -> float:
+        candidates = [str(response or '').strip()]
+        extracted_json = HDBNegotiationStrategy._extract_first_json_object(
+            candidates[0]
+        )
+        if extracted_json and extracted_json != candidates[0]:
+            candidates.append(extracted_json)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                parsed = schema.model_validate_json(candidate)
+                value = getattr(parsed, field_name, None)
+                if isinstance(value, (int, float)):
+                    return float(value)
+            except Exception:
+                continue
+
+        if verbose:
+            print(
+                f"[{agent_name}] Failed to parse {label}, defaulting to "
+                f"{fallback:.2f}. Raw response: {response}"
+            )
+        return fallback
+
+    @staticmethod
+    def _parse_walkaway_threshold_response(
+        response: str,
+        *,
+        agent_name: str = 'Negotiator',
+        verbose: bool = False,
+    ) -> float:
+        return HDBNegotiationStrategy._parse_structured_probability_response(
+            response,
+            schema=WalkAwayThreshold,
+            field_name='walkaway_threshold',
+            fallback=BUYER_WALK_AWAY_URGENCY_THRESHOLD,
+            agent_name=agent_name,
+            verbose=verbose,
+            label='buyer walk-away threshold',
+        )
+
+    @staticmethod
+    def _parse_seller_exploration_threshold_response(
+        response: str,
+        *,
+        agent_name: str = 'Negotiator',
+        verbose: bool = False,
+    ) -> float:
+        return HDBNegotiationStrategy._parse_structured_probability_response(
+            response,
+            schema=SellerExplorationThreshold,
+            field_name='exploration_threshold',
+            fallback=SELLER_EXPLORATION_URGENCY_THRESHOLD,
+            agent_name=agent_name,
+            verbose=verbose,
+            label='seller exploration threshold',
+        )
+
     def apply_listing_handoff(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
