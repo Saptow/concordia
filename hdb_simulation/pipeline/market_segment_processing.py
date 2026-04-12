@@ -110,6 +110,20 @@ def _clean_amenity_name(value: Any) -> str:
         return ""
     return text
 
+
+def _split_clean_amenity_names(value: Any, *, delimiter: str = "|") -> list[str]:
+    """Split a delimited amenity field and clean each token independently."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+
+    cleaned_names: list[str] = []
+    for part in text.split(delimiter):
+        cleaned = _clean_amenity_name(part)
+        if cleaned:
+            cleaned_names.append(cleaned)
+    return cleaned_names
+
 class SellerMotivationProfile(BaseModel):
     seller_archetype_type: str = ""
     motivation_summary: str = ""
@@ -1242,11 +1256,9 @@ def _build_flat_universe(
             if station_name and station_name not in mrt_names:
                 mrt_names.append(station_name)
 
-        school_text = _clean_amenity_name(row.pri_school_names_0_2km)
-        school_names = [part.strip() for part in school_text.split("|") if part.strip()]
+        school_names = _split_clean_amenity_names(row.pri_school_names_0_2km)
 
-        hawker_text = _clean_amenity_name(row.hawker_names_0_1km)
-        hawker_names = [part.strip() for part in hawker_text.split("|") if part.strip()]
+        hawker_names = _split_clean_amenity_names(row.hawker_names_0_1km)
         remaining_lease_years = round(float(row.remaining_lease) / 12.0, 2)
         observed_price = float(row.resale_price)
         past_price_trends = _build_past_price_trends(
