@@ -49,7 +49,7 @@ def _resolve_manifest_artifact_path(
 
 def load_bundle_from_manifest(
     manifest_path: str | Path,
-) -> tuple[dict[str, object], dict[str, str]]:
+) -> tuple[dict[str, object], dict[str, object]]:
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
 
@@ -86,6 +86,16 @@ def load_bundle_from_manifest(
         raw_value = str(manifest.get(key, '')).strip()
         if raw_value:
             resolved_manifest[key] = raw_value
+    town_value = str(manifest.get('town', '')).strip()
+    if town_value:
+        resolved_manifest['town'] = town_value
+    planning_areas = manifest.get('planning_areas')
+    if isinstance(planning_areas, list):
+        resolved_manifest['planning_areas'] = [
+            str(value).strip()
+            for value in planning_areas
+            if str(value).strip()
+        ]
 
     bundle = {
         'flats': read_jsonl_records(resolved_manifest['flat_units_path']),
@@ -103,7 +113,7 @@ def build_or_load_market_segment(
     segment_config: SegmentConfig,
     model: VLLMLanguageModel | None = None,
     market_manifest_path: str | Path | None = None,
-) -> tuple[dict[str, object], dict[str, str]]:
+) -> tuple[dict[str, object], dict[str, object]]:
     """Build a market segment or reuse an existing manifest."""
     if market_manifest_path:
         logging.info(
