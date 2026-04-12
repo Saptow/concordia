@@ -269,7 +269,7 @@ class BuildMarketProfilesTest(unittest.TestCase):
         buyer_profiles['buyer_2023_00563']['name'],
         'Nur Aisyah Rahman',
     )
-    self.assertLen(model.prompts, 1)
+    self.assertEqual(len(model.prompts), 1)
     self.assertIn('teacher', model.prompts[0].lower())
 
   def test_name_generation_prompt_uses_few_shot_extract_or_invent_examples(self):
@@ -301,7 +301,7 @@ class BuildMarketProfilesTest(unittest.TestCase):
         buyer_profiles['buyer_2023_00563']['name'],
         'Ivan',
     )
-    self.assertLen(model.prompts, 1)
+    self.assertEqual(len(model.prompts), 1)
     self.assertIn('if the persona already contains a plausible personal name', model.prompts[0].lower())
     self.assertIn('name: ivan', model.prompts[0].lower())
     self.assertIn('name: nur aisyah rahman', model.prompts[0].lower())
@@ -560,7 +560,7 @@ class NegotiationListingObservationTest(unittest.TestCase):
     finally:
       hdb_negotiation.batch_update_agents_from_listings = original_batch_update
 
-    self.assertLen(buyer_entity.observations, 1)
+    self.assertEqual(len(buyer_entity.observations), 1)
     observation = buyer_entity.observations[0]
     self.assertIn(
         'Listing handoff context for this negotiation:',
@@ -1132,6 +1132,17 @@ class _RecordingPreparedEntity:
     return action_attempt or '{}'
 
 
+class _BoundCanonicalEntity:
+
+  def __init__(self, *, name: str, player_id: str):
+    self.name = name
+    self._hdb_player_id = player_id
+
+  def get_component(self, key, type_=None):
+    del key, type_
+    raise KeyError('No component bound for this minimal test entity.')
+
+
 class NegotiationBatchDependencyOrderTest(unittest.TestCase):
 
   def test_finalize_prepared_turns_applies_live_urgency_before_chooser_build(self):
@@ -1154,6 +1165,10 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
         },
     }
     module = hdb_negotiation.NegotiationModule(
+        entities=(
+            _BoundCanonicalEntity(name='Buyer 1', player_id='buyer_001'),
+            _BoundCanonicalEntity(name='Buyer 2', player_id='buyer_002'),
+        ),
         participant_specs=participant_specs,
         enabled=True,
     )
@@ -1274,14 +1289,14 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
       finalized_turns = module._finalize_prepared_turns(prepared_turns)
 
     self.assertEqual(mock_urgency_batch.call_count, 1)
-    self.assertLen(mock_urgency_batch.call_args.args[0], 2)
+    self.assertEqual(len(mock_urgency_batch.call_args.args[0]), 2)
     self.assertEqual(mock_text_batch.call_count, 1)
-    self.assertLen(mock_text_batch.call_args.args[0], 4)
+    self.assertEqual(len(mock_text_batch.call_args.args[0]), 4)
     self.assertEqual(mock_phase1_batch.call_count, 1)
-    self.assertLen(mock_phase1_batch.call_args.args[0], 2)
+    self.assertEqual(len(mock_phase1_batch.call_args.args[0]), 2)
     self.assertEqual(mock_phase2_batch.call_count, 1)
-    self.assertLen(mock_phase2_batch.call_args.args[0], 2)
-    self.assertLen(finalized_turns, 2)
+    self.assertEqual(len(mock_phase2_batch.call_args.args[0]), 2)
+    self.assertEqual(len(finalized_turns), 2)
     self.assertIn('Buyer 1', finalized_turns[0]['event'])
     self.assertIn('Buyer 2', finalized_turns[1]['event'])
 
@@ -1332,6 +1347,10 @@ class NegotiationBatchDependencyOrderTest(unittest.TestCase):
         },
     }
     module = hdb_negotiation.NegotiationModule(
+        entities=(
+            _BoundCanonicalEntity(name='Buyer 1', player_id='buyer_001'),
+            _BoundCanonicalEntity(name='Seller 1', player_id='seller_001'),
+        ),
         participant_specs=participant_specs,
         negotiation_pairs=(('buyer_001', 'seller_001'),),
         enabled=True,
