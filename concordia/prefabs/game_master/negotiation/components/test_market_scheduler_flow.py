@@ -3,6 +3,7 @@ import types
 import unittest
 from unittest import mock
 
+from configs import NegotiationComponentConfig
 from concordia.agents import entity_agent
 from concordia.components.agent import hdb_acting_component
 from concordia.components.agent import question_of_recent_memories
