@@ -1417,8 +1417,17 @@ def _build_seller_expectations(
     rng: random.Random,
 ) -> dict[str, Any]:
     """Sample a seller reservation / asking range around the hedonic anchor."""
-    anchor_log_price, sigma_log_price = _estimate_hedonic_price(
+    town_conditioned_training_flats = _select_hedonic_training_flats(
         hedonic_training_flats,
+        town=flat.get("town"),
+    )
+    training_flats = (
+        town_conditioned_training_flats
+        if town_conditioned_training_flats
+        else hedonic_training_flats
+    )
+    anchor_log_price, sigma_log_price = _estimate_hedonic_price(
+        training_flats,
         target_flat=flat,
     )
     reservation_price = float(
@@ -1453,7 +1462,7 @@ def _build_sellers(
         donor = _sample_nemotron_donor(
             donors,
             rng=rng,
-            planning_area=config.town,
+            planning_area=flat["town"],
             age=demographics["age"],
             marital_status=demographics["marital_status"],
             education_level=demographics["education_level"],
@@ -1529,6 +1538,17 @@ def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
     return grouped[grouped["population"] > 0].copy()
 
 
+def _load_buyer_age_priors_by_town(
+    path: Path,
+    towns: Any,
+) -> dict[str, pd.DataFrame]:
+    planning_areas = _coerce_planning_areas(towns)
+    return {
+        planning_area: _load_buyer_age_prior(path, planning_area)
+        for planning_area in planning_areas
+    }
+
+
 def _sample_income_band(
     income_prior: pd.DataFrame, age_band: str, rng: random.Random
 ) -> str:
@@ -1591,6 +1611,8 @@ def _estimate_buyer_hedonic_anchor(
         town=buyer["town"],
         preferred_flat_types=preferred_flat_types,
     )
+    if not training_flats:
+        training_flats = hedonic_training_flats
     return _estimate_hedonic_price(training_flats)
 
 
@@ -1663,6 +1685,32 @@ def _annotate_buyer_market_feasibility(
     return True
 
 
+def _sample_buyer_home_town(
+    flats: list[dict[str, Any]],
+    planning_areas: tuple[str, ...],
+    *,
+    rng: random.Random,
+) -> str:
+    town_counts: dict[str, int] = {}
+    for flat in flats:
+        town = str(flat.get("town", "")).strip()
+        if not town:
+            continue
+        town_counts[town] = town_counts.get(town, 0) + 1
+
+    eligible_towns = [
+        town for town in planning_areas if town_counts.get(town, 0) > 0
+    ]
+    if eligible_towns:
+        weights = [town_counts[town] for town in eligible_towns]
+        return str(rng.choices(eligible_towns, weights=weights, k=1)[0])
+    if planning_areas:
+        return planning_areas[0]
+    if town_counts:
+        return max(town_counts.items(), key=lambda item: item[1])[0]
+    return ""
+
+
 def _build_broad_buyers(
     flats: list[dict[str, Any]],
     price_by_flat_id: dict[str, float],
@@ -1672,7 +1720,7 @@ def _build_broad_buyers(
     *,
     config: SegmentConfig,
     rng: random.Random,
-    age_prior: pd.DataFrame,
+    age_priors_by_town: dict[str, pd.DataFrame],
     income_prior: pd.DataFrame,
     distribution_tables: dict[str, pd.DataFrame],
 ) -> list[dict[str, Any]]:
@@ -1684,10 +1732,22 @@ def _build_broad_buyers(
         broad_count * MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR,
     )
     attempts = 0
+    planning_areas = _coerce_planning_areas(config.town)
 
     while len(buyers) < broad_count and attempts < max_attempts:
         attempts += 1
         index = len(buyers) + 1
+        buyer_town = _sample_buyer_home_town(
+            flats,
+            planning_areas,
+            rng=rng,
+        )
+        age_prior = age_priors_by_town.get(buyer_town)
+        if age_prior is None:
+            fallback_town = planning_areas[0] if planning_areas else buyer_town
+            age_prior = age_priors_by_town[fallback_town]
+            buyer_town = fallback_town
+
         age_band = str(_weighted_choice(age_prior, "age_group", "population", rng))
         income_band = _sample_income_band(income_prior, age_band, rng)
         age = _sample_age_from_band(age_band, rng)
@@ -1695,18 +1755,9 @@ def _build_broad_buyers(
         donor = _sample_nemotron_donor(
             donors,
             rng=rng,
-            planning_area=config.town,
+            planning_area=buyer_town,
             age=age,
         )
-        donor_planning_area = str(donor.get("planning_area", "")).strip()
-        planning_areas = _coerce_planning_areas(config.town)
-        if donor_planning_area and _matches_planning_area(
-            donor_planning_area,
-            planning_areas,
-        ):
-            buyer_town = donor_planning_area
-        else:
-            buyer_town = planning_areas[0] if planning_areas else str(config.town)
 
         marital_status = (
             str(donor.get("marital_status", "")).strip()
@@ -2246,7 +2297,7 @@ def _build_buyer_pools_with_regeneration(
     *,
     config: SegmentConfig,
     rng: random.Random,
-    age_prior: pd.DataFrame,
+    age_priors_by_town: dict[str, pd.DataFrame],
     income_prior: pd.DataFrame,
     distribution_tables: dict[str, pd.DataFrame],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2280,7 +2331,7 @@ def _build_buyer_pools_with_regeneration(
             archetypes,
             config=config,
             rng=rng,
-            age_prior=age_prior,
+            age_priors_by_town=age_priors_by_town,
             income_prior=income_prior,
             distribution_tables=distribution_tables,
         )
@@ -2451,7 +2502,10 @@ def build_transaction_conditioned_segment(
         "education": pd.read_csv(config.flat_type_education_path).fillna(""),
         "occupation": pd.read_csv(config.flat_type_occupation_path).fillna(""),
     }
-    age_prior = _load_buyer_age_prior(config.age_prior_path, config.town)
+    age_priors_by_town = _load_buyer_age_priors_by_town(
+        config.age_prior_path,
+        config.town,
+    )
     income_prior = pd.read_csv(config.income_prior_path).fillna("")
     logging.info(
         "Loaded demographic priors and distribution tables from configured CSV inputs."
@@ -2546,7 +2600,7 @@ def build_transaction_conditioned_segment(
                 archetypes,
                 config=config,
                 rng=rng,
-                age_prior=age_prior,
+                age_priors_by_town=age_priors_by_town,
                 income_prior=income_prior,
                 distribution_tables=distribution_tables,
             )
