@@ -340,6 +340,7 @@ class Simulation(simulation_lib.Simulation):
       max_steps: int | None = None,
       verbose: bool = False,
       raw_log: list[Mapping[str, Any]] | None = None,
+      attach_entity_memories: bool = True,
       get_state_callback: Callable[[dict[str, Any]], None] | None = None,
       checkpoint_path: str | None = None,
       step_controller=None,
@@ -354,6 +355,9 @@ class Simulation(simulation_lib.Simulation):
       raw_log: A list to store the raw log of the simulation. This is used to
         generate the HTML log. Data in the supplied raw_log will be appended
         with the log from the simulation. If None, a new list is created.
+      attach_entity_memories: Whether to attach full entity memory dumps to the
+        returned structured log. Disabling this can significantly reduce peak
+        memory usage for large simulations while preserving step logs.
       get_state_callback: A callback to be called when saving a checkpoint. This
         callback is called with a dictionary containing the current state of all
         entities and game masters.
@@ -409,6 +413,9 @@ class Simulation(simulation_lib.Simulation):
 
     # Build and return structured log
     simulation_log = structured_logging.SimulationLog.from_raw_log(raw_log)
+    if not attach_entity_memories:
+      return simulation_log
+
     entity_memories: dict[str, list[str]] = {}
     for player in self.entities:
       if (

@@ -103,6 +103,25 @@ class HDBSimulationEngine(engine_lib.Engine):
       )
     return True
 
+  @classmethod
+  def _prune_heavy_log_fields(cls, value: Any) -> Any:
+    """Removes bulky debug-only fields before persisting step logs."""
+    if isinstance(value, Mapping):
+      pruned: dict[str, Any] = {}
+      for key, child in value.items():
+        normalized_key = str(key).strip().casefold()
+        if normalized_key in (
+            'chain of thought',
+            'internal_reasoning',
+            'decision_rationale',
+        ):
+          continue
+        pruned[str(key)] = cls._prune_heavy_log_fields(child)
+      return pruned
+    if isinstance(value, Sequence) and not isinstance(value, str):
+      return [cls._prune_heavy_log_fields(item) for item in value]
+    return value
+
   @staticmethod
   def _successful_closed_player_ids(
       summary: Mapping[str, Any],
@@ -197,9 +216,10 @@ class HDBSimulationEngine(engine_lib.Engine):
       if not isinstance(snapshots, Mapping):
         continue
       for entity_name, snapshot in snapshots.items():
-        if not self._has_meaningful_log_value(snapshot):
+        pruned_snapshot = self._prune_heavy_log_fields(snapshot)
+        if not self._has_meaningful_log_value(pruned_snapshot):
           continue
-        collected_logs[str(entity_name)] = snapshot
+        collected_logs[str(entity_name)] = pruned_snapshot
 
     for entity in entities:
       if (
@@ -208,7 +228,7 @@ class HDBSimulationEngine(engine_lib.Engine):
           or not hasattr(entity, 'get_last_log')
       ):
         continue
-      snapshot = entity.get_last_log()
+      snapshot = self._prune_heavy_log_fields(entity.get_last_log())
       if not self._has_meaningful_log_value(snapshot):
         continue
       collected_logs[entity.name] = snapshot
