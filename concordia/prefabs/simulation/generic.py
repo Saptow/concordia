@@ -658,6 +658,9 @@ class Simulation(simulation_lib.Simulation):
 
   def save_checkpoint(self, step: int, checkpoint_path: str):
     """Saves the state of all entities at the current step."""
+    if not checkpoint_path and not self._get_state_callback:
+      return
+
     checkpoint_data = self.make_checkpoint_data()
 
     if self._get_state_callback:
