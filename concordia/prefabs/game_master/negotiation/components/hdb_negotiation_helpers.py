@@ -597,6 +597,22 @@ class ActiveOfferTracker:
     self._ensure_initialized()
     return list(self._offer_history.get(self._pair_key(buyer_id, seller_id), []))
 
+  def evict_pair_state(self, buyer_id: str, seller_id: str) -> None:
+    """Drop heavy pair-local state after it has been archived externally."""
+    self._ensure_initialized()
+    pair_key = self._pair_key(buyer_id, seller_id)
+    members = self._pair_members.pop(pair_key, None)
+    if members is not None:
+      for player_id in members:
+        if self._player_to_pair.get(player_id) == pair_key:
+          self._player_to_pair.pop(player_id, None)
+    self._active_offers.pop(pair_key, None)
+    self._offer_history.pop(pair_key, None)
+    self._turn_counts.pop(pair_key, None)
+    self._closed_pairs.discard(pair_key)
+    self._closed_pair_outcomes.pop(pair_key, None)
+    self._pair_order = [key for key in self._pair_order if key != pair_key]
+
   def all_pairs_closed(self) -> bool:
     self._ensure_initialized()
     return not self._pair_order or len(self._closed_pairs) >= len(

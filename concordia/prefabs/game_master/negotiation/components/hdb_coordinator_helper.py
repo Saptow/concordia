@@ -480,6 +480,19 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
           ) not in successful_pair_ids
       ]
     negotiation_summary['pair_states'] = pair_states
+    closed_pair_records = self._sequence_or_empty(
+        negotiation_summary.get('closed_pairs', ())
+    )
+    persist_and_evict = getattr(
+        negotiation,
+        'persist_and_evict_closed_pair_state',
+        None,
+    )
+    if closed_pair_records and callable(persist_and_evict):
+      persist_and_evict(
+          closed_pair_records,
+          week_number=current_week,
+      )
 
     # Logging
     self._last_week_summary = {

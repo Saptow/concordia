@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 import json
+import os
 import types
 from typing import Any
 
@@ -67,7 +68,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       negotiation_pairs: Sequence[Sequence[str]] | None = None,
       action_prompt: str = 'What should {name} do next?',
       max_rounds: int = 0,
+      max_weeks_open: int = 0,
       pair_max_workers: int | None = 1,
+      closed_pair_archive_jsonl_path: str | None = None,
       enabled: bool = True,
       make_observation_component_key: str = (
           make_observation_component.DEFAULT_MAKE_OBSERVATION_COMPONENT_KEY
@@ -79,6 +82,13 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._make_observation_component_key = make_observation_component_key
     self._enabled = bool(enabled)
     self._pair_max_workers = _normalize_max_workers(pair_max_workers)
+    self._max_weeks_open = max(0, int(max_weeks_open or 0))
+    self._closed_pair_archive_jsonl_path = (
+        str(closed_pair_archive_jsonl_path).strip()
+        if closed_pair_archive_jsonl_path is not None
+        and str(closed_pair_archive_jsonl_path).strip()
+        else None
+    )
     self._participant_specs: dict[str, dict[str, Any]] = {}
     self._player_ids: tuple[str, ...] = ()
     self._player_names: tuple[str, ...] = ()
@@ -779,6 +789,113 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         })
     return records
 
+  def _build_closed_pair_archive_record(
+      self,
+      *,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+      outcome: str,
+  ) -> dict[str, Any]:
+    """Builds one archive payload for a closed pair before eviction."""
+    pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+    replay_record = self._conversation_replays.get(pair_key)
+    if isinstance(replay_record, Mapping):
+      archive_record = dict(
+          replay_record,
+          events=list(replay_record.get('events', ())),
+      )
+    else:
+      archive_record = {
+          'pair_key': pair_key,
+          'buyer_id': buyer_id,
+          'buyer_name': self._get_player_name(buyer_id),
+          'seller_id': seller_id,
+          'seller_name': self._get_player_name(seller_id),
+          'events': [],
+      }
+    archive_record.update({
+        'pair_key': pair_key,
+        'buyer_id': buyer_id,
+        'buyer_name': self._get_player_name(buyer_id),
+        'seller_id': seller_id,
+        'seller_name': self._get_player_name(seller_id),
+        'start_week': int(self._pair_start_weeks.get(pair_key, week_number)),
+        'end_week': int(week_number),
+        'closed': True,
+        'outcome': str(outcome),
+        'pair_round_number': int(
+            self._scheduler.get_pair_round_number(buyer_id, seller_id)
+        ),
+        'turn_count': int(self._offer_tracker._turn_counts.get(pair_key, 0)),
+        'active_offer': self._offer_tracker._active_offers.get(pair_key),
+        'offer_history': list(
+            self._offer_tracker.get_offer_history_for_pair(buyer_id, seller_id)
+        ),
+        'archived_at_week': int(week_number),
+    })
+    return archive_record
+
+  def persist_and_evict_closed_pair_state(
+      self,
+      pair_records: Sequence[Mapping[str, Any]],
+      *,
+      week_number: int,
+  ) -> None:
+    """Archives closed-pair transcripts/history, then evicts them from RAM."""
+    if not pair_records:
+      return
+    if not self._closed_pair_archive_jsonl_path:
+      logging.warning(
+          'Closed-pair eviction requested but no archive path is configured; '
+          'keeping negotiation state in memory.'
+      )
+      return
+
+    pairs_to_evict: list[tuple[str, str]] = []
+    archive_records: list[dict[str, Any]] = []
+    for pair_record in pair_records:
+      buyer_id = str(pair_record.get('buyer_id', '')).strip()
+      seller_id = str(pair_record.get('seller_id', '')).strip()
+      if not buyer_id or not seller_id:
+        continue
+      pairs_to_evict.append((buyer_id, seller_id))
+      archive_records.append(
+          self._build_closed_pair_archive_record(
+              buyer_id=buyer_id,
+              seller_id=seller_id,
+              week_number=week_number,
+              outcome=str(pair_record.get('outcome', 'CLOSED')).strip() or 'CLOSED',
+          )
+      )
+
+    if not archive_records:
+      return
+
+    archive_dir = os.path.dirname(self._closed_pair_archive_jsonl_path)
+    try:
+      if archive_dir:
+        os.makedirs(archive_dir, exist_ok=True)
+      with open(
+          self._closed_pair_archive_jsonl_path,
+          'a',
+          encoding='utf-8',
+      ) as handle:
+        for archive_record in archive_records:
+          handle.write(json.dumps(archive_record, ensure_ascii=False) + '\n')
+    except OSError:
+      logging.exception(
+          'Failed to archive closed negotiation pairs to %s; keeping state in memory.',
+          self._closed_pair_archive_jsonl_path,
+      )
+      return
+
+    for buyer_id, seller_id in pairs_to_evict:
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      self._conversation_replays.pop(pair_key, None)
+      self._pair_start_weeks.pop(pair_key, None)
+      self._offer_tracker.evict_pair_state(buyer_id, seller_id)
+
   @staticmethod
   def _extract_public_action_from_event(event: str) -> dict[str, Any] | None:
     """Parses the action payload while stripping private reasoning fields."""
@@ -891,6 +1008,33 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         else 'OPEN'
     )
     record['end_week'] = int(week_number) if is_closed else None
+
+  def _close_pairs_exceeding_max_weeks_open(
+      self,
+      *,
+      week_number: int,
+  ) -> None:
+    """Close stale negotiations so failed pairs can return to listing."""
+    if self._max_weeks_open <= 0:
+      return
+
+    for buyer_id, seller_id in self._scheduler.get_open_pair_queue_ids():
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      start_week = int(self._pair_start_weeks.get(pair_key, week_number))
+      weeks_open = max(0, int(week_number) - start_week)
+      if weeks_open < self._max_weeks_open:
+        continue
+      self._offer_tracker.close_pair(
+          buyer_id,
+          seller_id,
+          outcome=negotiation_schemas.NegotiationOutcome.CLOSED_WITHOUT_SUCCESS,
+      )
+      self._update_pair_replay_outcome(
+          pair_key=pair_key,
+          buyer_id=buyer_id,
+          seller_id=seller_id,
+          week_number=week_number,
+      )
 
   # Pair execution
   def _prepare_player_turn(
@@ -1491,6 +1635,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
     self._offer_tracker._ensure_initialized()
     closed_before = set(self._offer_tracker._closed_pairs)
+    self._close_pairs_exceeding_max_weeks_open(week_number=week_number)
     open_pairs = self._scheduler.get_open_pair_queue_ids()
     negotiated_pairs: list[tuple[str, str]] = []
     number_of_pairs_negotiated = 0
@@ -1695,13 +1840,17 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             for key, value in self._conversation_replays.items()
         },
         'action_prompt': self._action_prompt,
+        'max_weeks_open': self._max_weeks_open,
         'make_observation_component_key': self._make_observation_component_key,
+        'closed_pair_archive_jsonl_path': self._closed_pair_archive_jsonl_path,
         'enabled': int(self._enabled),
     }
 
   def get_dynamic_state(self) -> entity_component.ComponentState:
     return {
         'action_prompt': self._action_prompt,
+        'max_weeks_open': self._max_weeks_open,
+        'closed_pair_archive_jsonl_path': self._closed_pair_archive_jsonl_path,
         'enabled': int(self._enabled),
     }
 
@@ -1749,12 +1898,17 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self._conversation_replays = restored_replays
     else:
       self._conversation_replays = {}
+    if 'max_weeks_open' in state:
+      self._max_weeks_open = max(0, int(state.get('max_weeks_open', 0) or 0))
     if 'action_prompt' in state:
       self._action_prompt = str(state['action_prompt'])
     if 'make_observation_component_key' in state:
       self._make_observation_component_key = str(
           state['make_observation_component_key']
       )
+    if 'closed_pair_archive_jsonl_path' in state:
+      archive_path = str(state['closed_pair_archive_jsonl_path']).strip()
+      self._closed_pair_archive_jsonl_path = archive_path or None
     self._enabled = bool(state.get('enabled', 1))
     self._entities_by_id = {}
     self._bind_known_entities()

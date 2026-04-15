@@ -134,6 +134,9 @@ class GameMaster(prefab_lib.Prefab):
         # The main HDB workflow does not use a scheduler-level negotiation cap.
         # Pairs should exit through explicit outcomes, especially buyer WALK_AWAY.
         max_rounds=0,
+        max_weeks_open=int(
+            negotiation_params.get('max_weeks_open', 0) or 0
+        ),
         pair_max_workers=int(
             negotiation_params.get('pair_max_workers', 1) or 1
         ),

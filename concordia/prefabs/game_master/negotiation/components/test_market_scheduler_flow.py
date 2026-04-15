@@ -141,6 +141,8 @@ class _FakeNegotiationModule:
     self.relisting_payloads = []
     self.pair_states = []
     self.last_relisting_pair_records = None
+    self.last_archived_pair_records = None
+    self.last_archived_week_number = None
 
   def set_enabled(self, enabled: bool) -> None:
     self.enabled = enabled
@@ -163,6 +165,15 @@ class _FakeNegotiationModule:
   def get_pair_state_snapshots(self, pair_ids=None):
     del pair_ids
     return list(self.pair_states)
+
+  def persist_and_evict_closed_pair_state(
+      self,
+      pair_records,
+      *,
+      week_number: int,
+  ):
+    self.last_archived_pair_records = list(pair_records)
+    self.last_archived_week_number = week_number
 
   def is_finished(self) -> bool:
     return not self._open_pairs
@@ -870,6 +881,11 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
         summary['reopened_listing_pairs'],
         negotiation_module.relisting_payloads,
     )
+    self.assertEqual(
+        negotiation_module.last_archived_pair_records,
+        negotiation_outcome['closed_pairs'],
+    )
+    self.assertEqual(negotiation_module.last_archived_week_number, 1)
 
   def test_successful_negotiation_does_not_reopen_into_listing(self):
     listing_module = _FakeListingModule(

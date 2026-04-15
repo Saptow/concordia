@@ -11,7 +11,8 @@ from fastembed import SparseTextEmbedding
 from sentence_transformers import SentenceTransformer
 
 from configs import DenseEmbedderConfig
-from configs import LLMConfig
+from configs import get_active_llm_profile_name
+from configs import get_llm_config
 from configs import SparseEmbedderConfig
 from concordia.concordia.contrib.language_models.vllm.vllm_model import (
     VLLMLanguageModel,
@@ -28,7 +29,13 @@ def configure_logging() -> None:
 
 def initialise_model() -> VLLMLanguageModel:
     """Initialise the local vLLM model used across HDB workflows."""
-    logging.info("Initialising model %s.", LLMConfig.MODEL_NAME)
+    llm_config = get_llm_config()
+    profile_name = get_active_llm_profile_name()
+    logging.info(
+        "Initialising model %s with LLM profile %s.",
+        llm_config.MODEL_NAME,
+        profile_name,
+    )
 
     # Map config attribute name -> VLLMLanguageModel kwarg name
     config_to_model_kwargs = {
@@ -50,19 +57,23 @@ def initialise_model() -> VLLMLanguageModel:
     model_kwargs = {}
 
     for config_name, model_kwarg in config_to_model_kwargs.items():
-        if hasattr(LLMConfig, config_name):
-            value = getattr(LLMConfig, config_name)
+        if hasattr(llm_config, config_name):
+            value = getattr(llm_config, config_name)
             if value is not None:
                 model_kwargs[model_kwarg] = value
 
     # Optional: allow fully custom extra kwargs
-    extra_kwargs = getattr(LLMConfig, "EXTRA_VLLM_KWARGS", {})
+    extra_kwargs = getattr(llm_config, "EXTRA_VLLM_KWARGS", {})
     if extra_kwargs:
         model_kwargs.update(extra_kwargs)
 
     model = VLLMLanguageModel(**model_kwargs)
 
-    logging.info("Model %s initialised successfully.", LLMConfig.MODEL_NAME)
+    logging.info(
+        "Model %s initialised successfully with LLM profile %s.",
+        llm_config.MODEL_NAME,
+        profile_name,
+    )
     return model
 
 
