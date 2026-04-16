@@ -859,9 +859,55 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def _buyer_state(self, player_id: str) -> negotiation_schemas.ListingBuyerState:
     """Builds a runtime listing snapshot for one buyer."""
+    return self._buyer_state_with_options(
+        player_id,
+        include_search_results=True,
+    )
+
+  def _search_results_summary(
+      self,
+      player_id: str,
+  ) -> str:
+    """Builds a compact search-results summary for logging snapshots."""
+    portal = self._ensure_portal()
+    results = list(portal.search_results_by_buyer.get(player_id, ()))
+    if not results:
+      return 'No recent search results.'
+
+    preview = []
+    for result in results[:3]:
+      seller_name = str(getattr(result, 'seller_name', '') or '').strip() or 'Unknown'
+      listing_price = getattr(result, 'listing_price', None)
+      if isinstance(listing_price, (int, float)):
+        preview.append(f'{seller_name} at SGD {float(listing_price):,.0f}')
+      else:
+        preview.append(seller_name)
+
+    remaining_count = max(0, len(results) - len(preview))
+    summary = (
+        f'{len(results)} result(s). Top matches: ' + '; '.join(preview)
+        if preview
+        else f'{len(results)} result(s).'
+    )
+    if remaining_count:
+      summary += f'; plus {remaining_count} more.'
+    return summary
+
+  def _buyer_state_with_options(
+      self,
+      player_id: str,
+      *,
+      include_search_results: bool,
+  ) -> negotiation_schemas.ListingBuyerState:
+    """Builds a buyer snapshot, optionally omitting heavy search results."""
     buyer = self._buyers[player_id]
     portal = self._ensure_portal()
     market_state = portal._buyer_market_state(buyer)
+    latest_search_results = (
+        list(portal.search_results_by_buyer.get(player_id, []))
+        if include_search_results
+        else []
+    )
     return negotiation_schemas.ListingBuyerState(
         id=player_id,
         name=buyer.name,
@@ -873,7 +919,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             record.model_copy(deep=True) for record in buyer.negotiation_history
         ],
         effective_reservation=market_state.effective_reservation,
-        latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
+        latest_search_results=latest_search_results,
+        latest_search_results_summary=self._search_results_summary(player_id),
         latest_market_feedback=portal.market_feedback_by_buyer.get(
             player_id,
             'No market feedback yet.',
@@ -915,7 +962,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     snapshot = negotiation_schemas.ListingPortalSnapshot(
         week_number=max(1, self._last_run_week or 1),
         buyers=[
-            self._buyer_state(buyer_id)
+            self._buyer_state_with_options(
+                buyer_id,
+                include_search_results=False,
+            )
             for buyer_id in self._buyers
             if not self._portal.is_player_closed(buyer_id)
         ],
@@ -954,7 +1004,12 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         continue
       if portal.is_player_closed(buyer_id):
         continue
-      buyers.append(self._buyer_state(buyer_id).model_dump(mode='json'))
+      buyers.append(
+          self._buyer_state_with_options(
+              buyer_id,
+              include_search_results=False,
+          ).model_dump(mode='json')
+      )
 
     listed_sellers: list[dict[str, Any]] = []
     for seller_id in self._sellers:

@@ -5,9 +5,9 @@ from typing import Annotated, Literal, Union, Any, Optional
 
 from concordia.hdb_simulation.models.schemas.listing.qdrant import ListingRecord
 from concordia.hdb_simulation.models.schemas.listing.schema import (
+    CompactPortalSearchResult,
     NegotiationMatch,
     PortalBuyer,
-    PortalSearchResult,
     PortalSeller,
 )
 from pydantic import Field, RootModel, BaseModel 
@@ -86,7 +86,8 @@ class SellerMarketBeliefState(BaseModel):
 
 class ListingBuyerState(PortalBuyer):
     effective_reservation: NormalDistribution
-    latest_search_results: list[PortalSearchResult] = Field(default_factory=list)
+    latest_search_results: list[CompactPortalSearchResult] = Field(default_factory=list)
+    latest_search_results_summary: str = ''
     latest_market_feedback: str = 'No market feedback yet.'
 
 

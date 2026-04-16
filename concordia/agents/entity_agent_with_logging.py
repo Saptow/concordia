@@ -68,7 +68,7 @@ class EntityAgentWithLogging(entity_agent.EntityAgent,
     self._component_logging = (
         measurements
         if measurements is not None
-        else measurements_lib.Measurements()
+        else measurements_lib.Measurements(max_items_per_channel=1)
     )
 
     for component_name, component in self._context_components.items():

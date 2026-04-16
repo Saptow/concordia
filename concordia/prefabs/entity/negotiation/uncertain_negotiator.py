@@ -56,6 +56,19 @@ MIN_ACTION_REASONING_MEMORY_WINDOW = 4
 MAX_ACTION_REASONING_MEMORY_WINDOW = 8
 
 
+def _resolve_memory_bank_limit(value: object) -> int | None:
+    """Resolve the retained-memory cap for HDB negotiators."""
+    if value is None:
+        return NegotiationComponentConfig.DEFAULT_MEMORY_BANK_LIMIT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return NegotiationComponentConfig.DEFAULT_MEMORY_BANK_LIMIT
+    if parsed <= 0:
+        return None
+    return parsed
+
+
 def _clamp_memory_window(value: object) -> int:
     """Clamp the estimated memory window to the supported range."""
     try:
@@ -208,6 +221,10 @@ class Entity(prefab_lib.Prefab):
         action_reasoning_memory_window = _clamp_memory_window(
             raw_action_reasoning_memory_window
         )
+        memory_bank_limit = _resolve_memory_bank_limit(
+            negotiation_config.get('memory_bank_limit')
+        )
+        memory_bank.set_max_entries(memory_bank_limit)
         reservation = float(
             negotiation_config.get(
                 'reservation_value',

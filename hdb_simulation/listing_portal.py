@@ -305,7 +305,7 @@ class ListingPortal:
         self._state_lock = threading.RLock()
 
         self.requests_by_seller: dict[str, list[listing_schemas.NegotiationRequest]] = {}
-        self.search_results_by_buyer: dict[str, list[listing_schemas.PortalSearchResult]] = {}
+        self.search_results_by_buyer: dict[str, list[listing_schemas.CompactPortalSearchResult]] = {}
         self.private_buyer_market_states: dict[str, negotiation_schemas.BuyerMarketBeliefState] = {}
         self.private_seller_market_states: dict[str, negotiation_schemas.SellerMarketBeliefState] = {}
         self.market_feedback_by_buyer: dict[str, str] = {}
@@ -476,6 +476,21 @@ class ListingPortal:
         ]
 
     @staticmethod
+    def _compact_search_results(
+        results: Sequence[listing_schemas.PortalSearchResult],
+    ) -> list[listing_schemas.CompactPortalSearchResult]:
+        return [
+            listing_schemas.CompactPortalSearchResult(
+                listing_id=result.listing_id,
+                seller_id=result.seller_id,
+                seller_name=result.seller_name,
+                listing_price=float(result.listing_price),
+                score=float(result.score),
+            )
+            for result in results
+        ]
+
+    @staticmethod
     def _relevant_market_observations(
         results: Sequence[listing_schemas.PortalSearchResult],
         match_scores: Sequence[float],
@@ -608,8 +623,9 @@ class ListingPortal:
             results,
         )
         buyer_id = buyer.id
+        compact_results = self._compact_search_results(results)
         with self._state_lock:
-            self.search_results_by_buyer[buyer_id] = list(results)
+            self.search_results_by_buyer[buyer_id] = compact_results
             self._update_buyer_market_state(
                 buyer,
                 relevant_observations,
@@ -682,8 +698,9 @@ class ListingPortal:
                 results,
             )
             buyer_id = buyer.id
+            compact_results = self._compact_search_results(results)
             with self._state_lock:
-                self.search_results_by_buyer[buyer_id] = list(results)
+                self.search_results_by_buyer[buyer_id] = compact_results
                 self._update_buyer_market_state(
                     buyer,
                     relevant_observations,
@@ -892,7 +909,7 @@ class ListingPortal:
         }
         restored.search_results_by_buyer = {
             buyer_id: [
-                listing_schemas.PortalSearchResult.model_validate(result)
+                listing_schemas.CompactPortalSearchResult.model_validate(result)
                 for result in results
             ]
             for buyer_id, results in dict(

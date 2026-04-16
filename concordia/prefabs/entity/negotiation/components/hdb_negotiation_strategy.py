@@ -22,6 +22,10 @@ BUYER_WALK_AWAY_URGENCY_THRESHOLD = 0.8
 SELLER_EXPLORATION_URGENCY_THRESHOLD = 0.7
 DEFAULT_URGENCY_LEVEL = 0.5
 MIN_WEEKS_BEFORE_WALK_AWAY = 1
+# Reserve a small band below each urgency threshold for concrete price moves
+# rather than additional questioning, so agents do not stall right before they
+# would otherwise switch into walk-away or close-out behavior.
+INFO_GATHERING_URGENCY_BUFFER = 0.1
 SELF_ACTION_TAG = '[self_action]'
 MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS = 360
 
@@ -767,12 +771,22 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         if self._role == RoleType.BUYER:
             return (
                 uncertainty_exceeds_tolerance
-                and urgency_level < self._buyer_walkaway_threshold
+                and urgency_level
+                < max(
+                    0.0,
+                    self._buyer_walkaway_threshold
+                    - INFO_GATHERING_URGENCY_BUFFER,
+                )
             )
         if self._role == RoleType.SELLER:
             return (
                 uncertainty_exceeds_tolerance
-                and urgency_level < self._seller_exploration_threshold
+                and urgency_level
+                < max(
+                    0.0,
+                    self._seller_exploration_threshold
+                    - INFO_GATHERING_URGENCY_BUFFER,
+                )
             )
         return uncertainty_exceeds_tolerance
 
@@ -821,9 +835,9 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             if self._state.rounds_elapsed < MIN_WEEKS_BEFORE_WALK_AWAY:
                 return (
                     "[IMPORTANT] No active offer is on the table yet. During the first "
-                    "negotiation week, do not rush into MAKE_OFFER just because uncertainty "
-                    "looks manageable; keep gathering lightweight information or probing "
-                    "interest instead."
+                    "negotiation week, ask at most one lightweight targeted question only "
+                    "if it resolves a material uncertainty; otherwise lean toward "
+                    "MAKE_OFFER to establish price discovery early."
                 )
             return (
                 "[IMPORTANT] No active offer is on the table and additional "
@@ -838,7 +852,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                     f'"{top_issue_question}"'
                 )
             return (
-                '[IMPORTANT] Ask at most one targeted question before negotiating further: '
+                '[IMPORTANT] Ask at most one targeted question before negotiating further, then lean toward MAKE_OFFER unless the answer creates a new material issue: '
                 f'"{top_issue_question}"'
             )
         return (
