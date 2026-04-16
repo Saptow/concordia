@@ -22,10 +22,6 @@ BUYER_WALK_AWAY_URGENCY_THRESHOLD = 0.8
 SELLER_EXPLORATION_URGENCY_THRESHOLD = 0.7
 DEFAULT_URGENCY_LEVEL = 0.5
 MIN_WEEKS_BEFORE_WALK_AWAY = 1
-# Reserve a small band below each urgency threshold for concrete price moves
-# rather than additional questioning, so agents do not stall right before they
-# would otherwise switch into walk-away or close-out behavior.
-INFO_GATHERING_URGENCY_BUFFER = 0.1
 SELF_ACTION_TAG = '[self_action]'
 MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS = 360
 
@@ -768,26 +764,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         action_confidence = max(0.0, min(1.0, action_confidence))
         risk_tolerance = max(0.0, min(1.0, risk_tolerance))
         uncertainty_exceeds_tolerance = (1 - action_confidence) > risk_tolerance
-        if self._role == RoleType.BUYER:
-            return (
-                uncertainty_exceeds_tolerance
-                and urgency_level
-                < max(
-                    0.0,
-                    self._buyer_walkaway_threshold
-                    - INFO_GATHERING_URGENCY_BUFFER,
-                )
-            )
-        if self._role == RoleType.SELLER:
-            return (
-                uncertainty_exceeds_tolerance
-                and urgency_level
-                < max(
-                    0.0,
-                    self._seller_exploration_threshold
-                    - INFO_GATHERING_URGENCY_BUFFER,
-                )
-            )
         return uncertainty_exceeds_tolerance
 
     def _build_live_urgency_context(
@@ -822,6 +798,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         top_issue_question = str(
             uncertainty_summary.get('top_issue_question', '')
         ).strip()
+        no_material_question_left = not top_issue_question
         if should_walk_away:
             return (
                 "[IMPORTANT] Your urgency exceeds your buyer-specific walk-away threshold. "
@@ -832,16 +809,19 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 return "[IMPORTANT] An active offer is on the table and uncertainty is low enough to close. ACCEPT_OFFER or REJECT_OFFER now."
             return "[IMPORTANT] Shift away from open-ended exploration and toward concrete closing actions. MAKE_OFFER or ACCEPT_OFFER now."
         if not has_active_offer and not should_gather_info:
-            if self._state.rounds_elapsed < MIN_WEEKS_BEFORE_WALK_AWAY:
+            if (
+                self._state.rounds_elapsed >= MIN_WEEKS_BEFORE_WALK_AWAY
+                or no_material_question_left
+            ):
                 return (
-                    "[IMPORTANT] No active offer is on the table yet. During the first "
-                    "negotiation week, ask at most one lightweight targeted question only "
-                    "if it resolves a material uncertainty; otherwise lean toward "
-                    "MAKE_OFFER to establish price discovery early."
+                    "[IMPORTANT] No active offer is on the table and the remaining "
+                    "uncertainty does not justify further questioning. "
+                    "MAKE_OFFER now to establish price discovery."
                 )
             return (
-                "[IMPORTANT] No active offer is on the table and additional "
-                "information gathering is not justified. MAKE_OFFER now."
+                "[IMPORTANT] No active offer is on the table yet. During the first "
+                "negotiation week, if you still ask anything, keep it to one lightweight "
+                "targeted question and then move toward MAKE_OFFER."
             )
         if not issue_items:
             return "[IMPORTANT] No information to gather. Lean towards MAKE_OFFER after the 1st week of negotiation, otherwise lean toward targeted questioning to resolve the most pressing uncertainty."
