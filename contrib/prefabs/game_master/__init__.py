@@ -12,4 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Library of components contributed by users."""
 
+from concordia.contrib.prefabs.game_master import space_ship
