@@ -125,6 +125,11 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     negotiation_pairs = (
         negotiation.get_open_pairs() if negotiation.is_enabled() else []
     )
+    occupied_negotiation_ids = {
+        player_id
+        for pair in negotiation_pairs
+        for player_id in pair
+    }
     for raw_pair in new_negotiation_pairs:
       buyer_id = str(raw_pair.get('buyer_id', '')).strip()
       seller_id = str(raw_pair.get('seller_id', '')).strip()
@@ -141,7 +146,21 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
         continue
       candidate = (buyer_id, seller_id)
       if candidate not in negotiation_pairs:
+        conflicting_ids = [
+            player_id
+            for player_id in candidate
+            if player_id in occupied_negotiation_ids
+        ]
+        if conflicting_ids:
+          logging.warning(
+              'Skipping negotiation transfer pair %s because participant ids %s '
+              'are already assigned to an open negotiation pair.',
+              candidate,
+              conflicting_ids,
+          )
+          continue
         negotiation_pairs.append(candidate)
+        occupied_negotiation_ids.update(candidate)
     negotiation_ids = {
         player_id
         for pair in negotiation_pairs
@@ -456,9 +475,75 @@ class WeeklyCoordinator(action_spec_ignored.ActionSpecIgnored):
     negotiation_summary = (
         dict(negotiation_outcome) if negotiation_outcome is not None else {}
     )
-    negotiation_summary['pair_states'] = negotiation.get_pair_state_snapshots(
+    closed_pair_ids = {
+        (
+            str(record.get('buyer_id', '')).strip(),
+            str(record.get('seller_id', '')).strip(),
+        )
+        for record in self._sequence_or_empty(
+            negotiation_summary.get('closed_pairs', ())
+        )
+        if isinstance(record, Mapping)
+    }
+    pair_states = negotiation.get_pair_state_snapshots(
         self._module_assignments.get('negotiation', ())
     )
+    if closed_pair_ids:
+      pair_states = [
+          state
+          for state in pair_states
+          if isinstance(state, Mapping)
+          and (
+              str(state.get('buyer_id', '')).strip(),
+              str(state.get('seller_id', '')).strip(),
+          ) not in closed_pair_ids
+      ]
+    completed_round_by_pair_key: dict[str, int] = {}
+    for record in self._sequence_or_empty(
+        negotiation_summary.get('evaluation_records', ())
+    ):
+      if not isinstance(record, Mapping):
+        continue
+      pair_key = str(record.get('pair_key', '')).strip()
+      if not pair_key:
+        continue
+      pair_round_number = int(record.get('pair_round_number', 0))
+      if pair_round_number <= 0:
+        continue
+      completed_round_by_pair_key[pair_key] = max(
+          completed_round_by_pair_key.get(pair_key, 0),
+          pair_round_number,
+      )
+    if completed_round_by_pair_key:
+      pair_states = [
+          dict(state, pair_round_number=(
+              completed_round_by_pair_key.get(
+                  str(state.get('pair_key', '')).strip(),
+              )
+              or (
+                  int(state.get('pair_round_number', 0))
+                  if isinstance(state.get('pair_round_number', 0), (int, float))
+                  else 0
+              )
+          ))
+          if isinstance(state, Mapping)
+          else state
+          for state in pair_states
+      ]
+    negotiation_summary['pair_states'] = pair_states
+    closed_pair_records = self._sequence_or_empty(
+        negotiation_summary.get('closed_pairs', ())
+    )
+    persist_and_evict = getattr(
+        negotiation,
+        'persist_and_evict_closed_pair_state',
+        None,
+    )
+    if closed_pair_records and callable(persist_and_evict):
+      persist_and_evict(
+          closed_pair_records,
+          week_number=current_week,
+      )
 
     # Logging
     self._last_week_summary = {

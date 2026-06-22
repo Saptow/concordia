@@ -29,6 +29,7 @@ def _unique_market_display_name(
     requested_name: str,
     record: Mapping[str, Any],
     role_label: str,
+    model: language_model.LanguageModel | None,
     seen_names: set[str],
 ) -> str:
   """Returns a display name that is unique across the whole market."""
@@ -40,11 +41,12 @@ def _unique_market_display_name(
   disambiguated_name = disambiguate_profile_name(
       requested_name=candidate,
       record=record,
+      model=model,
       role_label=role_label,
   )
   if disambiguated_name and disambiguated_name not in seen_names:
     logging.warning(
-        'Duplicate participant display name %r detected; using persona-based surname disambiguation %r instead.',
+        'Duplicate participant display name %r detected; using persona-based expansion %r instead.',
         candidate,
         disambiguated_name,
     )
@@ -97,28 +99,22 @@ def build_market_profiles(
         requested_name=buyer_name,
         record=buyer,
         role_label='Buyer',
+        model=model,
         seen_names=seen_names,
     )
-    description_parts = [
-        (
-            f"{buyer['age']}-year-old {buyer['occupation_category']} looking "
-            f"for an HDB resale flat in {town}."
-        ),
-    ]
-    if str(buyer.get('general_persona', '')).strip():
-      description_parts.append(str(buyer['general_persona']).strip())
-    preference_summary = common_schemas.summarize_buyer_features(
-        buyer.get('preferences')
-    )
-    if preference_summary:
-      description_parts.append(
-          'Housing priorities: ' + preference_summary
-      )
+    description = str(buyer.get('general_persona', '')).strip()
+    if not description:
+      description = f'Looking for an HDB resale flat in {town}.'
     buyer_profiles[buyer_id] = {
         'name': buyer_name,
-        'description': ' '.join(description_parts),
+        'description': description,
         'preferences': buyer['preferences'],
         'budget': buyer['budget'],
+        'reservation_price_prior': (
+            float(buyer['reservation_price_prior'])
+            if isinstance(buyer.get('reservation_price_prior'), (int, float))
+            else None
+        ),
     }
 
   seller_profiles: dict[str, dict[str, object]] = {}
@@ -134,6 +130,7 @@ def build_market_profiles(
         requested_name=seller_name,
         record=seller,
         role_label='Seller',
+        model=model,
         seen_names=seen_names,
     )
     flat = seller['flat']
@@ -157,30 +154,50 @@ def build_market_profiles(
         'expectations': seller['expectations'],
         'initial_market_state': seller.get('initial_market_state', ''),
         'initialization_order': int(seller.get('initialization_order', 0) or 0),
-        'relative_transaction_timing': float(
-            seller.get('relative_transaction_timing', 0.0) or 0.0
-        ),
-        'transaction_date': str(seller.get('transaction_date', '') or ''),
-        'transaction_year_month': str(seller.get('transaction_year_month', '') or ''),
+        'initial_window_position': int(seller.get('initial_window_position', 0) or 0),
+        'initial_window_size': int(seller.get('initial_window_size', 0) or 0),
         'listing_release_week': int(seller.get('listing_release_week', 1) or 1),
-        'observed_resale_price': float(
-            flat.get('observed_resale_price', 0.0) or 0.0
-        ),
         'linked_flat_id': str(seller.get('linked_flat_id', '') or ''),
     }
 
   return buyer_profiles, seller_profiles
 
 
+def _buyer_negotiation_reservation_price(payload: Mapping[str, Any]) -> float:
+  """Use the hedonic prior as buyer reservation, clamped to budget bounds."""
+  budget = payload.get('budget', {})
+  if not isinstance(budget, Mapping):
+    budget = {}
+
+  min_price = float(budget.get('min_price', 0.0) or 0.0)
+  max_price = float(budget.get('max_price', 0.0) or 0.0)
+  if max_price > 0.0 and min_price > max_price:
+    min_price = max_price
+
+  hedonic_prior = payload.get('reservation_price_prior')
+  reservation_price = (
+      float(hedonic_prior)
+      if isinstance(hedonic_prior, (int, float))
+      else max_price
+  )
+  if max_price > 0.0:
+    reservation_price = min(reservation_price, max_price)
+  reservation_price = max(min_price, reservation_price)
+  return reservation_price
+
+
 def build_entity_params(
     buyer_profiles: Mapping[str, Mapping[str, Any]],
     seller_profiles: Mapping[str, Mapping[str, Any]],
+    week_number: int = 1,
 ) -> tuple[list[prefab_lib.InstanceConfig], dict[str, dict[str, object]]]:
   """Build participant specs and entity configs for negotiation agents."""
   instance_configs: list[prefab_lib.InstanceConfig] = []
   participant_specs: dict[str, dict[str, object]] = {}
+  current_week_number = max(1, int(week_number))
 
   for buyer_id, payload in buyer_profiles.items():
+    buyer_reservation_price = _buyer_negotiation_reservation_price(payload)
     buyer_params = {
         'id': buyer_id,
         'role': 'buyer',
@@ -192,13 +209,13 @@ def build_entity_params(
             'preferences': payload['preferences'],
             'own_confidence': 0.75,
             'counterpart_confidence': 0.5,
-            'own_reservation_': payload['budget']['max_price'],
+            'own_reservation_': buyer_reservation_price,
             'own_reservation_std': 1000,
             'cp_reservation_': payload['budget']['max_price'] * 0.95,
             'lambda_': 1.0,
             'a': 5.0,
             'b': 100,
-            'reservation_value': str(payload['budget']['max_price']),
+            'reservation_value': str(buyer_reservation_price),
             'flat_listing': '{}',
             'initial_observations': [],
         },
@@ -213,6 +230,7 @@ def build_entity_params(
     )
 
   for seller_id, payload in seller_profiles.items():
+    listing_release_week = int(payload.get('listing_release_week', 1) or 1)
     seller_params = {
         'id': seller_id,
         'role': 'seller',
@@ -231,6 +249,10 @@ def build_entity_params(
             'b': 100,
             'reservation_value': str(payload['expectations']['min_price']),
             'flat_listing': json.dumps(payload['flat'], ensure_ascii=False),
+            'weeks_since_listed': max(
+                0,
+                current_week_number - listing_release_week,
+            ),
         },
     }
     participant_specs[seller_id] = seller_params
@@ -261,6 +283,8 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
       *,
       model: language_model.LanguageModel | None,
       bundle: Mapping[str, Any],
+      buyer_profiles: Mapping[str, Mapping[str, Any]] | None,
+      seller_profiles: Mapping[str, Mapping[str, Any]] | None,
       town: str,
       next_game_master_name: str,
       week_number: int = 1,
@@ -269,6 +293,22 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
     super().__init__(pre_act_label=pre_act_label)
     self._model = model
     self._bundle = dict(bundle)
+    self._buyer_profiles = (
+        {
+            str(buyer_id): dict(profile)
+            for buyer_id, profile in dict(buyer_profiles).items()
+        }
+        if buyer_profiles is not None
+        else None
+    )
+    self._seller_profiles = (
+        {
+            str(seller_id): dict(profile)
+            for seller_id, profile in dict(seller_profiles).items()
+        }
+        if seller_profiles is not None
+        else None
+    )
     self._town = str(town)
     self._next_game_master_name = str(next_game_master_name)
     self._week_number = int(week_number)
@@ -489,11 +529,15 @@ class HDBMarketInitialiser(action_spec_ignored.ActionSpecIgnored):
           coordinator.name,
       )
 
-    buyer_profiles, seller_profiles = build_market_profiles(
-        self._bundle,
-        town=self._town,
-        model=self._model,
-    )
+    if self._buyer_profiles is not None and self._seller_profiles is not None:
+      buyer_profiles = self._buyer_profiles
+      seller_profiles = self._seller_profiles
+    else:
+      buyer_profiles, seller_profiles = build_market_profiles(
+          self._bundle,
+          town=self._town,
+          model=self._model,
+      )
     listing_module = coordinator.get_component('listing_module')
     weekly_coordinator = coordinator.get_component('weekly_coordinator')
 
@@ -589,6 +633,8 @@ class InitialiserGameMaster(prefab_lib.Prefab):
           'next_game_master_name': 'Market_Coordinator',
           'town': '',
           'bundle': {},
+          'buyer_profiles': {},
+          'seller_profiles': {},
           'week_number': 1,
       }
   )
@@ -606,6 +652,8 @@ class InitialiserGameMaster(prefab_lib.Prefab):
     initializer = HDBMarketInitialiser(
         model=model,
         bundle=self.params.get('bundle', {}),
+        buyer_profiles=self.params.get('buyer_profiles'),
+        seller_profiles=self.params.get('seller_profiles'),
         town=str(self.params.get('town', '')),
         next_game_master_name=str(
             self.params.get('next_game_master_name', 'Market_Coordinator')

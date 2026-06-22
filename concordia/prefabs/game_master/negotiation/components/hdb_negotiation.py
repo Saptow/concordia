@@ -1,22 +1,28 @@
 """HDB negotiation module with pair-level weekly execution."""
 
 from collections.abc import Mapping, Sequence
-import functools
 import json
+import os
+import types
 from typing import Any
 
 from absl import logging
+from configs import NegotiationComponentConfig
+from concordia.agents import entity_agent
+from concordia.components.agent import hdb_acting_component
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
+from concordia.components.agent import question_of_recent_memories
+from concordia.components import helpers as component_helpers
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.uncertain_negotiator import (
-    update_agent_from_listing,
+    batch_update_agents_from_listings,
 )
 from concordia.prefabs.game_master.negotiation.components import (
     hdb_negotiation_helpers,
 )
-from concordia.utils import concurrency
 from pydantic import ValidationError
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
@@ -32,6 +38,26 @@ def _empty_outcome() -> dict[str, Any]:
   }
 
 
+_DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS = (
+    'self_perception',
+    'situation_perception',
+    NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY,
+)
+
+
+def _normalize_max_workers(value: object) -> int | None:
+  """Parse worker counts while allowing `None` to use executor defaults."""
+  if value is None:
+    return None
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError):
+    return 1
+  if parsed <= 0:
+    return None
+  return parsed
+
+
 class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
   """Runs HDB negotiations with ids as primary keys and names as display labels."""
 
@@ -43,6 +69,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       negotiation_pairs: Sequence[Sequence[str]] | None = None,
       action_prompt: str = 'What should {name} do next?',
       max_rounds: int = 0,
+      max_weeks_open: int = 0,
+      pair_max_workers: int | None = 1,
+      closed_pair_archive_jsonl_path: str | None = None,
       enabled: bool = True,
       make_observation_component_key: str = (
           make_observation_component.DEFAULT_MAKE_OBSERVATION_COMPONENT_KEY
@@ -53,6 +82,14 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._action_prompt = action_prompt
     self._make_observation_component_key = make_observation_component_key
     self._enabled = bool(enabled)
+    self._pair_max_workers = _normalize_max_workers(pair_max_workers)
+    self._max_weeks_open = max(0, int(max_weeks_open or 0))
+    self._closed_pair_archive_jsonl_path = (
+        str(closed_pair_archive_jsonl_path).strip()
+        if closed_pair_archive_jsonl_path is not None
+        and str(closed_pair_archive_jsonl_path).strip()
+        else None
+    )
     self._participant_specs: dict[str, dict[str, Any]] = {}
     self._player_ids: tuple[str, ...] = ()
     self._player_names: tuple[str, ...] = ()
@@ -62,6 +99,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
     self._pair_start_weeks: dict[str, int] = {}
     self._conversation_replays: dict[str, dict[str, Any]] = {}
+    self._pair_evaluation_records: dict[str, list[dict[str, Any]]] = {}
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=(),
         negotiation_pairs=None,
@@ -95,7 +133,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return
     self._ensure_entities_bound()
 
-  # Participant normalization
+  # ------------------------------------------------------------------
+  # Participant normalization and entity binding
+  # ------------------------------------------------------------------
   @staticmethod
   def _normalize_participant_specs(
       participant_specs: Mapping[str, Any] | str,
@@ -224,10 +264,67 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         tuple(str(token) for token in pair) == normalized for pair in pair_queue
     )
 
+  def _participant_has_open_negotiation_pair(self, player_id: str) -> bool:
+    """Return whether the participant is already assigned to an open pair."""
+    normalized_player_id = str(player_id).strip()
+    if not normalized_player_id:
+      return False
+    return any(
+        normalized_player_id in pair
+        for pair in self._scheduler.get_open_pair_queue_ids()
+    )
+
+  def _participant_has_successful_close(self, player_id: str) -> bool:
+    """Return whether the participant has already completed a successful close."""
+    normalized_player_id = str(player_id).strip()
+    if not normalized_player_id:
+      return False
+    self._offer_tracker._ensure_initialized()
+    for pair_key, outcome in self._offer_tracker._closed_pair_outcomes.items():
+      if outcome != negotiation_schemas.NegotiationOutcome.SUCCESS:
+        continue
+      members = self._offer_tracker._pair_members.get(pair_key, ())
+      if normalized_player_id in members:
+        return True
+    return False
+
   def _register_pair(self, buyer_id: str, seller_id: str) -> None:
     """Registers a new pair with the scheduler and offer tracker."""
-    if not self._pair_exists(buyer_id, seller_id):
-      self._scheduler.append_pair(buyer_id, seller_id)
+    buyer_id = str(buyer_id).strip()
+    seller_id = str(seller_id).strip()
+    if not buyer_id or not seller_id:
+      return
+    if self._pair_exists(buyer_id, seller_id):
+      return
+    conflicting_open_ids = [
+        player_id
+        for player_id in (buyer_id, seller_id)
+        if self._participant_has_open_negotiation_pair(player_id)
+    ]
+    if conflicting_open_ids:
+      logging.warning(
+          'Skipping negotiation pair (%s, %s) because participant ids %s are '
+          'already assigned to an open negotiation pair.',
+          buyer_id,
+          seller_id,
+          conflicting_open_ids,
+      )
+      return
+    successful_close_ids = [
+        player_id
+        for player_id in (buyer_id, seller_id)
+        if self._participant_has_successful_close(player_id)
+    ]
+    if successful_close_ids:
+      logging.warning(
+          'Skipping negotiation pair (%s, %s) because participant ids %s already '
+          'have a successful closed transaction.',
+          buyer_id,
+          seller_id,
+          successful_close_ids,
+      )
+      return
+    self._scheduler.append_pair(buyer_id, seller_id)
     self._offer_tracker.register_pair(buyer_id, seller_id)
 
   def _parse_listing_transfer_payload(
@@ -255,36 +352,48 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       logging.warning('Skipping invalid listing transfer payload: %s', error)
       return None
 
+  # ------------------------------------------------------------------
+  # Listing handoff and pair initialization
+  # ------------------------------------------------------------------
   def _apply_listing_transfer_payload(
       self,
       pair_payload: negotiation_schemas.ListingNegotiationTransferPayload,
       *,
       buyer_id: str,
       seller_id: str,
-  ) -> None:
+  ) -> list[tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]]:
     """Applies listing-to-negotiation context once per pair."""
-    listing_record = pair_payload.listing_record
     pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
     self._pair_start_weeks.setdefault(pair_key, int(pair_payload.week_matched))
     buyer_name = pair_payload.buyer_state.name
     seller_name = pair_payload.seller_state.name
+    listing_summary = str(
+        getattr(pair_payload.listing_record, 'listing_summary', '') or ''
+    )
+    if not listing_summary.strip():
+      listing_summary = 'Listing summary unavailable.'
     buyer_observation = (
         f"{buyer_name}, you submitted a negotiation request for {seller_name}'s flat, "
         f"and {seller_name} accepted it. You are now negotiating directly as the buyer.\n\n"
-        f"{listing_record.listing_summary}"
+        "Listing handoff context for this negotiation:\n"
+        f"{listing_summary}"
     )
     seller_observation = (
         f"{seller_name}, you accepted {buyer_name}'s negotiation request for your flat. "
-        f"You are now negotiating directly as the seller."
+        "You are now negotiating directly as the seller.\n\n"
+        "Listing handoff context for this negotiation:\n"
+        f"{listing_summary}"
     )
+    pending_updates: list[
+        tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]
+    ] = []
     buyer_entity = self._entities_by_id.get(buyer_id)
     if buyer_entity is not None:
-      update_agent_from_listing(buyer_entity, pair_payload)
-      buyer_entity.observe(buyer_observation)
+      pending_updates.append((buyer_entity, pair_payload, buyer_observation))
     seller_entity = self._entities_by_id.get(seller_id)
     if seller_entity is not None:
-      update_agent_from_listing(seller_entity, pair_payload)
-      seller_entity.observe(seller_observation)
+      pending_updates.append((seller_entity, pair_payload, seller_observation))
+    return pending_updates
 
   def _bind_entities_for_pairs(
       self,
@@ -294,6 +403,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
   ) -> list[tuple[str, str]]:
     """Binds both participants for each valid negotiation pair."""
     normalized_pairs: list[tuple[str, str]] = []
+    pending_listing_updates: list[
+        tuple[Any, negotiation_schemas.ListingNegotiationTransferPayload, str]
+    ] = []
     for pair in new_negotiation_pairs:
       transfer_payload = self._parse_listing_transfer_payload(pair)
       if transfer_payload is not None:
@@ -317,15 +429,29 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             (buyer_id, seller_id),
         )
         continue
-      pair_already_exists = self._pair_exists(buyer_id, seller_id)
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      should_apply_transfer = (
+          transfer_payload is not None and pair_key not in self._pair_start_weeks
+      )
       self._register_pair(buyer_id, seller_id)
-      if not pair_already_exists and transfer_payload is not None:
-        self._apply_listing_transfer_payload(
-            transfer_payload,
-            buyer_id=buyer_id,
-            seller_id=seller_id,
+      if should_apply_transfer and transfer_payload is not None:
+        pending_listing_updates.extend(
+            self._apply_listing_transfer_payload(
+                transfer_payload,
+                buyer_id=buyer_id,
+                seller_id=seller_id,
+            )
         )
       normalized_pairs.append((buyer_id, seller_id))
+    if pending_listing_updates:
+      batch_update_agents_from_listings(
+          [
+              (agent, pair_payload)
+              for agent, pair_payload, _ in pending_listing_updates
+          ]
+      )
+      for agent, _, observation in pending_listing_updates:
+        agent.observe(observation)
     return normalized_pairs
 
   def _ensure_entities_bound(self) -> None:
@@ -503,6 +629,33 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       })
     return snapshots
 
+  def get_pair_evaluation_records(
+      self,
+      pair_ids: Sequence[Sequence[str]] | None = None,
+  ) -> list[dict[str, Any]]:
+    """Returns stored evaluation records for the requested pairs."""
+    requested_pair_keys = (
+        {
+            hdb_negotiation_helpers.pair_key(str(pair[0]), str(pair[1]))
+            for pair in pair_ids
+            if len(pair) == 2
+        }
+        if pair_ids is not None
+        else set(self._pair_evaluation_records.keys())
+    )
+    records: list[dict[str, Any]] = []
+    for pair_key in sorted(requested_pair_keys):
+      for record in self._pair_evaluation_records.get(pair_key, ()):
+        normalized = dict(record)
+        payload = normalized.get('public_action_payload')
+        if isinstance(payload, Mapping):
+          normalized['public_action_payload'] = dict(payload)
+        signature = normalized.get('numeric_action_signature')
+        if isinstance(signature, Mapping):
+          normalized['numeric_action_signature'] = dict(signature)
+        records.append(normalized)
+    return records
+
   def _effective_reservation_distribution_for_listing(
       self,
       player_id: str,
@@ -585,7 +738,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       payloads.append(payload.model_dump(mode='json'))
     return payloads
 
-  # Observation helpers
+  # ------------------------------------------------------------------
+  # Observation and event helpers
+  # ------------------------------------------------------------------
   @staticmethod
   def _format_entity_action(entity_name: str, raw_action: str) -> str:
     """Normalizes raw entity output into the shared event transcript format."""
@@ -606,9 +761,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     actor, sep, payload = event.partition(':')
     if not sep:
       return event
-    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
-        payload
-    )
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
       return event
     try:
@@ -617,14 +770,209 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return event
     if not isinstance(action, dict):
       return event
-    action.pop('internal_reasoning', None)
-    action.pop('decision_rationale', None)
+    for key in hdb_negotiation_helpers.TURN_EVENT_FIELDS_TO_STRIP:
+      action.pop(key, None)
     sanitized_json = json.dumps(action, ensure_ascii=False)
     start = payload.find(payload_json)
     if start < 0:
       return event
     end = start + len(payload_json)
     return f'{actor}{sep}{payload[:start]}{sanitized_json}{payload[end:]}'
+
+  # ------------------------------------------------------------------
+  # Evaluation extraction helpers
+  # ------------------------------------------------------------------
+  def _build_agent_profile_text(self, player_id: str) -> str:
+    """Build a compact profile string for post-hoc coherence judging.
+
+    Profile serialization should never be able to stop the simulation. If
+    something in the participant spec is unexpectedly non-serializable we fall
+    back to a plain string.
+    """
+    spec = dict(self._participant_specs.get(player_id, {}))
+    if not spec:
+      return ''
+    public_spec = {
+        key: value
+        for key, value in spec.items()
+        if key not in {'id', 'modules', 'negotiation_config'}
+    }
+    try:
+      return json.dumps(public_spec, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+      logging.warning(
+          'Falling back to string profile serialization for %s.',
+          player_id,
+      )
+      return str(public_spec)
+
+  @staticmethod
+  def _build_turn_id(
+      *,
+      pair_key: str,
+      week_number: int,
+      pair_round_number: int,
+      actor_id: str,
+      turn_index: int,
+  ) -> str:
+    """Build a stable id for one evaluated turn."""
+    return (
+        f'{pair_key}:{int(week_number)}:{int(pair_round_number)}:'
+        f'{actor_id}:{int(turn_index)}'
+    )
+
+  def _build_evaluation_record(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      actor_id: str,
+      raw_event: str,
+      week_number: int,
+      pair_round_number: int,
+      turn_index: int,
+      decision_rationale: str = '',
+  ) -> dict[str, Any]:
+    """Build one turn-level post-hoc evaluation record from a raw event.
+
+    The record is intentionally minimal and schema-grounded:
+    - validate the generated action against the buyer/seller action schemas
+    - serialize only public-facing fields into `public_action_payload`
+    - keep private reasoning fields separate for downstream judging
+    """
+    action = hdb_negotiation_helpers.extract_action_from_event(raw_event) or {}
+    validated_action = hdb_negotiation_helpers.validate_action_for_actor(
+        actor_id=actor_id,
+        buyer_id=buyer_id,
+        raw_action=action,
+    )
+    (
+        public_action_payload,
+        internal_reasoning,
+        action_type,
+        public_verbal_text,
+        numeric_action_signature,
+    ) = hdb_negotiation_helpers.evaluation_fields_from_validated_action(
+        validated_action
+    )
+    actor_role = hdb_negotiation_helpers.role_value_for_actor(
+        actor_id,
+        buyer_id,
+    )
+    return {
+        'turn_id': self._build_turn_id(
+            pair_key=pair_key,
+            week_number=week_number,
+            pair_round_number=pair_round_number,
+            actor_id=actor_id,
+            turn_index=turn_index,
+        ),
+        'pair_key': pair_key,
+        'week_number': int(week_number),
+        'pair_round_number': int(pair_round_number),
+        'actor_id': actor_id,
+        'actor_name': self._get_player_name(actor_id),
+        'actor_role': actor_role,
+        'agent_profile_text': self._build_agent_profile_text(actor_id),
+        'action_type': action_type,
+        'public_action_payload': public_action_payload,
+        'public_verbal_text': public_verbal_text,
+        'internal_reasoning': internal_reasoning,
+        'decision_rationale': str(decision_rationale or '').strip(),
+        'numeric_action_signature': numeric_action_signature,
+    }
+
+  def _append_weekly_pair_outputs(
+      self,
+      *,
+      buyer_id: str,
+      seller_id: str,
+      pair_key: str,
+      week_number: int,
+      pair_events: Sequence[Mapping[str, Any]],
+      evaluation_records: list[dict[str, Any]],
+  ) -> None:
+    """Persist replay/evaluation outputs for one negotiated pair.
+
+    Replay records store the sanitized public transcript used by the UI.
+    Evaluation records store the private/public split needed for post-hoc
+    coherence metrics.
+    """
+    pair_round_number = int(
+        self._scheduler.get_pair_round_number(buyer_id, seller_id)
+    )
+    self._append_pair_replay_events(
+        pair_key=pair_key,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
+        week_number=week_number,
+        pair_round_number=pair_round_number,
+        pair_events=pair_events,
+    )
+    evaluation_records.extend(
+        self._append_pair_evaluation_records(
+            pair_key=pair_key,
+            buyer_id=buyer_id,
+            seller_id=seller_id,
+            week_number=week_number,
+            pair_round_number=pair_round_number,
+            pair_events=pair_events,
+        )
+    )
+
+  # ------------------------------------------------------------------
+  # Evaluation persistence helpers
+  # ------------------------------------------------------------------
+  def _append_pair_evaluation_records(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+      pair_round_number: int,
+      pair_events: Sequence[Mapping[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Append evaluation records for one pair and return the new records.
+
+    Evaluation capture is best-effort. A bad record should be skipped rather
+    than breaking the pair or the week.
+    """
+    if not pair_events:
+      return []
+    records = self._pair_evaluation_records.setdefault(pair_key, [])
+    appended: list[dict[str, Any]] = []
+    for turn_index, pair_event in enumerate(pair_events, start=1):
+      actor_id = str(pair_event.get('actor_id', ''))
+      raw_event = str(pair_event.get('event', ''))
+      if not actor_id or not raw_event:
+        continue
+      try:
+        record = self._build_evaluation_record(
+            pair_key=pair_key,
+            buyer_id=buyer_id,
+            seller_id=seller_id,
+            actor_id=actor_id,
+            raw_event=raw_event,
+            week_number=week_number,
+            pair_round_number=pair_round_number,
+            turn_index=turn_index,
+            decision_rationale=str(
+                pair_event.get('decision_rationale', '')
+            ).strip(),
+        )
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            'Skipping evaluation record for pair %s turn %s: %s',
+            pair_key,
+            turn_index,
+            error,
+        )
+        continue
+      records.append(record)
+      appended.append(dict(record))
+    return appended
 
   def _observe_event(self, observer_id: str, event: str) -> None:
     """Delivers a sanitized event directly to one negotiating entity by id."""
@@ -637,6 +985,64 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       )
       return
     entity.observe(self._sanitize_event_for_counterparty(event))
+
+  # ------------------------------------------------------------------
+  # Observation update plumbing
+  # ------------------------------------------------------------------
+  def _flush_pending_observation_updates(
+      self,
+      observer_ids: Sequence[str],
+  ) -> None:
+    """Batch-flush deferred uncertainty updates after observations land."""
+    pending_updates: list[
+        tuple[
+            object,
+            list[structured_setup_batching.StructuredSetupRequest],
+        ]
+    ] = []
+    all_requests: list[structured_setup_batching.StructuredSetupRequest] = []
+    seen_ids: set[str] = set()
+
+    for observer_id in observer_ids:
+      observer_key = str(observer_id)
+      if not observer_key or observer_key in seen_ids:
+        continue
+      seen_ids.add(observer_key)
+      entity = self._entities_by_id.get(observer_key)
+      if entity is None:
+        continue
+      for component_name in ('uncertain_buyer', 'uncertain_seller'):
+        try:
+          component = entity.get_component(component_name)
+        except Exception:
+          continue
+        build_requests = getattr(component, 'build_observation_requests', None)
+        apply_responses = getattr(component, 'apply_observation_responses', None)
+        if not callable(build_requests) or not callable(apply_responses):
+          continue
+        component_requests = list(build_requests() or ())
+        if not component_requests:
+          continue
+        pending_updates.append((component, component_requests))
+        all_requests.extend(component_requests)
+
+    raw_responses = structured_setup_batching.execute_setup_requests(all_requests)
+    response_index = 0
+    for component, component_requests in pending_updates:
+      response_count = len(component_requests)
+      component_responses = raw_responses[
+          response_index: response_index + response_count
+      ]
+      response_index += response_count
+      component.apply_observation_responses(
+          {
+              request.response_key: response
+              for request, response in zip(
+                  component_requests,
+                  component_responses,
+              )
+          }
+      )
 
   def _advance_pair_round_for_entity(self, player_id: str) -> None:
     """Advance pair-local elapsed time once for the entity after a full week."""
@@ -651,12 +1057,15 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if callable(advance_pair_round):
       advance_pair_round()
 
+  # ------------------------------------------------------------------
+  # Closed-pair summaries and archival
+  # ------------------------------------------------------------------
   def _closed_pair_records(
       self,
       pair_keys: Sequence[str],
-  ) -> list[dict[str, str]]:
+  ) -> list[dict[str, Any]]:
     """Builds summary records for pairs that closed this week."""
-    records: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
     for pair_key in pair_keys:
       buyer_id, seller_id = self._offer_tracker._pair_members[pair_key]
       outcome = self._offer_tracker._closed_pair_outcomes.get(
@@ -664,35 +1073,138 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           negotiation_schemas.NegotiationOutcome.CLOSED,
       )
       records.append({
+          'pair_key': pair_key,
           'buyer_id': buyer_id,
           'buyer_name': self._get_player_name(buyer_id),
           'seller_id': seller_id,
           'seller_name': self._get_player_name(seller_id),
+          'pair_round_number': int(
+              self._scheduler.get_pair_round_number(buyer_id, seller_id)
+          ),
           'outcome': outcome.value,
         })
     return records
 
+  def _build_closed_pair_archive_record(
+      self,
+      *,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+      outcome: str,
+  ) -> dict[str, Any]:
+    """Builds one archive payload for a closed pair before eviction."""
+    pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+    replay_record = self._conversation_replays.get(pair_key)
+    if isinstance(replay_record, Mapping):
+      archive_record = dict(
+          replay_record,
+          events=list(replay_record.get('events', ())),
+      )
+    else:
+      archive_record = {
+          'pair_key': pair_key,
+          'buyer_id': buyer_id,
+          'buyer_name': self._get_player_name(buyer_id),
+          'seller_id': seller_id,
+          'seller_name': self._get_player_name(seller_id),
+          'events': [],
+      }
+    archive_record.update({
+        'pair_key': pair_key,
+        'buyer_id': buyer_id,
+        'buyer_name': self._get_player_name(buyer_id),
+        'seller_id': seller_id,
+        'seller_name': self._get_player_name(seller_id),
+        'start_week': int(self._pair_start_weeks.get(pair_key, week_number)),
+        'end_week': int(week_number),
+        'closed': True,
+        'outcome': str(outcome),
+        'pair_round_number': int(
+            self._scheduler.get_pair_round_number(buyer_id, seller_id)
+        ),
+        'turn_count': int(self._offer_tracker._turn_counts.get(pair_key, 0)),
+        'active_offer': self._offer_tracker._active_offers.get(pair_key),
+        'offer_history': list(
+            self._offer_tracker.get_offer_history_for_pair(buyer_id, seller_id)
+        ),
+        'evaluation_records': [
+            dict(record)
+            for record in self._pair_evaluation_records.get(pair_key, ())
+        ],
+        'archived_at_week': int(week_number),
+    })
+    return archive_record
+
+  def persist_and_evict_closed_pair_state(
+      self,
+      pair_records: Sequence[Mapping[str, Any]],
+      *,
+      week_number: int,
+  ) -> None:
+    """Archives closed-pair transcripts/history when configured, then evicts."""
+    if not pair_records:
+      return
+    pairs_to_evict: list[tuple[str, str]] = []
+    archive_records: list[dict[str, Any]] = []
+    for pair_record in pair_records:
+      buyer_id = str(pair_record.get('buyer_id', '')).strip()
+      seller_id = str(pair_record.get('seller_id', '')).strip()
+      if not buyer_id or not seller_id:
+        continue
+      pairs_to_evict.append((buyer_id, seller_id))
+      if self._closed_pair_archive_jsonl_path:
+        archive_records.append(
+            self._build_closed_pair_archive_record(
+                buyer_id=buyer_id,
+                seller_id=seller_id,
+                week_number=week_number,
+                outcome=str(pair_record.get('outcome', 'CLOSED')).strip() or 'CLOSED',
+            )
+        )
+
+    if not pairs_to_evict:
+      return
+
+    if self._closed_pair_archive_jsonl_path and archive_records:
+      archive_dir = os.path.dirname(self._closed_pair_archive_jsonl_path)
+      try:
+        if archive_dir:
+          os.makedirs(archive_dir, exist_ok=True)
+        with open(
+            self._closed_pair_archive_jsonl_path,
+            'a',
+            encoding='utf-8',
+        ) as handle:
+          for archive_record in archive_records:
+            handle.write(json.dumps(archive_record, ensure_ascii=False) + '\n')
+      except OSError:
+        logging.exception(
+            'Failed to archive closed negotiation pairs to %s; keeping state in memory.',
+            self._closed_pair_archive_jsonl_path,
+        )
+        return
+
+    for buyer_id, seller_id in pairs_to_evict:
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      self._conversation_replays.pop(pair_key, None)
+      self._pair_start_weeks.pop(pair_key, None)
+      self._pair_evaluation_records.pop(pair_key, None)
+      self._offer_tracker.evict_pair_state(buyer_id, seller_id)
+
   @staticmethod
   def _extract_public_action_from_event(event: str) -> dict[str, Any] | None:
     """Parses the action payload while stripping private reasoning fields."""
-    _, sep, payload = event.partition(':')
-    if not sep:
-      return None
-    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
-        payload
-    )
-    if not payload_json:
-      return None
-    try:
-      action = json.loads(payload_json)
-    except json.JSONDecodeError:
-      return None
-    if not isinstance(action, dict):
+    action = hdb_negotiation_helpers.extract_action_from_event(event)
+    if action is None:
       return None
     action.pop('internal_reasoning', None)
     action.pop('decision_rationale', None)
     return action
 
+  # ------------------------------------------------------------------
+  # Replay transcript persistence
+  # ------------------------------------------------------------------
   def _ensure_pair_replay_record(
       self,
       *,
@@ -785,7 +1297,459 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     )
     record['end_week'] = int(week_number) if is_closed else None
 
-  # Pair execution
+  def _close_pairs_exceeding_max_weeks_open(
+      self,
+      *,
+      week_number: int,
+  ) -> None:
+    """Close stale negotiations so failed pairs can return to listing."""
+    if self._max_weeks_open <= 0:
+      return
+
+    for buyer_id, seller_id in self._scheduler.get_open_pair_queue_ids():
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      start_week = int(self._pair_start_weeks.get(pair_key, week_number))
+      weeks_open = max(0, int(week_number) - start_week)
+      if weeks_open < self._max_weeks_open:
+        continue
+      self._offer_tracker.close_pair(
+          buyer_id,
+          seller_id,
+          outcome=negotiation_schemas.NegotiationOutcome.CLOSED_WITHOUT_SUCCESS,
+      )
+      self._update_pair_replay_outcome(
+          pair_key=pair_key,
+          buyer_id=buyer_id,
+          seller_id=seller_id,
+          week_number=week_number,
+      )
+
+  # ------------------------------------------------------------------
+  # Turn preparation and batched execution
+  # ------------------------------------------------------------------
+  def _prepare_player_turn(
+      self,
+      player_id: str,
+      *,
+      buyer_id: str,
+      seller_id: str,
+      has_active_offer: bool,
+  ) -> dict[str, Any]:
+    """Prepare one player turn, deferring payload generation when possible."""
+    action_spec = self._build_action_spec_for_pair_state(
+        player_id,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
+        has_active_offer=has_active_offer,
+    )
+    if action_spec.output_type == entity_lib.OutputType.SKIP_THIS_STEP:
+      return {
+          'player_id': player_id,
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+          'action_spec': action_spec,
+          'event': None,
+          'force_close': False,
+      }
+
+    entity = self._entities_by_id.get(player_id)
+    if entity is None:
+      logging.error(
+          'No canonical negotiation entity bound for %s (%s). Closing pair and continuing.',
+          self._get_player_name(player_id),
+          player_id,
+      )
+      return {
+          'player_id': player_id,
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+          'action_spec': action_spec,
+          'event': None,
+          'force_close': True,
+      }
+
+    if not isinstance(entity, entity_agent.EntityAgent):
+      raw_action = entity.act(action_spec)
+      return {
+          'player_id': player_id,
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+          'action_spec': action_spec,
+          'event': self._format_entity_action(
+              self._get_player_name(player_id),
+              raw_action,
+          ),
+          'force_close': False,
+      }
+
+    try:
+      chooser_component = entity.get_component(
+          NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY,
+          type_=question_of_recent_memories.QuestionOfRecentMemoriesStructured,
+      )
+    except Exception:
+      chooser_component = None
+
+    if chooser_component is not None:
+      prepared_act = entity.prepare_act_with_deferred_components(
+          action_spec,
+          deferred_component_names=(
+              *_DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS,
+              'NegotiationStrategy',
+              NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY,
+          ),
+      )
+      deferred_context_requests: dict[
+          str,
+          question_of_recent_memories.TextPreActRequest | None,
+      ] = {}
+      deferred_context_components: dict[str, Any] = {}
+      for component_name in _DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS:
+        try:
+          component = entity.get_component(component_name)
+        except Exception:
+          continue
+        deferred_context_components[component_name] = component
+        request_builder = getattr(component, 'build_batched_pre_act_request', None)
+        deferred_request = None
+        if callable(request_builder):
+          try:
+            deferred_request = request_builder(action_spec)
+          except TypeError:
+            deferred_request = request_builder()
+        deferred_context_requests[component_name] = deferred_request
+      strategy_component = None
+      try:
+        strategy_component = entity.get_component('NegotiationStrategy')
+      except Exception:
+        strategy_component = None
+      live_urgency_request = None
+      if strategy_component is not None:
+        request_builder = getattr(
+            strategy_component,
+            'build_live_urgency_request',
+            None,
+        )
+        if callable(request_builder):
+          try:
+            live_urgency_request = request_builder()
+          except Exception:
+            entity.cancel_prepared_act(prepared_act)
+            raise
+      return {
+          'player_id': player_id,
+          'buyer_id': buyer_id,
+          'seller_id': seller_id,
+          'action_spec': action_spec,
+          'entity': entity,
+          'prepared_act': prepared_act,
+          'deferred_context_components': deferred_context_components,
+          'deferred_context_requests': deferred_context_requests,
+          'strategy_component': strategy_component,
+          'live_urgency_request': live_urgency_request,
+          'phase1_component': chooser_component,
+          'phase1_request': None,
+          'request': None,
+          'force_close': False,
+      }
+
+    prepared_act = entity.prepare_act(action_spec)
+    act_component = entity.get_act_component()
+    request_builder = getattr(act_component, 'build_action_attempt_request', None)
+    try:
+      request = (
+          request_builder(prepared_act.contexts, action_spec)
+          if callable(request_builder)
+          else None
+      )
+    except Exception:
+      entity.cancel_prepared_act(prepared_act)
+      raise
+    return {
+        'player_id': player_id,
+        'buyer_id': buyer_id,
+        'seller_id': seller_id,
+        'action_spec': action_spec,
+        'entity': entity,
+        'prepared_act': prepared_act,
+        'request': request,
+        'force_close': False,
+    }
+
+  def _finalize_prepared_turns(
+      self,
+      prepared_turns: Sequence[dict[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Finalize prepared turns, batching phase-1 chooser and phase-2 payloads."""
+    if not prepared_turns:
+      return []
+
+    mutable_prepared_turns = [dict(turn) for turn in prepared_turns]
+
+    urgency_request_indexes: list[int] = []
+    urgency_requests: list[structured_setup_batching.StructuredSetupRequest] = []
+    text_request_indexes: list[tuple[int, str]] = []
+    text_requests: list[question_of_recent_memories.TextPreActRequest] = []
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      live_urgency_request = prepared_turn.get('live_urgency_request')
+      if isinstance(
+          live_urgency_request,
+          structured_setup_batching.StructuredSetupRequest,
+      ):
+        urgency_request_indexes.append(index)
+        urgency_requests.append(live_urgency_request)
+      deferred_context_requests = prepared_turn.get('deferred_context_requests', {})
+      if isinstance(deferred_context_requests, Mapping):
+        for component_name in _DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS:
+          deferred_request = deferred_context_requests.get(component_name)
+          if isinstance(
+              deferred_request,
+              question_of_recent_memories.TextPreActRequest,
+          ):
+            text_request_indexes.append((index, component_name))
+            text_requests.append(deferred_request)
+
+    urgency_outputs: dict[int, str] = {}
+    if urgency_requests:
+      batched_urgency_outputs = structured_setup_batching.execute_setup_requests(
+          urgency_requests
+      )
+      urgency_outputs = dict(zip(urgency_request_indexes, batched_urgency_outputs))
+
+    text_outputs: dict[tuple[int, str], str] = {}
+    if text_requests:
+      batched_text_outputs = (
+          question_of_recent_memories.execute_text_pre_act_requests(text_requests)
+      )
+      text_outputs = dict(zip(text_request_indexes, batched_text_outputs))
+
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      strategy_component = prepared_turn.get('strategy_component')
+      chooser_component = prepared_turn.get('phase1_component')
+      prepared_act = prepared_turn.get('prepared_act')
+      action_spec = prepared_turn.get('action_spec')
+      if (
+          strategy_component is None
+          or chooser_component is None
+          or prepared_act is None
+          or action_spec is None
+      ):
+        continue
+      try:
+        merged_contexts = dict(prepared_act.contexts)
+        deferred_context_components = prepared_turn.get(
+            'deferred_context_components',
+            {},
+        )
+        deferred_context_requests = prepared_turn.get(
+            'deferred_context_requests',
+            {},
+        )
+        if isinstance(deferred_context_components, Mapping):
+          for component_name in _DEFERRED_NEGOTIATION_CONTEXT_COMPONENTS:
+            component = deferred_context_components.get(component_name)
+            if component is None:
+              continue
+            deferred_request = None
+            if isinstance(deferred_context_requests, Mapping):
+              deferred_request = deferred_context_requests.get(component_name)
+            if isinstance(
+                deferred_request,
+                question_of_recent_memories.TextPreActRequest,
+            ):
+              apply_batched_response = getattr(
+                  component,
+                  'apply_batched_pre_act_response',
+                  None,
+              )
+              raw_response = text_outputs.get((index, component_name), '')
+              if callable(apply_batched_response):
+                apply_batched_response(
+                    deferred_request,
+                    raw_response,
+                )
+            component_context = component.pre_act(action_spec)
+            merged_contexts[component_name] = component_context
+
+        urgency_response = urgency_outputs.get(index)
+        apply_live_urgency = getattr(
+            strategy_component,
+            'apply_live_urgency_response',
+            None,
+        )
+        if urgency_response is not None and callable(apply_live_urgency):
+          apply_live_urgency(urgency_response)
+        strategy_context = strategy_component.pre_act(action_spec)
+        merged_contexts['NegotiationStrategy'] = strategy_context
+        prepared_turn['prepared_act'] = entity_agent.PreparedAct(
+            action_spec=prepared_act.action_spec,
+            contexts=types.MappingProxyType(merged_contexts),
+        )
+        prepared_turn['phase1_request'] = chooser_component.build_pre_act_request(
+            action_spec
+        )
+        mutable_prepared_turns[index] = prepared_turn
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.error(
+            'Failed to prepare deferred strategy/chooser for %s: %s',
+            prepared_turn.get('player_id'),
+            error,
+        )
+        entity = prepared_turn.get('entity')
+        if entity is not None and prepared_turn.get('prepared_act') is not None:
+          entity.cancel_prepared_act(prepared_turn['prepared_act'])
+        mutable_prepared_turns[index] = dict(
+            prepared_turn,
+            event=None,
+            force_close=True,
+            entity=None,
+            prepared_act=None,
+            phase1_request=None,
+            request=None,
+        )
+
+    phase1_request_indexes: list[int] = []
+    phase1_requests: list[question_of_recent_memories.StructuredPreActRequest] = []
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      phase1_request = prepared_turn.get('phase1_request')
+      if isinstance(
+          phase1_request,
+          question_of_recent_memories.StructuredPreActRequest,
+      ):
+        phase1_request_indexes.append(index)
+        phase1_requests.append(phase1_request)
+
+    if phase1_requests:
+      phase1_outputs = (
+          question_of_recent_memories.QuestionOfRecentMemoriesStructured
+          .execute_pre_act_requests(phase1_requests)
+      )
+      for index, phase1_output in zip(phase1_request_indexes, phase1_outputs):
+        prepared_turn = mutable_prepared_turns[index]
+        prepared_act = prepared_turn.get('prepared_act')
+        if prepared_act is None:
+          mutable_prepared_turns[index] = prepared_turn
+          continue
+        merged_contexts = dict(prepared_act.contexts)
+        merged_contexts[NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY] = (
+            phase1_output
+        )
+        prepared_turn['decision_rationale'] = (
+            hdb_negotiation_helpers.extract_decision_rationale(phase1_output)
+        )
+        prepared_turn['prepared_act'] = entity_agent.PreparedAct(
+            action_spec=prepared_act.action_spec,
+            contexts=types.MappingProxyType(merged_contexts),
+        )
+        entity = prepared_turn.get('entity')
+        if entity is not None:
+          act_component = entity.get_act_component()
+          request_builder = getattr(
+              act_component,
+              'build_action_attempt_request',
+              None,
+          )
+          if callable(request_builder):
+            try:
+              prepared_turn['request'] = request_builder(
+                  prepared_turn['prepared_act'].contexts,
+                  prepared_turn['action_spec'],
+              )
+            except Exception as error:  # pylint: disable=broad-exception-caught
+              logging.error(
+                  'Failed to build phase-2 request for %s: %s',
+                  prepared_turn.get('player_id'),
+                  error,
+              )
+              entity.cancel_prepared_act(prepared_turn['prepared_act'])
+              mutable_prepared_turns[index] = dict(
+                  prepared_turn,
+                  event=None,
+                  force_close=True,
+                  entity=None,
+                  prepared_act=None,
+                  request=None,
+              )
+              continue
+        mutable_prepared_turns[index] = prepared_turn
+
+    request_indexes: list[int] = []
+    requests: list[hdb_acting_component.StructuredActionAttemptRequest] = []
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      request = prepared_turn.get('request')
+      if isinstance(request, hdb_acting_component.StructuredActionAttemptRequest):
+        request_indexes.append(index)
+        requests.append(request)
+
+    request_outputs: dict[int, str] = {}
+    if requests:
+      batched_outputs = (
+          hdb_acting_component.HDBStructuredActComponent.execute_action_attempt_requests(
+              requests
+          )
+      )
+      request_outputs = dict(zip(request_indexes, batched_outputs))
+
+    finalized_turns: list[dict[str, Any]] = []
+    for index, prepared_turn in enumerate(mutable_prepared_turns):
+      entity = prepared_turn.get('entity')
+      prepared_act = prepared_turn.get('prepared_act')
+      action_attempt = request_outputs.get(index)
+      try:
+        if entity is None or prepared_act is None:
+          event = prepared_turn.get('event')
+        else:
+          raw_action = entity.finalize_prepared_act(
+              prepared_act,
+              action_attempt=action_attempt,
+          )
+          event = self._format_entity_action(
+              self._get_player_name(prepared_turn['player_id']),
+              raw_action,
+          )
+        finalized_turns.append(dict(prepared_turn, event=event))
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.error(
+            'Failed to finalize negotiation turn for %s: %s',
+            prepared_turn.get('player_id'),
+            error,
+        )
+        finalized_turns.append(
+            dict(prepared_turn, event=None, force_close=True)
+        )
+    return finalized_turns
+
+  def _execute_turn_stage(
+      self,
+      turn_specs: Sequence[dict[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Prepare, batch, and finalize one stage of negotiation turns."""
+    prepared_turns: list[dict[str, Any]] = []
+    for turn_spec in turn_specs:
+      try:
+        prepared_turns.append(
+            self._prepare_player_turn(
+                turn_spec['player_id'],
+                buyer_id=turn_spec['buyer_id'],
+                seller_id=turn_spec['seller_id'],
+                has_active_offer=turn_spec['has_active_offer'],
+            )
+        )
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.error(
+            'Failed to prepare negotiation turn for %s: %s',
+            turn_spec.get('player_id'),
+            error,
+        )
+        prepared_turns.append({
+            'player_id': turn_spec['player_id'],
+            'buyer_id': turn_spec['buyer_id'],
+            'seller_id': turn_spec['seller_id'],
+            'event': None,
+            'force_close': True,
+        })
+    return self._finalize_prepared_turns(prepared_turns)
+
   def _execute_player_turn(
       self,
       player_id: str,
@@ -860,9 +1824,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     _, sep, payload = event.partition(':')
     if not sep:
       return has_active_offer, is_closed
-    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
-        payload
-    )
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
       return has_active_offer, is_closed
     try:
@@ -880,70 +1842,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return False, True
     return has_active_offer, is_closed
 
-  def _run_pair_task(
-      self,
-      buyer_id: str,
-      seller_id: str,
-      *,
-      has_active_offer: bool,
-      is_closed: bool,
-  ) -> dict[str, Any]:
-    """Runs one weekly pair slice: buyer once, then seller once if still open."""
-    if is_closed:
-      return {
-          'buyer_id': buyer_id,
-          'seller_id': seller_id,
-          'events': [],
-      }
-
-    pair_events: list[dict[str, str]] = []
-    local_has_active_offer = has_active_offer
-    local_is_closed = is_closed
-    force_close = False
-
-    buyer_event, should_close_pair = self._execute_player_turn(
-        buyer_id,
-        buyer_id=buyer_id,
-        seller_id=seller_id,
-        has_active_offer=local_has_active_offer,
-    )
-    force_close = force_close or should_close_pair
-    if buyer_event is not None:
-      pair_events.append({'actor_id': buyer_id, 'event': buyer_event})
-      local_has_active_offer, local_is_closed = self._advance_pair_local_state(
-          actor_id=buyer_id,
-          buyer_id=buyer_id,
-          event=buyer_event,
-          has_active_offer=local_has_active_offer,
-          is_closed=local_is_closed,
-      )
-      if not local_is_closed and not force_close:
-        self._observe_event(seller_id, buyer_event)
-
-    if not local_is_closed and not force_close:
-      seller_event, should_close_pair = self._execute_player_turn(
-          seller_id,
-          buyer_id=buyer_id,
-          seller_id=seller_id,
-          has_active_offer=local_has_active_offer,
-      )
-      force_close = force_close or should_close_pair
-      if seller_event is not None:
-        pair_events.append({'actor_id': seller_id, 'event': seller_event})
-        self._observe_event(buyer_id, seller_event)
-
-    if pair_events:
-      self._advance_pair_round_for_entity(buyer_id)
-      self._advance_pair_round_for_entity(seller_id)
-
-    return {
-        'buyer_id': buyer_id,
-        'seller_id': seller_id,
-        'force_close': force_close,
-        'events': pair_events,
-    }
-
+  # ------------------------------------------------------------------
   # Weekly execution
+  # ------------------------------------------------------------------
   def run_week(
       self,
       *,
@@ -964,40 +1865,121 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
 
     self._offer_tracker._ensure_initialized()
     closed_before = set(self._offer_tracker._closed_pairs)
+    self._close_pairs_exceeding_max_weeks_open(week_number=week_number)
     open_pairs = self._scheduler.get_open_pair_queue_ids()
     negotiated_pairs: list[tuple[str, str]] = []
     number_of_pairs_negotiated = 0
     events: list[str] = []
+    pair_results: dict[str, dict[str, Any]] = {
+        hdb_negotiation_helpers.pair_key(buyer_id, seller_id): {
+            'buyer_id': buyer_id,
+            'seller_id': seller_id,
+            'force_close': False,
+            'events': [],
+        }
+        for buyer_id, seller_id in open_pairs
+    }
+    evaluation_records: list[dict[str, Any]] = []
 
-    pair_tasks = {
-        f'{buyer_id}|||{seller_id}': functools.partial(
-            self._run_pair_task,
-            buyer_id,
-            seller_id,
-            has_active_offer=self._offer_tracker.has_active_offer_for_pair(
+    # Stage 1: every open pair gets its buyer turn first.
+    buyer_turn_specs = [
+        {
+            'player_id': buyer_id,
+            'buyer_id': buyer_id,
+            'seller_id': seller_id,
+            'has_active_offer': self._offer_tracker.has_active_offer_for_pair(
                 buyer_id,
                 seller_id,
             ),
-            is_closed=self._scheduler.is_pair_closed(buyer_id, seller_id),
-        )
+        }
         for buyer_id, seller_id in open_pairs
-    }
-    results, errors = (
-        concurrency.run_tasks_in_background(pair_tasks) if pair_tasks else ({}, {})
-    )
-    for pair_key, error in errors.items():
-      logging.error(
-          'Failed to run negotiation pair %s for week %s: %s',
-          pair_key,
-          week_number,
-          error,
-      )
+    ]
+    buyer_turns = self._execute_turn_stage(buyer_turn_specs)
 
+    # Stage 2: only schedule seller turns for pairs that stayed open after the
+    # buyer move. Observations are delivered before seller acting.
+    seller_turn_specs: list[dict[str, Any]] = []
+    seller_observer_ids: list[str] = []
+    for buyer_turn in buyer_turns:
+      buyer_id = str(buyer_turn['buyer_id'])
+      seller_id = str(buyer_turn['seller_id'])
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      pair_result = pair_results[pair_key]
+      pair_result['force_close'] = (
+          pair_result.get('force_close', False)
+          or buyer_turn.get('force_close', False)
+      )
+      buyer_event = buyer_turn.get('event')
+      if buyer_event is None:
+        continue
+      pair_result['events'].append(
+          hdb_negotiation_helpers.build_pair_event(
+              actor_id=buyer_id,
+              event=buyer_event,
+              decision_rationale=str(
+                  buyer_turn.get('decision_rationale', '')
+              ).strip(),
+          )
+      )
+      local_has_active_offer, local_is_closed = self._advance_pair_local_state(
+          actor_id=buyer_id,
+          buyer_id=buyer_id,
+          event=buyer_event,
+          has_active_offer=self._offer_tracker.has_active_offer_for_pair(
+              buyer_id,
+              seller_id,
+          ),
+          is_closed=self._scheduler.is_pair_closed(buyer_id, seller_id),
+      )
+      if not local_is_closed and not pair_result['force_close']:
+        self._observe_event(seller_id, buyer_event)
+        seller_observer_ids.append(seller_id)
+        seller_turn_specs.append({
+            'player_id': seller_id,
+            'buyer_id': buyer_id,
+            'seller_id': seller_id,
+            'has_active_offer': local_has_active_offer,
+        })
+
+    self._flush_pending_observation_updates(seller_observer_ids)
+
+    seller_turns = self._execute_turn_stage(seller_turn_specs)
+    buyer_observer_ids: list[str] = []
+    for seller_turn in seller_turns:
+      buyer_id = str(seller_turn['buyer_id'])
+      seller_id = str(seller_turn['seller_id'])
+      pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
+      pair_result = pair_results[pair_key]
+      pair_result['force_close'] = (
+          pair_result.get('force_close', False)
+          or seller_turn.get('force_close', False)
+      )
+      seller_event = seller_turn.get('event')
+      if seller_event is None:
+        continue
+      pair_result['events'].append(
+          hdb_negotiation_helpers.build_pair_event(
+              actor_id=seller_id,
+              event=seller_event,
+              decision_rationale=str(
+                  seller_turn.get('decision_rationale', '')
+              ).strip(),
+          )
+      )
+      self._observe_event(buyer_id, seller_event)
+      buyer_observer_ids.append(buyer_id)
+
+    self._flush_pending_observation_updates(buyer_observer_ids)
+
+    # Stage 3: fold the per-pair turn outputs back into replay state, offer
+    # tracking, and evaluation records.
     for buyer_id, seller_id in open_pairs:
       pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
-      pair_result = results.get(pair_key)
-      if pair_result is None:
-        continue
+      pair_result = pair_results[pair_key]
+      pair_events = pair_result.get('events', [])
+      if pair_events:
+        self._advance_pair_round_for_entity(buyer_id)
+        self._advance_pair_round_for_entity(seller_id)
       if pair_result.get('force_close', False):
         self._offer_tracker.close_pair(
             buyer_id,
@@ -1011,19 +1993,15 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             week_number=week_number,
         )
         continue
-      pair_events = pair_result.get('events', [])
       if not pair_events:
         continue
-      self._append_pair_replay_events(
-          pair_key=pair_key,
+      self._append_weekly_pair_outputs(
           buyer_id=buyer_id,
           seller_id=seller_id,
+          pair_key=pair_key,
           week_number=week_number,
-          pair_round_number=self._scheduler.get_pair_round_number(
-              buyer_id,
-              seller_id,
-          ),
           pair_events=pair_events,
+          evaluation_records=evaluation_records,
       )
       number_of_pairs_negotiated += 1
       negotiated_pairs.append((buyer_id, seller_id))
@@ -1072,6 +2050,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'week_number': week_number,
         'number_of_pairs_negotiated': number_of_pairs_negotiated,
         'events': events,
+        'evaluation_records': evaluation_records,
         'closed_pairs': closed_records,
         'successful_pairs': successful_pairs,
         'failed_pairs': failed_pairs,
@@ -1104,14 +2083,22 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
             key: dict(value, events=list(value.get('events', ())))
             for key, value in self._conversation_replays.items()
         },
+        'pair_evaluation_records': {
+            key: [dict(record) for record in value]
+            for key, value in self._pair_evaluation_records.items()
+        },
         'action_prompt': self._action_prompt,
+        'max_weeks_open': self._max_weeks_open,
         'make_observation_component_key': self._make_observation_component_key,
+        'closed_pair_archive_jsonl_path': self._closed_pair_archive_jsonl_path,
         'enabled': int(self._enabled),
     }
 
   def get_dynamic_state(self) -> entity_component.ComponentState:
     return {
         'action_prompt': self._action_prompt,
+        'max_weeks_open': self._max_weeks_open,
+        'closed_pair_archive_jsonl_path': self._closed_pair_archive_jsonl_path,
         'enabled': int(self._enabled),
     }
 
@@ -1159,12 +2146,30 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self._conversation_replays = restored_replays
     else:
       self._conversation_replays = {}
+    if 'pair_evaluation_records' in state:
+      restored_evaluation_records: dict[str, list[dict[str, Any]]] = {}
+      for key, value in state['pair_evaluation_records'].items():
+        if not isinstance(value, Sequence) or isinstance(value, str):
+          continue
+        restored_evaluation_records[str(key)] = [
+            dict(record)
+            for record in value
+            if isinstance(record, Mapping)
+        ]
+      self._pair_evaluation_records = restored_evaluation_records
+    else:
+      self._pair_evaluation_records = {}
+    if 'max_weeks_open' in state:
+      self._max_weeks_open = max(0, int(state.get('max_weeks_open', 0) or 0))
     if 'action_prompt' in state:
       self._action_prompt = str(state['action_prompt'])
     if 'make_observation_component_key' in state:
       self._make_observation_component_key = str(
           state['make_observation_component_key']
       )
+    if 'closed_pair_archive_jsonl_path' in state:
+      archive_path = str(state['closed_pair_archive_jsonl_path']).strip()
+      self._closed_pair_archive_jsonl_path = archive_path or None
     self._enabled = bool(state.get('enabled', 1))
     self._entities_by_id = {}
     self._bind_known_entities()

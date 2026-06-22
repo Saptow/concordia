@@ -70,22 +70,41 @@ class ListingPortalRetriever:
                 'Create or preload it before using ListingPortalRetriever.'
             )
 
-    def _embed_dense_text(self, text: str) -> np.ndarray:
+    def _embed_dense_texts(self, texts: Sequence[str]) -> list[np.ndarray]:
         if self._dense_embedder is None:
             raise RuntimeError(
                 'Attempted to embed listing-portal text without a dense '
                 'embedding model.'
             )
-        return self._dense_embedder.encode(text)
+        if not texts:
+            return []
+        embeddings = self._dense_embedder.encode(
+            list(texts),
+            show_progress_bar=False,
+        )
+        return [np.asarray(embedding) for embedding in embeddings]
+
+    def _embed_dense_text(self, text: str) -> np.ndarray:
+        return self._embed_dense_texts([text])[0]
+
+    def _embed_sparse_texts(self, texts: Sequence[str]) -> list[Any | None]:
+        if not texts:
+            return []
+        if self._sparse_embedder is None:
+            return [None] * len(texts)
+        embeddings = list(self._sparse_embedder.embed(list(texts)))
+        if len(embeddings) != len(texts):
+            logging.warning(
+                'Sparse embedder returned %s embeddings for %s query texts.',
+                len(embeddings),
+                len(texts),
+            )
+            embeddings = embeddings[: len(texts)]
+            embeddings.extend([None] * (len(texts) - len(embeddings)))
+        return embeddings
 
     def _embed_sparse_text(self, text: str) -> Any | None:
-        if self._sparse_embedder is None:
-            return None
-        embeddings = list(self._sparse_embedder.embed([text]))
-        if not embeddings:
-            logging.warning('Sparse embedder returned no embedding for query text.')
-            return None
-        return embeddings[0]
+        return self._embed_sparse_texts([text])[0]
 
     def _rrf_ranker(self) -> qdrant_models.Rrf:
         """Build an RRF ranker compatible with the installed qdrant-client version."""
@@ -151,18 +170,37 @@ class ListingPortalRetriever:
         """
         Search active listings and apply portal-specific post-filters.
 
-        Retrieval happens in Qdrant, while active-state and budget filtering stay
-        local so the portal can evolve those rules without rebuilding the index.
+        Retrieval now filters to active listings in Qdrant so inactive or
+        currently negotiating sellers do not consume raw top-k slots. Budget
+        filtering still stays local so the portal can evolve those rules
+        without rebuilding the index.
         """
         dense_query = self._embed_dense_text(query)
         sparse_query = self._embed_sparse_text(query)
+        return self._search_with_embeddings(
+            dense_query=dense_query,
+            sparse_query=sparse_query,
+            max_budget=max_budget,
+            limit=limit,
+        )
+
+    def _search_with_embeddings(
+        self,
+        *,
+        dense_query: np.ndarray,
+        sparse_query: Any | None,
+        max_budget: float | None,
+        limit: int,
+    ) -> list[listing_schemas.PortalSearchResult]:
         search_limit = max(10, 3 * limit)
+        active_filter = qdrant_schemas.active_listing_filter()
         with self._client_lock:
             if sparse_query is None:
                 results = self._client.query_points(
                     collection_name=self._collection_name,
                     query=dense_query,
                     using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                    query_filter=active_filter,
                     limit=search_limit,
                     with_payload=True,
                 )
@@ -173,17 +211,20 @@ class ListingPortalRetriever:
                         qdrant_models.Prefetch(
                             query=qdrant_schemas.sparse_embedding_to_vector(sparse_query),
                             using=qdrant_schemas.SPARSE_EMBEDDINGS_KEY,
+                            filter=active_filter,
                             limit=2 * limit,
                         ),
                         qdrant_models.Prefetch(
                             query=dense_query,
                             using=qdrant_schemas.DENSE_EMBEDDINGS_KEY,
+                            filter=active_filter,
                             limit=2 * limit,
                         ),
                     ],
                     query=qdrant_models.RrfQuery(
                         rrf=self._rrf_ranker()
                     ),
+                    query_filter=active_filter,
                     limit=search_limit,
                     with_payload=True,
                 )
@@ -202,6 +243,45 @@ class ListingPortalRetriever:
                 break
 
         return filtered_results
+
+    def search_many(
+        self,
+        queries: Sequence[str],
+        *,
+        max_budgets: Sequence[float | None] | None = None,
+        limit: int = 5,
+    ) -> list[list[listing_schemas.PortalSearchResult]]:
+        """Search many buyer queries with one batched embedding pass."""
+        if not queries:
+            return []
+        dense_queries = self._embed_dense_texts(queries)
+        sparse_queries = self._embed_sparse_texts(queries)
+        if max_budgets is None:
+            normalized_budgets = [None] * len(queries)
+        else:
+            normalized_budgets = [
+                float(budget) if budget is not None else None
+                for budget in max_budgets
+            ]
+            if len(normalized_budgets) != len(queries):
+                raise ValueError(
+                    'max_budgets must align with queries when provided.'
+                )
+
+        return [
+            self._search_with_embeddings(
+                dense_query=dense_query,
+                sparse_query=sparse_query,
+                max_budget=max_budget,
+                limit=limit,
+            )
+            for dense_query, sparse_query, max_budget in zip(
+                dense_queries,
+                sparse_queries,
+                normalized_budgets,
+                strict=True,
+            )
+        ]
 
   
 class ListingPortal:
@@ -222,9 +302,10 @@ class ListingPortal:
     ):
         self.retriever = retriever or ListingPortalRetriever()
         self._rng = random.Random(random_seed)
+        self._state_lock = threading.RLock()
 
         self.requests_by_seller: dict[str, list[listing_schemas.NegotiationRequest]] = {}
-        self.search_results_by_buyer: dict[str, list[listing_schemas.PortalSearchResult]] = {}
+        self.search_results_by_buyer: dict[str, list[listing_schemas.CompactPortalSearchResult]] = {}
         self.private_buyer_market_states: dict[str, negotiation_schemas.BuyerMarketBeliefState] = {}
         self.private_seller_market_states: dict[str, negotiation_schemas.SellerMarketBeliefState] = {}
         self.market_feedback_by_buyer: dict[str, str] = {}
@@ -251,15 +332,20 @@ class ListingPortal:
         return bool(listing and listing.active)
 
     def is_player_closed(self, player_id: str) -> bool:
-        return player_id in self.closed_buyers or player_id in self.closed_sellers
+        with self._state_lock:
+            return (
+                player_id in self.closed_buyers
+                or player_id in self.closed_sellers
+            )
 
     def pending_request_count(self, seller_id: str) -> int:
-        requests = self.requests_by_seller.get(seller_id, [])
-        return sum(
-            1
-            for request in requests
-            if request.buyer_id not in self.closed_buyers
-        )
+        with self._state_lock:
+            requests = self.requests_by_seller.get(seller_id, [])
+            return sum(
+                1
+                for request in requests
+                if request.buyer_id not in self.closed_buyers
+            )
 
     def get_listing_record(
         self,
@@ -277,11 +363,12 @@ class ListingPortal:
         normalized_seller_id = str(seller_id).strip()
         if not normalized_buyer_id or not normalized_seller_id:
             return False
-        return any(
-            match.buyer_id == normalized_buyer_id
-            and match.seller_id == normalized_seller_id
-            for match in self.matched_pairs
-        )
+        with self._state_lock:
+            return any(
+                match.buyer_id == normalized_buyer_id
+                and match.seller_id == normalized_seller_id
+                for match in self.matched_pairs
+            )
 
     def _top_valid_listing_ids_for_buyer(
         self,
@@ -306,49 +393,51 @@ class ListingPortal:
         self,
         buyer: listing_schemas.PortalBuyer,
     ) -> negotiation_schemas.BuyerMarketBeliefState:
-        state = self.private_buyer_market_states.get(buyer.id)
-        if state is None:
-            reservation_price_prior = (
-                float(buyer.reservation_price_prior)
-                if buyer.reservation_price_prior is not None
-                else float(buyer.budget.max_price)
-            )
-            base_reservation_price = max(
-                float(buyer.budget.min_price),
-                min(float(buyer.budget.max_price), reservation_price_prior),
-            )
-            state = negotiation_schemas.BuyerMarketBeliefState(
-                buyer_id=buyer.id,
-                base_reservation_price=base_reservation_price,
-                effective_reservation=uncertain_helper.NormalDistribution(
-                    name='Effective reservation price',
-                    mean=base_reservation_price,
-                    std=max(1000.0, 0.05 * base_reservation_price),
-                    confidence=0.5,
-                ),
-            )
-            self.private_buyer_market_states[buyer.id] = state
-        return state
+        with self._state_lock:
+            state = self.private_buyer_market_states.get(buyer.id)
+            if state is None:
+                reservation_price_prior = (
+                    float(buyer.reservation_price_prior)
+                    if buyer.reservation_price_prior is not None
+                    else float(buyer.budget.max_price)
+                )
+                base_reservation_price = max(
+                    float(buyer.budget.min_price),
+                    min(float(buyer.budget.max_price), reservation_price_prior),
+                )
+                state = negotiation_schemas.BuyerMarketBeliefState(
+                    buyer_id=buyer.id,
+                    base_reservation_price=base_reservation_price,
+                    effective_reservation=uncertain_helper.NormalDistribution(
+                        name='Effective reservation price',
+                        mean=base_reservation_price,
+                        std=max(1000.0, 0.05 * base_reservation_price),
+                        confidence=0.5,
+                    ),
+                )
+                self.private_buyer_market_states[buyer.id] = state
+            return state
 
     def _seller_market_state(
         self,
         seller: listing_schemas.PortalSeller,
     ) -> negotiation_schemas.SellerMarketBeliefState:
-        state = self.private_seller_market_states.get(seller.id)
-        if state is None:
-            base_reservation_price = float(seller.expectations.min_price)
-            state = negotiation_schemas.SellerMarketBeliefState(
-                seller_id=seller.id,
-                base_reservation_price=base_reservation_price,
-                effective_reservation=uncertain_helper.NormalDistribution(
-                    name='Effective reservation price',
-                    mean=base_reservation_price,
-                    std=max(1000.0, 0.05 * base_reservation_price),
-                    confidence=0.5,
-                ),
-            )
-            self.private_seller_market_states[seller.id] = state
-        return state
+        with self._state_lock:
+            state = self.private_seller_market_states.get(seller.id)
+            if state is None:
+                base_reservation_price = float(seller.expectations.min_price)
+                state = negotiation_schemas.SellerMarketBeliefState(
+                    seller_id=seller.id,
+                    base_reservation_price=base_reservation_price,
+                    effective_reservation=uncertain_helper.NormalDistribution(
+                        name='Effective reservation price',
+                        mean=base_reservation_price,
+                        std=max(1000.0, 0.05 * base_reservation_price),
+                        confidence=0.5,
+                    ),
+                )
+                self.private_seller_market_states[seller.id] = state
+            return state
 
     def effective_reservation_price_for_buyer(
         self,
@@ -382,6 +471,21 @@ class ListingPortal:
             common_schemas.build_buyer_flat_preference_match_score(
                 buyer.preferences,
                 result.flat,
+            )
+            for result in results
+        ]
+
+    @staticmethod
+    def _compact_search_results(
+        results: Sequence[listing_schemas.PortalSearchResult],
+    ) -> list[listing_schemas.CompactPortalSearchResult]:
+        return [
+            listing_schemas.CompactPortalSearchResult(
+                listing_id=result.listing_id,
+                seller_id=result.seller_id,
+                seller_name=result.seller_name,
+                listing_price=float(result.listing_price),
+                score=float(result.score),
             )
             for result in results
         ]
@@ -492,12 +596,9 @@ class ListingPortal:
         ) -> SearchAndRequestResult:
         """
         Buyer method to search for listings and send negotiation requests to sellers.
-         - Search results are based on the buyer's preferences and effective reservation price.
+         - Search results are based on the buyer's preferences and affordability.
         """
-        max_budget = min(
-            float(buyer.budget.max_price),
-            self.effective_reservation_price_for_buyer(buyer),
-        )
+        max_budget = float(buyer.budget.max_price)
         effective_query = self._derive_query_from_preferences(buyer, '')
         results = self.retriever.search(
             effective_query,
@@ -522,15 +623,17 @@ class ListingPortal:
             results,
         )
         buyer_id = buyer.id
-        self.search_results_by_buyer[buyer_id] = list(results)
-        self._update_buyer_market_state(
-            buyer,
-            relevant_observations,
-            market_reliability,
-            relevant_prices,
-            feedback,
-        )
-        self.market_feedback_by_buyer[buyer_id] = feedback
+        compact_results = self._compact_search_results(results)
+        with self._state_lock:
+            self.search_results_by_buyer[buyer_id] = compact_results
+            self._update_buyer_market_state(
+                buyer,
+                relevant_observations,
+                market_reliability,
+                relevant_prices,
+                feedback,
+            )
+            self.market_feedback_by_buyer[buyer_id] = feedback
 
         results_by_listing_id = {
             result.listing_id: result for result in results
@@ -550,6 +653,83 @@ class ListingPortal:
             results=list(results),
             market_feedback=feedback,
         )
+
+    def search_and_request_many(
+        self,
+        buyers: Sequence[listing_schemas.PortalBuyer],
+        *,
+        week: int,
+    ) -> dict[str, SearchAndRequestResult]:
+        """Run buyer portal search/request with batched query embeddings."""
+        eligible_buyers = [
+            buyer
+            for buyer in buyers
+            if str(buyer.id).strip() and not self.is_player_closed(buyer.id)
+        ]
+        if not eligible_buyers:
+            return {}
+
+        queries = [
+            self._derive_query_from_preferences(buyer, '')
+            for buyer in eligible_buyers
+        ]
+        budgets = [float(buyer.budget.max_price) for buyer in eligible_buyers]
+        search_results = self.retriever.search_many(
+            queries,
+            max_budgets=budgets,
+            limit=PORTAL_SEARCH_LIMIT,
+        )
+
+        results_by_buyer: dict[str, SearchAndRequestResult] = {}
+        for buyer, results in zip(eligible_buyers, search_results, strict=True):
+            match_scores = self._listing_match_scores(
+                buyer,
+                results,
+            )
+            relevant_observations, market_reliability, relevant_prices = (
+                self._relevant_market_observations(results, match_scores)
+            )
+            feedback = self._market_feedback(
+                self.effective_reservation_price_for_buyer(buyer),
+                relevant_prices,
+            )
+            requested_listing_ids = self._top_valid_listing_ids_for_buyer(
+                buyer,
+                results,
+            )
+            buyer_id = buyer.id
+            compact_results = self._compact_search_results(results)
+            with self._state_lock:
+                self.search_results_by_buyer[buyer_id] = compact_results
+                self._update_buyer_market_state(
+                    buyer,
+                    relevant_observations,
+                    market_reliability,
+                    relevant_prices,
+                    feedback,
+                )
+                self.market_feedback_by_buyer[buyer_id] = feedback
+
+            results_by_listing_id = {
+                result.listing_id: result for result in results
+            }
+            for listing_id in requested_listing_ids:
+                result = results_by_listing_id.get(listing_id)
+                if result is None:
+                    continue
+                self.submit_negotiation_request(
+                    buyer,
+                    seller_id=result.seller_id,
+                    week=week,
+                    listing_id=listing_id,
+                )
+
+            results_by_buyer[str(buyer_id)] = SearchAndRequestResult(
+                results=list(results),
+                market_feedback=feedback,
+            )
+
+        return results_by_buyer
 
     def submit_negotiation_request(
         self,
@@ -583,27 +763,41 @@ class ListingPortal:
         if effective_listing_id != listing.listing_id:
             return None
 
-        existing_requests = self.requests_by_seller.setdefault(normalized_seller_id, [])
-        already_requested = any(
-            request.buyer_id == buyer_id
-            and request.buyer_id not in self.closed_buyers
-            for request in existing_requests
-        )
-        if already_requested:
-            return None
+        with self._state_lock:
+            if (
+                buyer_id in self.closed_buyers
+                or normalized_seller_id in self.closed_sellers
+            ):
+                return None
+            if self.has_buyer_negotiated_with_seller(
+                buyer_id,
+                normalized_seller_id,
+            ):
+                return None
+            existing_requests = self.requests_by_seller.setdefault(
+                normalized_seller_id,
+                [],
+            )
+            already_requested = any(
+                request.buyer_id == buyer_id
+                and request.buyer_id not in self.closed_buyers
+                for request in existing_requests
+            )
+            if already_requested:
+                return None
 
-        request = listing_schemas.NegotiationRequest(
-            request_id=self._request_id(buyer_id, effective_listing_id, week),
-            buyer_id=buyer_id,
-            buyer_name=buyer.name,
-            listing_id=effective_listing_id,
-            seller_id=normalized_seller_id,
-            week_submitted=week,
-            message=message,
-            market_valuation_notes=market_valuation_notes,
-        )
-        existing_requests.append(request)
-        return request
+            request = listing_schemas.NegotiationRequest(
+                request_id=self._request_id(buyer_id, effective_listing_id, week),
+                buyer_id=buyer_id,
+                buyer_name=buyer.name,
+                listing_id=effective_listing_id,
+                seller_id=normalized_seller_id,
+                week_submitted=week,
+                message=message,
+                market_valuation_notes=market_valuation_notes,
+            )
+            existing_requests.append(request)
+            return request
 
     def list_flat(
         self,
@@ -625,7 +819,8 @@ class ListingPortal:
         if listing_price is not None:
             record.listing_price = float(listing_price)
         record.active = True
-        self.requests_by_seller.setdefault(seller_id, [])
+        with self._state_lock:
+            self.requests_by_seller.setdefault(seller_id, [])
         self.retriever.update_listing_payload(record)
         return listing_id
 
@@ -638,56 +833,58 @@ class ListingPortal:
         seller_id = seller.id
         listing_id = self.listing_id_for_seller(seller_id)
 
-        open_requests = [
-            request
-            for request in self.requests_by_seller.get(seller_id, [])
-            if request.buyer_id not in self.closed_buyers
-        ]
-        if not open_requests:
-            return None
+        with self._state_lock:
+            open_requests = [
+                request
+                for request in self.requests_by_seller.get(seller_id, [])
+                if request.buyer_id not in self.closed_buyers
+            ]
+            if not open_requests:
+                return None
 
-        # Seller-side request triage is intentionally simple for now; this keeps
-        # the portal deterministic apart from the configured RNG seed.
-        chosen_request = self._rng.choice(open_requests)
-        match = listing_schemas.NegotiationMatch(
-            match_id=self._match_id(chosen_request.buyer_id, seller_id, week),
-            buyer_id=chosen_request.buyer_id,
-            buyer_name=chosen_request.buyer_name,
-            seller_id=seller_id,
-            seller_name=seller.name,
-            listing_id=listing_id,
-            week_matched=week,
-        )
-        self.matched_pairs.append(match)
-        self.closed_buyers.add(chosen_request.buyer_id)
-        self.closed_sellers.add(seller_id)
-        self.requests_by_seller[seller_id] = []
+            # Seller-side request triage is intentionally simple for now; this
+            # keeps the portal deterministic apart from the configured RNG seed.
+            chosen_request = self._rng.choice(open_requests)
+            match = listing_schemas.NegotiationMatch(
+                match_id=self._match_id(chosen_request.buyer_id, seller_id, week),
+                buyer_id=chosen_request.buyer_id,
+                buyer_name=chosen_request.buyer_name,
+                seller_id=seller_id,
+                seller_name=seller.name,
+                listing_id=listing_id,
+                week_matched=week,
+            )
+            self.matched_pairs.append(match)
+            self.closed_buyers.add(chosen_request.buyer_id)
+            self.closed_sellers.add(seller_id)
+            self.requests_by_seller[seller_id] = []
         self.retriever.deactivate_listing(seller_id)
         return match
 
     def export_state(self) -> dict[str, Any]:
-        return {
-            'requests_by_seller': {
-                seller_id: [request.model_dump() for request in requests]
-                for seller_id, requests in self.requests_by_seller.items()
-            },
-            'search_results_by_buyer': {
-                buyer_id: [result.model_dump() for result in results]
-                for buyer_id, results in self.search_results_by_buyer.items()
-            },
-            'private_buyer_market_states': {
-                buyer_id: state.model_dump()
-                for buyer_id, state in self.private_buyer_market_states.items()
-            },
-            'private_seller_market_states': {
-                seller_id: state.model_dump()
-                for seller_id, state in self.private_seller_market_states.items()
-            },
-            'market_feedback_by_buyer': dict(self.market_feedback_by_buyer),
-            'matched_pairs': [match.model_dump() for match in self.matched_pairs],
-            'closed_buyers': sorted(self.closed_buyers),
-            'closed_sellers': sorted(self.closed_sellers),
-        }
+        with self._state_lock:
+            return {
+                'requests_by_seller': {
+                    seller_id: [request.model_dump() for request in requests]
+                    for seller_id, requests in self.requests_by_seller.items()
+                },
+                'search_results_by_buyer': {
+                    buyer_id: [result.model_dump() for result in results]
+                    for buyer_id, results in self.search_results_by_buyer.items()
+                },
+                'private_buyer_market_states': {
+                    buyer_id: state.model_dump()
+                    for buyer_id, state in self.private_buyer_market_states.items()
+                },
+                'private_seller_market_states': {
+                    seller_id: state.model_dump()
+                    for seller_id, state in self.private_seller_market_states.items()
+                },
+                'market_feedback_by_buyer': dict(self.market_feedback_by_buyer),
+                'matched_pairs': [match.model_dump() for match in self.matched_pairs],
+                'closed_buyers': sorted(self.closed_buyers),
+                'closed_sellers': sorted(self.closed_sellers),
+            }
 
     @classmethod
     def from_state(
@@ -712,7 +909,7 @@ class ListingPortal:
         }
         restored.search_results_by_buyer = {
             buyer_id: [
-                listing_schemas.PortalSearchResult.model_validate(result)
+                listing_schemas.CompactPortalSearchResult.model_validate(result)
                 for result in results
             ]
             for buyer_id, results in dict(

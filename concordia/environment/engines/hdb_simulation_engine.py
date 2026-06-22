@@ -103,6 +103,49 @@ class HDBSimulationEngine(engine_lib.Engine):
       )
     return True
 
+  @classmethod
+  def _prune_heavy_log_fields(cls, value: Any) -> Any:
+    """Removes bulky debug-only fields before persisting step logs."""
+    if isinstance(value, Mapping):
+      pruned: dict[str, Any] = {}
+      for key, child in value.items():
+        normalized_key = str(key).strip().casefold()
+        if normalized_key in (
+            'chain of thought',
+            'internal_reasoning',
+            'decision_rationale',
+        ):
+          continue
+        pruned[str(key)] = cls._prune_heavy_log_fields(child)
+      return pruned
+    if isinstance(value, Sequence) and not isinstance(value, str):
+      return [cls._prune_heavy_log_fields(item) for item in value]
+    return value
+
+  @staticmethod
+  def _successful_closed_player_ids(
+      summary: Mapping[str, Any],
+  ) -> set[str]:
+    """Returns player ids for negotiations that closed successfully this week."""
+    negotiation = summary.get('negotiation', {})
+    if not isinstance(negotiation, Mapping):
+      return set()
+    successful_pairs = negotiation.get('successful_pairs', ())
+    if not isinstance(successful_pairs, Sequence) or isinstance(successful_pairs, str):
+      return set()
+
+    player_ids: set[str] = set()
+    for record in successful_pairs:
+      if not isinstance(record, Mapping):
+        continue
+      buyer_id = str(record.get('buyer_id', '')).strip()
+      seller_id = str(record.get('seller_id', '')).strip()
+      if buyer_id:
+        player_ids.add(buyer_id)
+      if seller_id:
+        player_ids.add(seller_id)
+    return player_ids
+
   def _collect_entity_logs(
       self,
       *,
@@ -110,18 +153,32 @@ class HDBSimulationEngine(engine_lib.Engine):
       entities: Sequence[entity_lib.Entity],
       active_negotiation_player_ids: Sequence[str],
       listing_player_ids: Sequence[str],
+      successful_closed_player_ids: Sequence[str] = (),
   ) -> dict[str, Mapping[str, Any]]:
     """Collects logs from module-owned agents before falling back to outer ones."""
     collected_logs: dict[str, Mapping[str, Any]] = {}
     negotiation_module = coordinator.get_negotiation_module()
     listing_module = coordinator.get_listing_module()
+    excluded_player_ids = {
+        str(player_id)
+        for player_id in successful_closed_player_ids
+        if str(player_id).strip()
+    }
     negotiation_player_ids = (
-        tuple(str(player_id) for player_id in active_negotiation_player_ids)
+        tuple(
+            str(player_id)
+            for player_id in active_negotiation_player_ids
+            if str(player_id) not in excluded_player_ids
+        )
         if getattr(negotiation_module, 'is_enabled', lambda: True)()
         else ()
     )
     listing_active_player_ids = (
-        tuple(str(player_id) for player_id in listing_player_ids)
+        tuple(
+            str(player_id)
+            for player_id in listing_player_ids
+            if str(player_id) not in excluded_player_ids
+        )
         if getattr(listing_module, 'is_enabled', lambda: True)()
         else ()
     )
@@ -159,9 +216,10 @@ class HDBSimulationEngine(engine_lib.Engine):
       if not isinstance(snapshots, Mapping):
         continue
       for entity_name, snapshot in snapshots.items():
-        if not self._has_meaningful_log_value(snapshot):
+        pruned_snapshot = self._prune_heavy_log_fields(snapshot)
+        if not self._has_meaningful_log_value(pruned_snapshot):
           continue
-        collected_logs[str(entity_name)] = snapshot
+        collected_logs[str(entity_name)] = pruned_snapshot
 
     for entity in entities:
       if (
@@ -170,7 +228,7 @@ class HDBSimulationEngine(engine_lib.Engine):
           or not hasattr(entity, 'get_last_log')
       ):
         continue
-      snapshot = entity.get_last_log()
+      snapshot = self._prune_heavy_log_fields(entity.get_last_log())
       if not self._has_meaningful_log_value(snapshot):
         continue
       collected_logs[entity.name] = snapshot
@@ -233,6 +291,7 @@ class HDBSimulationEngine(engine_lib.Engine):
           entities=entities,
           active_negotiation_player_ids=active_negotiation_player_ids,
           listing_player_ids=listing_player_ids,
+          successful_closed_player_ids=self._successful_closed_player_ids(summary),
       )
       if log is not None:
         log_entry: dict[str, Any] = {
@@ -351,6 +410,10 @@ class HDBSimulationEngine(engine_lib.Engine):
     if not normalized_player_ids:
       return
 
+    observations_by_player_id = policy_layer.announce_policies_for_week(
+        week_number=int(week_number),
+        active_player_ids=normalized_player_ids,
+    )
     current_policy_prompt = getattr(
         policy_layer,
         'get_current_policy_prompt',
@@ -359,6 +422,7 @@ class HDBSimulationEngine(engine_lib.Engine):
     active_source_paths = list(
         getattr(policy_layer, 'get_active_source_paths', lambda: [])()
     )
+
     for entity in entities:
       try:
         policy_prompt = entity.get_component(
@@ -372,10 +436,6 @@ class HDBSimulationEngine(engine_lib.Engine):
           active_source_paths=active_source_paths,
       )
 
-    observations_by_player_id = policy_layer.announce_policies_for_week(
-        week_number=int(week_number),
-        active_player_ids=normalized_player_ids,
-    )
     if not observations_by_player_id:
       return
 

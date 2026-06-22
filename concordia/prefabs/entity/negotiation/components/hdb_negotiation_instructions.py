@@ -9,6 +9,16 @@ from concordia.hdb_simulation.models.schemas import negotiation as negotiation_s
 from concordia.hdb_simulation.models.schemas.common import RoleType
 from concordia.typing import entity_component
 
+DEFAULT_ETHICS = (
+    'HDB RESALE ETHICAL CONSTRAINTS:\n'
+    '- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities, etc.).\n'
+    '- If you are unsure about a fact, say you are unsure instead of guessing.\n'
+    '- You may withhold private limits (true budget, reservation, urgency), but factual answers must be truthful or explicitly uncertain.\n'
+    '- Do not propose side payments or terms that contradict HDB OTP/deposit rules; keep commitments realistic within HDB timelines.\n'
+    '- Treat inferences as hypotheses; ask clarifying questions instead of asserting unverified claims.\n'
+    '- No coercion, harassment, or exploitation of vulnerability; keep a clear written record of offers and key terms.'
+)
+
 
 class HDBNegotiationInstructions(action_spec_ignored.ActionSpecIgnored):
     """Instructions component specialized for HDB negotiation contexts."""
@@ -31,38 +41,10 @@ class HDBNegotiationInstructions(action_spec_ignored.ActionSpecIgnored):
         self._flat_listing = dict(flat_listing) if flat_listing else {}
         self._preferences = dict(preferences) if preferences else {}
         self._reservation_value = reservation_value
-        self._ethics = ethical_constraints or 'Be honest and fair. Do not deceive.'
+        self._ethics = ethical_constraints or DEFAULT_ETHICS
         self._pre_act_label = pre_act_label
         self._verbose = verbose
         self._base_instructions = self._generate_base_instructions()
-
-    @staticmethod
-    def _extract_first_json_object(text: str) -> str | None:
-        start = text.find('{')
-        if start < 0:
-            return None
-        candidate = text[start:]
-        depth = 0
-        in_string = False
-        escaped = False
-        for idx, ch in enumerate(candidate):
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif ch == '\\':
-                    escaped = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-            elif ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    return candidate[: idx + 1]
-        return None
 
     def _generate_base_instructions(self) -> str:
         """Generate compact negotiation instructions for action prompts."""

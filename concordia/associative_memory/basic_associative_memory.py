@@ -27,6 +27,16 @@ import pandas as pd
 StringIO = io.StringIO
 
 
+def _normalize_max_entries(max_entries: int | None) -> int | None:
+  """Normalize an optional memory-bank cap."""
+  if max_entries is None:
+    return None
+  parsed = int(max_entries)
+  if parsed <= 0:
+    return None
+  return parsed
+
+
 class AssociativeMemoryBank:
   """Class that implements associative memory."""
 
@@ -34,6 +44,7 @@ class AssociativeMemoryBank:
       self,
       sentence_embedder: Callable[[str], np.ndarray] | None = None,
       allow_duplicates: bool = False,
+      max_entries: int | None = None,
   ):
     """Constructor.
 
@@ -44,10 +55,13 @@ class AssociativeMemoryBank:
       allow_duplicates: if True, allow adding duplicate entries to the memory.
         This is useful for Game Master memories where the same action may recur
         across different rounds.
+      max_entries: optional maximum number of memories to retain. When set,
+        the oldest memories are evicted first once the cap is exceeded.
     """
     self._memory_bank_lock = threading.Lock()
     self._embedder = sentence_embedder
     self._allow_duplicates = allow_duplicates
+    self._max_entries = _normalize_max_entries(max_entries)
 
     self._memory_bank = pd.DataFrame(columns=['text', 'embedding'])
     self._stored_hashes = set()
@@ -61,6 +75,7 @@ class AssociativeMemoryBank:
       output = {
           'stored_hashes': list(self._stored_hashes),
           'memory_bank': self._memory_bank.to_json(),
+          'max_entries': self._max_entries,
       }
     return output
 
@@ -68,9 +83,46 @@ class AssociativeMemoryBank:
     """Sets the AssociativeMemory from a dictionary."""
 
     with self._memory_bank_lock:
-      self._stored_hashes = set(state['stored_hashes'])
+      self._max_entries = _normalize_max_entries(
+          state.get('max_entries', self._max_entries)
+      )
+      self._stored_hashes = set(state.get('stored_hashes', []))
       self._memory_bank = pd.read_json(StringIO(state['memory_bank']))
       self._pending_memories.clear()  # Clear any pending on state restore
+      self._trim_memory_bank()
+      self._rebuild_stored_hashes()
+
+  def set_max_entries(self, max_entries: int | None) -> None:
+    """Update the retention cap for the memory bank."""
+    with self._memory_bank_lock:
+      self._max_entries = _normalize_max_entries(max_entries)
+      self._flush_pending()
+      self._trim_memory_bank()
+
+  def get_max_entries(self) -> int | None:
+    """Return the configured retention cap for the memory bank."""
+    with self._memory_bank_lock:
+      return self._max_entries
+
+  def _rebuild_stored_hashes(self) -> None:
+    """Rebuild the hash cache from the currently retained memories."""
+    if self._memory_bank.empty:
+      self._stored_hashes = set()
+      return
+    texts = self._memory_bank['text'].tolist()
+    self._stored_hashes = {hash((text,)) for text in texts}
+
+  def _trim_memory_bank(self) -> None:
+    """Trim the memory bank to the configured retention cap."""
+    if self._max_entries is None:
+      return
+    overflow = len(self._memory_bank) - self._max_entries
+    if overflow <= 0:
+      return
+    self._memory_bank = (
+        self._memory_bank.iloc[-self._max_entries:].reset_index(drop=True)
+    )
+    self._rebuild_stored_hashes()
 
   def _flush_pending(self) -> None:
     """Flushes pending memories to the DataFrame.
@@ -83,6 +135,7 @@ class AssociativeMemoryBank:
           [self._memory_bank, new_df], ignore_index=True
       )
       self._pending_memories.clear()
+      self._trim_memory_bank()
 
   def add(
       self,
@@ -239,8 +292,8 @@ class AssociativeMemoryBank:
   def __len__(self):
     """Returns the number of entries in the memory bank.
 
-    Since memories cannot be deleted, the length cannot decrease, and can be
-    used to check if the contents of the memory bank have changed.
+    When `max_entries` is set, older memories may be evicted as new ones are
+    added, so the length reflects the currently retained rows.
     """
     with self._memory_bank_lock:
       self._flush_pending()

@@ -4,13 +4,18 @@ from collections.abc import Mapping, Sequence
 import json
 
 from absl import logging
+from concordia.components import helpers as component_helpers
 from concordia.hdb_simulation.models import schemas as hdb_schemas
+from concordia.hdb_simulation.models.schemas import common as common_schemas
+from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.typing import entity_component
+from pydantic import BaseModel, ValidationError
 
 # Shared pair types
 PairIds = tuple[str, str]
 PairMapping = Mapping[str, str]
 SerializedPairMapping = dict[str, str]
+TURN_EVENT_FIELDS_TO_STRIP = ('internal_reasoning', 'decision_rationale')
 
 
 # Pair normalization helpers
@@ -64,6 +69,150 @@ def parse_outcome(value: object) -> hdb_schemas.NegotiationOutcome | None:
   except ValueError:
     logging.warning('Skipping invalid negotiation outcome value: %s', value)
     return None
+
+
+# Action parsing and evaluation helpers
+def extract_action_from_event(event: str) -> dict[str, object] | None:
+  """Parse the first JSON action object embedded in an event string."""
+  _, sep, payload = event.partition(':')
+  if not sep:
+    return None
+  payload_json = component_helpers.extract_first_json_object(payload)
+  if not payload_json:
+    return None
+  try:
+    action = json.loads(payload_json)
+  except json.JSONDecodeError:
+    return None
+  return action if isinstance(action, dict) else None
+
+
+def public_verbal_text_from_validated_action(action: BaseModel) -> str:
+  """Extract the public verbal text from a validated action schema."""
+  if isinstance(
+      action,
+      (
+          negotiation_schemas.MakeOffer,
+          negotiation_schemas.AcceptOffer,
+          negotiation_schemas.RejectOffer,
+          negotiation_schemas.MakeCounteroffer,
+          negotiation_schemas.BuyerWalkAway,
+      ),
+  ):
+    return str(action.verbal_explanation).strip()
+  if isinstance(action, negotiation_schemas.NormalAnswer):
+    return str(action.answer_details).strip()
+  if isinstance(
+      action,
+      (
+          negotiation_schemas.BuyerInquiry,
+          negotiation_schemas.SellerInquiry,
+      ),
+  ):
+    return str(action.inquiry_details).strip()
+  if isinstance(action, negotiation_schemas.BuyerQuestion):
+    return str(action.question_details).strip()
+  return ''
+
+
+def public_action_payload_from_validated_action(
+    action: BaseModel,
+) -> dict[str, object]:
+  """Serialize a validated action while dropping private-only fields."""
+  return action.model_dump(
+      mode='json',
+      exclude=set(TURN_EVENT_FIELDS_TO_STRIP),
+  )
+
+
+def numeric_action_signature_from_validated_action(
+    action: BaseModel,
+) -> dict[str, float | int]:
+  """Extract numeric repeat-signature fields from validated action schemas."""
+  if isinstance(action, negotiation_schemas.MakeOffer):
+    return {'offer_price': int(action.offer_price)}
+  if isinstance(action, negotiation_schemas.MakeCounteroffer):
+    return {'counteroffer_price': int(action.counteroffer_price)}
+  if isinstance(action, negotiation_schemas.AcceptOffer):
+    return {'price_settled': int(action.price_settled)}
+  return {}
+
+
+def extract_decision_rationale(raw_value: object) -> str:
+  """Extract `decision_rationale` from the chooser schema output."""
+  payload_json = component_helpers.extract_first_json_object(str(raw_value or ''))
+  if not payload_json:
+    return ''
+  try:
+    payload = common_schemas.ActionChoiceWithRationale.model_validate_json(
+        payload_json
+    )
+  except ValidationError:
+    return ''
+  return str(payload.decision_rationale).strip()
+
+
+def validate_action_for_actor(
+    *,
+    actor_id: str,
+    buyer_id: str,
+    raw_action: Mapping[str, object],
+) -> BaseModel | None:
+  """Validate one action payload against the buyer/seller generation schemas."""
+  try:
+    action_json = json.dumps(dict(raw_action), ensure_ascii=False)
+  except (TypeError, ValueError):
+    logging.warning(
+        'Skipping evaluation validation for malformed action payload from %s.',
+        actor_id,
+    )
+    return None
+  try:
+    action_model = (
+        negotiation_schemas.NegotiationBuyerActions
+        if actor_id == buyer_id
+        else negotiation_schemas.NegotiationSellerActions
+    )
+    return action_model.model_validate_json(action_json).root
+  except ValidationError:
+    return None
+
+
+def evaluation_fields_from_validated_action(
+    action: BaseModel | None,
+) -> tuple[dict[str, object], str, str, str, dict[str, float | int]]:
+  """Return evaluation-friendly fields from one validated action object."""
+  if action is None:
+    return {}, '', '', '', {}
+  public_action_payload = public_action_payload_from_validated_action(action)
+  return (
+      public_action_payload,
+      str(getattr(action, 'internal_reasoning', '')).strip(),
+      str(getattr(action, 'type', '')).strip().upper(),
+      public_verbal_text_from_validated_action(action),
+      numeric_action_signature_from_validated_action(action),
+  )
+
+
+def role_value_for_actor(actor_id: str, buyer_id: str) -> str:
+  """Return the role label for an actor within a buyer/seller pair."""
+  if actor_id == buyer_id:
+    return negotiation_schemas.RoleType.BUYER.value
+  return negotiation_schemas.RoleType.SELLER.value
+
+
+def build_pair_event(
+    *,
+    actor_id: str,
+    event: str,
+    decision_rationale: str,
+) -> dict[str, str]:
+  """Normalize one pair event record for replay and evaluation capture."""
+  return {
+      'actor_id': actor_id,
+      'event': event,
+      'decision_rationale': str(decision_rationale or '').strip(),
+  }
 
 
 class NegotiationScheduler:
@@ -371,23 +520,6 @@ class ActiveOfferTracker:
   def _pair_key(buyer_id: str, seller_id: str) -> str:
     return pair_key(buyer_id, seller_id)
 
-  @staticmethod
-  def _extract_json_object(text: str) -> str | None:
-    """Extracts the first balanced JSON object embedded in an event string."""
-    start = text.find('{')
-    if start < 0:
-      return None
-    candidate = text[start:]
-    depth = 0
-    for idx, ch in enumerate(candidate):
-      if ch == '{':
-        depth += 1
-      elif ch == '}':
-        depth -= 1
-        if depth == 0:
-          return candidate[: idx + 1]
-    return None
-
   # Pair registration and closure
   def _ensure_initialized(self) -> None:
     """Lazily initializes tracker state from the scheduler's pair queue."""
@@ -468,7 +600,7 @@ class ActiveOfferTracker:
       return
 
     self._turn_counts[pair_key] = self._turn_counts.get(pair_key, 0) + 1
-    payload_json = self._extract_json_object(payload)
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
       return
 
@@ -596,6 +728,22 @@ class ActiveOfferTracker:
   ) -> list[dict[str, object]]:
     self._ensure_initialized()
     return list(self._offer_history.get(self._pair_key(buyer_id, seller_id), []))
+
+  def evict_pair_state(self, buyer_id: str, seller_id: str) -> None:
+    """Drop heavy pair-local state after it has been archived externally."""
+    self._ensure_initialized()
+    pair_key = self._pair_key(buyer_id, seller_id)
+    members = self._pair_members.pop(pair_key, None)
+    if members is not None:
+      for player_id in members:
+        if self._player_to_pair.get(player_id) == pair_key:
+          self._player_to_pair.pop(player_id, None)
+    self._active_offers.pop(pair_key, None)
+    self._offer_history.pop(pair_key, None)
+    self._turn_counts.pop(pair_key, None)
+    self._closed_pairs.discard(pair_key)
+    self._closed_pair_outcomes.pop(pair_key, None)
+    self._pair_order = [key for key in self._pair_order if key != pair_key]
 
   def all_pairs_closed(self) -> bool:
     self._ensure_initialized()

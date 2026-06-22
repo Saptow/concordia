@@ -22,10 +22,15 @@ from typing import Any, Dict, Set
 class Measurements:
   """A registry of measurements for experimenter use."""
 
-  def __init__(self):
+  def __init__(self, max_items_per_channel: int | None = None):
     """Initializes the Measurements object."""
     self._channels: Dict[str, list[Any]] = {}
     self._channels_lock: threading.Lock = threading.Lock()
+    self._max_items_per_channel = (
+        max(1, int(max_items_per_channel))
+        if max_items_per_channel is not None
+        else None
+    )
 
   def _get_channel_or_create(self, channel: str) -> list[Any]:
     """Create a channel if one doesn't already exist.
@@ -61,7 +66,13 @@ class Measurements:
     """
     del capture_key
     with self._channels_lock:
-      self._get_channel_or_create(channel).append(datum)
+      items = self._get_channel_or_create(channel)
+      items.append(datum)
+      if (
+          self._max_items_per_channel is not None
+          and len(items) > self._max_items_per_channel
+      ):
+        del items[:-self._max_items_per_channel]
 
   def available_channels(self) -> Set[str]:
     """Returns the names of all available channels."""

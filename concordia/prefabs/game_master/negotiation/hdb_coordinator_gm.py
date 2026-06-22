@@ -103,10 +103,20 @@ class GameMaster(prefab_lib.Prefab):
         seller_profiles=listing_params.get('seller_profiles', {}),
         client=listing_params.get('client'),
         dense_embedding_model=listing_params.get('dense_embedding_model'),
+        sparse_embedding_model=listing_params.get('sparse_embedding_model'),
         collection_name=listing_params.get('collection_name'),
         db_path=listing_params.get('db_path'),
         random_seed=int(listing_params.get('random_seed', 0) or 0),
         max_rounds=int(listing_params.get('max_rounds', 0) or 0) or None,
+        seller_listing_max_workers=int(
+            listing_params.get('seller_listing_max_workers', 1) or 1
+        ),
+        buyer_search_max_workers=int(
+            listing_params.get('buyer_search_max_workers', 1) or 1
+        ),
+        seller_review_max_workers=int(
+            listing_params.get('seller_review_max_workers', 1) or 1
+        ),
         enabled=bool(listing_params.get('enabled', True)),
     )
     listing_module.set_canonical_entities(self.entities)
@@ -124,6 +134,15 @@ class GameMaster(prefab_lib.Prefab):
         # The main HDB workflow does not use a scheduler-level negotiation cap.
         # Pairs should exit through explicit outcomes, especially buyer WALK_AWAY.
         max_rounds=0,
+        max_weeks_open=int(
+            negotiation_params.get('max_weeks_open', 0) or 0
+        ),
+        pair_max_workers=int(
+            negotiation_params.get('pair_max_workers', 1) or 1
+        ),
+        closed_pair_archive_jsonl_path=negotiation_params.get(
+            'closed_pair_archive_jsonl_path'
+        ),
         enabled=bool(negotiation_params.get('enabled', True)),
         make_observation_component_key=make_observation_key,
     )

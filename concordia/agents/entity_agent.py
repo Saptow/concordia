@@ -14,7 +14,8 @@
 
 """A modular entity agent using the new component system."""
 
-from collections.abc import Mapping
+import dataclasses
+from collections.abc import Mapping, Sequence
 from concurrent import futures
 import functools
 import threading
@@ -30,6 +31,14 @@ from concordia.utils import concurrency
 
 # TODO: b/313715068 - remove disable once pytype bug is fixed.
 # pytype: disable=override-error
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedAct:
+  """Prepared act state held between PRE_ACT and POST_ACT."""
+
+  action_spec: entity.ActionSpec
+  contexts: entity_component.ComponentContextMapping
 
 
 class EntityAgent(entity_component.EntityWithComponents):
@@ -161,34 +170,126 @@ class EntityAgent(entity_component.EntityWithComponents):
 
     return types.MappingProxyType(final_results)
 
+  def _parallel_call_filtered_(
+      self,
+      method_name: str,
+      *args,
+      excluded_component_names: Sequence[str] = (),
+      executor: futures.ThreadPoolExecutor | None = None,
+  ) -> entity_component.ComponentContextMapping:
+    """Calls the named method on all non-excluded components in parallel."""
+    excluded_names = {str(name) for name in excluded_component_names if str(name)}
+    if not excluded_names:
+      return self._parallel_call_(method_name, *args, executor=executor)
+
+    filtered_components = {
+        name: component
+        for name, component in self._context_components.items()
+        if name not in excluded_names
+    }
+    unique_components = list(set(filtered_components.values()))
+    tasks_for_unique = {
+        str(id(component)): functools.partial(
+            getattr(component, method_name), *args
+        )
+        for component in unique_components
+    }
+    results_by_component_id = concurrency.run_tasks(
+        tasks_for_unique, executor=executor
+    )
+
+    final_results: dict[str, str] = {}
+    for name, component in filtered_components.items():
+      final_results[name] = results_by_component_id[str(id(component))]
+
+    return types.MappingProxyType(final_results)
+
   @override
   def act(
       self, action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC
   ) -> str:
-    with self._control_lock:
-      try:
-        self._set_phase(entity_component.Phase.PRE_ACT)
-        contexts = self._parallel_call_('pre_act', action_spec)
-        self._context_processor.pre_act(types.MappingProxyType(contexts))
+    prepared_act = self.prepare_act(action_spec)
+    return self.finalize_prepared_act(prepared_act)
+
+  def prepare_act(
+      self,
+      action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC,
+  ) -> PreparedAct:
+    """Prepare an action and hold the agent in PRE_ACT until finalized."""
+    self._control_lock.acquire()
+    try:
+      self._set_phase(entity_component.Phase.PRE_ACT)
+      contexts = self._parallel_call_('pre_act', action_spec)
+      contexts = types.MappingProxyType(contexts)
+      self._context_processor.pre_act(contexts)
+      return PreparedAct(action_spec=action_spec, contexts=contexts)
+    except Exception:
+      self.set_phase(entity_component.Phase.READY)
+      self._control_lock.release()
+      raise
+
+  def prepare_act_with_deferred_components(
+      self,
+      action_spec: entity.ActionSpec = entity.DEFAULT_ACTION_SPEC,
+      *,
+      deferred_component_names: Sequence[str] = (),
+  ) -> PreparedAct:
+    """Prepare an action while deferring selected context components."""
+    deferred_names = tuple(
+        str(name) for name in deferred_component_names if str(name)
+    )
+    if not deferred_names:
+      return self.prepare_act(action_spec)
+
+    self._control_lock.acquire()
+    try:
+      self._set_phase(entity_component.Phase.PRE_ACT)
+      contexts = self._parallel_call_filtered_(
+          'pre_act',
+          action_spec,
+          excluded_component_names=deferred_names,
+      )
+      contexts = types.MappingProxyType(contexts)
+      self._context_processor.pre_act(contexts)
+      return PreparedAct(action_spec=action_spec, contexts=contexts)
+    except Exception:
+      self.set_phase(entity_component.Phase.READY)
+      self._control_lock.release()
+      raise
+
+  def finalize_prepared_act(
+      self,
+      prepared_act: PreparedAct,
+      action_attempt: str | None = None,
+  ) -> str:
+    """Finalize a prepared action, running POST_ACT and UPDATE."""
+    try:
+      if action_attempt is None:
         action_attempt = self._act_component.get_action_attempt(
-            contexts, action_spec
+            prepared_act.contexts,
+            prepared_act.action_spec,
         )
 
-        self._set_phase(entity_component.Phase.POST_ACT)
-        contexts = self._parallel_call_('post_act', action_attempt)
-        self._context_processor.post_act(contexts)
+      self._set_phase(entity_component.Phase.POST_ACT)
+      contexts = self._parallel_call_('post_act', action_attempt)
+      self._context_processor.post_act(contexts)
 
-        self._set_phase(entity_component.Phase.UPDATE)
-        self._parallel_call_('update')
+      self._set_phase(entity_component.Phase.UPDATE)
+      self._parallel_call_('update')
 
-        self._set_phase(entity_component.Phase.READY)
+      self._set_phase(entity_component.Phase.READY)
+      return action_attempt
+    except Exception:
+      self.set_phase(entity_component.Phase.READY)
+      raise
+    finally:
+      self._control_lock.release()
 
-        return action_attempt
-      except Exception:
-        # Ensure correct error handling in the case of multiple threads
-        # using the same entity by setting the phase to ready before raising.
-        self.set_phase(entity_component.Phase.READY)
-        raise
+  def cancel_prepared_act(self, prepared_act: PreparedAct) -> None:
+    """Abort a prepared action and return the agent to READY."""
+    del prepared_act
+    self.set_phase(entity_component.Phase.READY)
+    self._control_lock.release()
 
   @override
   def observe(self, observation: str) -> None:

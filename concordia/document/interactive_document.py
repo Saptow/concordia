@@ -38,6 +38,7 @@ INTERACTIVE_TAGS = frozenset(
 
 
 _YESNO = ['No', 'Yes']
+_TRAILING_WHITESPACE_BEFORE_NEWLINE_RE = re.compile(r'[ \t]+(?=\n)')
 
 
 def _letters():
@@ -108,7 +109,7 @@ class InteractiveDocument(document.Document):
       tags: additional tags for appended text.
       end: appended to `text`.
     """
-    self.append(text + end, tags=[DEBUG_TAG, *tags])
+    self._append_prompt_fragment(text, tags=[DEBUG_TAG, *tags], end=end)
 
   def statement(
       self, text: str, *, tags: Collection[str] = (), end: str = '\n'
@@ -120,19 +121,32 @@ class InteractiveDocument(document.Document):
       tags: additional tags for appended text.
       end: appended to `text`.
     """
-    self.append(text + end, tags=[STATEMENT_TAG, *tags])
+    self._append_prompt_fragment(text, tags=[STATEMENT_TAG, *tags], end=end)
+
+  def _append_prompt_fragment(
+      self,
+      text: str,
+      *,
+      tags: Collection[str] = (),
+      end: str = '',
+  ) -> None:
+    """Appends prompt scaffolding while trimming redundant whitespace."""
+    text = _TRAILING_WHITESPACE_BEFORE_NEWLINE_RE.sub('', text)
+    if end and text.endswith(end):
+      end = ''
+    self.append(text + end, tags=tags)
 
   def _question(
       self, text: str, *, tags: Collection[str] = (), end: str = ''
   ) -> None:
     """Appends a question to the document."""
-    self.append(text + end, tags=[QUESTION_TAG, *tags])
+    self._append_prompt_fragment(text, tags=[QUESTION_TAG, *tags], end=end)
 
   def _response(
       self, text: str, *, tags: Collection[str] = (), end: str = ''
   ) -> None:
     """Appends a response to the document."""
-    self.append(text + end, tags=[RESPONSE_TAG, *tags])
+    self._append_prompt_fragment(text, tags=[RESPONSE_TAG, *tags], end=end)
 
   def _model_response(
       self, text: str, *, tags: Collection[str] = (), end: str = ''

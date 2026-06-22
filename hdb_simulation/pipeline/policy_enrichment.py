@@ -28,7 +28,6 @@ DEFAULT_INPUT_PATH = REPO_ROOT / "data" / "policies" / "hdb_resale_policy_2023.j
 DEFAULT_OUTPUT_PATH = DEFAULT_INPUT_PATH
 DEFAULT_AUDIT_PATH = REPO_ROOT / "data" / "policies" / "hdb_resale_policy_2023.audit.jsonl"
 DEFAULT_MODEL_PATH = REPO_ROOT / "models" / "sealion4"
-MAX_INPUT_CHARS = 20_000
 CLASSIFICATION_MAX_TOKENS = 900
 SUMMARY_MAX_TOKENS = 1_200
 PDF_EXTRACTION_MAX_TOKENS = 1_500
@@ -565,12 +564,6 @@ def load_policy_content(
     raise ValueError(f"Unsupported local file type for summarisation: {source_path.suffix}")
 
 
-def truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars].rstrip() + "\n\n[Truncated for prompt length.]"
-
-
 def build_classification_prompt(page: PolicyPage, article_text: str) -> str:
     allowed_tags = "\n".join(f"- {policy_type.value}" for policy_type in PolicyType)
     return f"""# Role
@@ -949,10 +942,7 @@ def enrich_page(
     overwrite_existing: bool,
 ) -> tuple[PolicyPage, ClassificationAuditRecord]:
     canonical_path = canonical_page_record_path(page.path)
-    article_text = truncate_text(
-        load_policy_content(page, model, pdf_max_pages=pdf_max_pages),
-        MAX_INPUT_CHARS,
-    )
+    article_text = load_policy_content(page, model, pdf_max_pages=pdf_max_pages)
 
     should_classify = overwrite_existing or not page.tags
     if should_classify:

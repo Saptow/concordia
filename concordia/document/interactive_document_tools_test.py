@@ -111,6 +111,21 @@ class InteractiveDocumentWithToolsTest(parameterized.TestCase):
 
     self.assertEqual(response, 'The answer is 42')
     self.assertEqual(tool.call_count, 0)
+    model.sample_text.assert_called_once_with(
+        prompt=(
+            'Available tools (use JSON format to call):\n'
+            '- calculator: Do math\n'
+            'To use a tool, respond with: {"tool": "<name>", "args": {...}}\n'
+            'After receiving tool results, provide your final answer.\n'
+            'Question: What is the meaning of life?\n'
+            'Answer: '
+        ),
+        max_tokens=interactive_document_tools.interactive_document.DEFAULT_MAX_TOKENS,
+        terminators=[],
+        temperature=language_model.DEFAULT_TEMPERATURE,
+        top_p=language_model.DEFAULT_TOP_P,
+        top_k=language_model.DEFAULT_TOP_K,
+    )
 
   def test_open_question_with_tool_call(self):
     """LLM uses a tool then provides answer."""

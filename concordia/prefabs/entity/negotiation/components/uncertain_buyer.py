@@ -8,10 +8,19 @@ from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components import uncertain_helper
 from concordia.typing import entity as entity_lib
 from concordia.typing import entity_component
 from pydantic import ValidationError
+
+BUYER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS = 700
+BUYER_PREFERENCES_PROMPT_MAX_CHARS = 900
+BUYER_NEGOTIATION_HISTORY_PROMPT_MAX_CHARS = 700
+BUYER_LISTING_CONTEXT_PROMPT_MAX_CHARS = 700
+BUYER_OBSERVATION_PROMPT_MAX_CHARS = 1_200
+BUYER_BELIEF_UPDATE_MAX_TOKENS = 192
+
 
 class UncertainBuyer(
     action_spec_ignored.ActionSpecIgnored, entity_component.ComponentWithLogging
@@ -59,6 +68,7 @@ class UncertainBuyer(
             0.0, min(1.0, float(counterpart_confidence))
         )
         self._last_observation_hash: int | None = None
+        self._pending_observations: List[str] = []
         self._debug_trace: List[str] = []
 
         # Belief state tracking
@@ -127,14 +137,11 @@ class UncertainBuyer(
         lines = [
             'Perspective=Buyer',
             f'OwnReservationMean={uncertain_helper.format_money(own_reservation.get_expected_mean)}',
-            f'OwnReservationCI95={uncertain_helper.format_interval(own_reservation.get_confidence_interval())}',
             f'OwnReservationConfidence={own_reservation.confidence:.2f}',
             f'CounterpartReservationMean={uncertain_helper.format_money(counterpart_reservation.get_expected_mean)}',
-            f'CounterpartReservationCI95={uncertain_helper.format_interval(counterpart_reservation.get_confidence_interval())}',
             f'CounterpartReservationConfidence={counterpart_reservation.confidence:.2f}',
             f'OpenIssueCount={len(uncertain_helper.get_open_issues(self._issue_bank))}',
             f'TopOpenIssue={uncertain_helper.summarize_top_issue(uncertain_helper.get_top_issue(self._issue_bank))}',
-            f'IssueBank={uncertain_helper.format_issue_bank(self._issue_bank)}',
             f'RiskTolerance={self._risk_tolerance:.2f}',
             f'ActionConfidence={action_confidence:.2f}',
             f'ScenarioOutlook={self._format_scenario_summary()}',
@@ -159,20 +166,37 @@ class UncertainBuyer(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> None:
+        requests = self.build_listing_handoff_requests(listing_payload)
+        responses = structured_setup_batching.execute_setup_requests(requests)
+        self.apply_listing_handoff_responses(
+            listing_payload,
+            {
+                request.response_key: response
+                for request, response in zip(requests, responses)
+            },
+        )
+
+    def apply_listing_handoff_responses(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+        responses_by_key: Dict[str, str],
+    ) -> None:
         buyer_state = listing_payload.buyer_state
         negotiation_count = max(0, len(buyer_state.negotiation_history))
         # Each new listing-to-negotiation handoff starts a fresh pair, so we
         # clear pair-local uncertainty artifacts instead of carrying them over.
         self._issue_bank = []
         self._last_observation_hash = None
+        self._pending_observations = []
         self._debug_trace = []
         self._flat_listing = listing_payload.listing_record.flat.model_dump(mode='json')
         # Re-estimate confidence at the start of every new negotiation rather
         # than inheriting the previous pair's confidence state.
-        own_confidence = self._estimate_own_confidence(listing_payload)
-        counterpart_confidence = self._estimate_counterpart_confidence(
-            listing_payload
+        priors = self._parse_initial_pairing_priors_response(
+            responses_by_key.get('initial_pairing_priors', '')
         )
+        own_confidence = float(priors.own_confidence)
+        counterpart_confidence = float(priors.counterpart_confidence)
         self._beliefs['own_reservation'] = self._build_flat_specific_own_reservation(
             listing_payload,
             own_confidence=own_confidence,
@@ -220,68 +244,118 @@ class UncertainBuyer(
             confidence=max(0.0, min(1.0, own_confidence)),
         )
 
-    def _estimate_own_confidence(
+    def _build_initial_pairing_priors_prompt(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> float:
+    ) -> str:
         buyer_state = listing_payload.buyer_state
+        listing_record = listing_payload.listing_record
         observation_count = len(buyer_state.latest_search_results)
         negotiation_count = len(buyer_state.negotiation_history)
         if self._has_substantive_market_feedback(
             buyer_state.latest_market_feedback
         ):
             observation_count += 1
+        agent_description = uncertain_helper.truncate_prompt_text(
+            self._agent_description,
+            max_chars=BUYER_AGENT_DESCRIPTION_PROMPT_MAX_CHARS,
+        )
+        failed_history_summary = self._format_failed_negotiation_history(
+            buyer_state
+        )
+        preferences_text = uncertain_helper.truncate_prompt_text(
+            self._preferences,
+            max_chars=BUYER_PREFERENCES_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        failed_history_summary = uncertain_helper.truncate_prompt_text(
+            failed_history_summary,
+            max_chars=BUYER_NEGOTIATION_HISTORY_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        listing_context = uncertain_helper.truncate_prompt_text(
+            uncertain_helper.build_compact_listing_context(listing_record),
+            max_chars=BUYER_LISTING_CONTEXT_PROMPT_MAX_CHARS,
+            middle=True,
+        )
 
-        prompt = (
+        return (
             "# Role\n"
-            "You are calibrating own_confidence for a buyer who has just started "
-            "a new HDB resale negotiation.\n\n"
+            "You are calibrating initial buyer-side priors for a new HDB resale negotiation.\n\n"
             "# Task\n"
-            "Estimate own_confidence between 0 and 1.\n\n"
+            "Estimate `own_confidence` and `counterpart_confidence` in `[0, 1]`.\n\n"
             "# Input\n"
             "## Buyer Description / Persona\n"
-            f"{self._agent_description}\n\n"
+            f"{agent_description}\n\n"
+            "## Buyer Preferences\n"
+            f"{preferences_text}\n\n"
+            "## Buyer Effective Reservation\n"
+            f"{buyer_state.effective_reservation}\n\n"
             "## Negotiation History\n"
             f"- failed_negotiation_count: {negotiation_count}\n"
-            f"- listing_stage_observation_count: {observation_count}\n\n"
+            f"- listing_stage_observation_count: {observation_count}\n"
+            f"{failed_history_summary}\n\n"
+            "## Listing Snapshot\n"
+            f"{listing_context}\n\n"
+            "# Private Reasoning Process\n"
+            "1. Reason briefly in private from the persona, preferences, listing, and history.\n"
+            "2. Infer `own_confidence` from how grounded the buyer seems.\n"
+            "3. Infer `counterpart_confidence` from how informative the listing and history are.\n"
+            "4. Return JSON only. Do not reveal your reasoning.\n\n"
             "# Rubric\n"
-            "- 0.20-0.40: unsure, highly flexible, or weakly anchored in own limits.\n"
-            "- 0.45-0.65: moderately grounded persona with some self-knowledge.\n"
-            "- 0.70-0.90: decisive, valuation-driven, or reinforced by more failed negotiations.\n\n"
+            "## `own_confidence`\n"
+            "- `0.0` to `0.25`: very uncertain or indecisive.\n"
+            "- `0.25` to `0.5`: below-average confidence.\n"
+            "- `0.5` to `0.75`: moderately grounded.\n"
+            "- `0.75` to `1.0`: highly grounded and decisive.\n\n"
+            "## `counterpart_confidence`\n"
+            "- `0.0` to `0.25`: very weak basis for inferring the seller.\n"
+            "- `0.25` to `0.5`: limited, ambiguous evidence.\n"
+            "- `0.5` to `0.75`: moderately informative evidence.\n"
+            "- `0.75` to `1.0`: strong, coherent evidence.\n\n"
             "# Few-Shot Examples\n"
             "Example 1:\n"
             "- Buyer persona: analytical, budget-disciplined, compares transactions carefully.\n"
             "- Failed negotiations: 4\n"
-            '- Output: {"own_confidence": 0.82}\n\n'
+            "- Listing strongly matches buyer preferences and is clear and specific.\n"
+            '- Output: {"own_confidence": 0.82, "counterpart_confidence": 0.77}\n\n'
             "Example 2:\n"
             "- Buyer persona: uncertain first-time buyer, still figuring out trade-offs.\n"
             "- Failed negotiations: 0\n"
-            '- Output: {"own_confidence": 0.38}\n\n'
-            "# Rules\n"
+            "- Listing is partial, ambiguous, and only weakly aligned with buyer preferences.\n"
+            '- Output: {"own_confidence": 0.38, "counterpart_confidence": 0.34}\n\n'
+            "# Output\n"
             "- Return JSON only.\n"
-            "- Keep the value within [0, 1].\n"
-            "- Base the estimate primarily on the persona and failed negotiation count.\n"
-            "- Use listing-stage observation count as a secondary grounding signal.\n"
-            "- Use the examples as anchors, not as fixed templates.\n"
+            "- Match the provided schema exactly.\n"
+            "- Keep both values within [0, 1].\n"
+            "- Use the rubric and examples together when calibrating both values.\n"
+            "- Use the examples as anchors, not templates.\n"
         )
 
+    def _parse_initial_pairing_priors_response(
+        self,
+        response: str,
+    ) -> negotiation_schemas.InitialBuyerPairingPriors:
         try:
-            response = self._model.sample_text(
-                prompt,
-                json_schema=(
-                    negotiation_schemas.BuyerOwnConfidenceEstimate
-                    .model_json_schema()
-                ),
-                max_tokens=120,
-            )
-            estimate = negotiation_schemas.BuyerOwnConfidenceEstimate.model_validate_json(
+            priors = negotiation_schemas.InitialBuyerPairingPriors.model_validate_json(
                 response
             )
         except ValidationError:
-            return self._base_own_confidence
+            return negotiation_schemas.InitialBuyerPairingPriors(
+                own_confidence=self._base_own_confidence,
+                counterpart_confidence=self._base_counterpart_confidence,
+            )
         except Exception:
-            return self._base_own_confidence
-        return max(0.0, min(1.0, float(estimate.own_confidence)))
+            return negotiation_schemas.InitialBuyerPairingPriors(
+                own_confidence=self._base_own_confidence,
+                counterpart_confidence=self._base_counterpart_confidence,
+            )
+        return negotiation_schemas.InitialBuyerPairingPriors(
+            own_confidence=max(0.0, min(1.0, float(priors.own_confidence))),
+            counterpart_confidence=max(
+                0.0, min(1.0, float(priors.counterpart_confidence))
+            ),
+        )
 
     @staticmethod
     def _has_substantive_market_feedback(feedback: str) -> bool:
@@ -324,73 +398,21 @@ class UncertainBuyer(
             )
         return '\n'.join(lines)
 
-    def _estimate_counterpart_confidence(
+    def build_listing_handoff_requests(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
-    ) -> float:
-        listing_record = listing_payload.listing_record
-        buyer_state = listing_payload.buyer_state
-        failed_history_summary = self._format_failed_negotiation_history(
-            buyer_state
-        )
-
-        prompt = (
-            "# Role\n"
-            "You are calibrating counterpart_confidence for a buyer who has just "
-            "started a new HDB resale negotiation.\n\n"
-            "# Task\n"
-            "Estimate counterpart_confidence between 0 and 1.\n\n"
-            "# Input\n"
-            "## Buyer Preferences\n"
-            f"{self._preferences}\n\n"
-            "## Buyer Effective Reservation\n"
-            f"{buyer_state.effective_reservation}\n\n"
-            "## Failed Negotiation Snapshot\n"
-            f"- failed_negotiation_count: {len(buyer_state.negotiation_history)}\n"
-            f"{failed_history_summary}\n\n"
-            "## Listing Snapshot\n"
-            f"{uncertain_helper.build_compact_listing_context(listing_record)}\n\n"
-            "# Rubric\n"
-            "- 0.20-0.40: the flat is weakly aligned with the buyer preferences, there is little useful failed-negotiation experience, or the listing remains ambiguous.\n"
-            "- 0.45-0.65: the flat is partially aligned or past failed negotiations give only mixed guidance.\n"
-            "- 0.70-0.90: the flat is strongly aligned with the buyer preferences, past failed negotiations provide useful comparison points, and the listing has low ambiguity.\n\n"
-            "# Few-Shot Examples\n"
-            "Example 1:\n"
-            "- Buyer preferences strongly favor this flat type and town.\n"
-            "- Failed negotiations provide useful comparable cases.\n"
-            "- Listing is clear and specific.\n"
-            '- Output: {"counterpart_confidence": 0.77}\n\n'
-            "Example 2:\n"
-            "- Buyer preferences are only partially aligned.\n"
-            "- Failed negotiations do not provide much useful guidance.\n"
-            "- Listing is partial and ambiguous.\n"
-            '- Output: {"counterpart_confidence": 0.34}\n\n'
-            "# Rules\n"
-            "- Return JSON only.\n"
-            "- Keep the value within [0, 1].\n"
-            "- Use the buyer preferences and failed-negotiation history as the main signal.\n"
-            "- If the paired flat is very similar to flats the buyer prefers and past failed negotiations provide useful comparison points, increase confidence.\n"
-            "- Use listing ambiguity as a secondary adjustment.\n"
-        )
-
-        try:
-            response = self._model.sample_text(
-                prompt,
-                json_schema=(
-                    negotiation_schemas.BuyerCounterpartConfidenceEstimate
-                    .model_json_schema()
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
+        return [
+            structured_setup_batching.StructuredSetupRequest(
+                component=self,
+                response_key='initial_pairing_priors',
+                prompt_text=self._build_initial_pairing_priors_prompt(
+                    listing_payload
                 ),
+                specific_schema=negotiation_schemas.InitialBuyerPairingPriors,
                 max_tokens=120,
-            )
-            estimate = (
-                negotiation_schemas.BuyerCounterpartConfidenceEstimate
-                .model_validate_json(response)
-            )
-        except ValidationError:
-            return self._base_counterpart_confidence
-        except Exception:
-            return self._base_counterpart_confidence
-        return max(0.0, min(1.0, float(estimate.counterpart_confidence)))
+            ),
+        ]
 
     def _build_flat_specific_own_reservation(
         self,
@@ -482,48 +504,52 @@ class UncertainBuyer(
     ) -> List[uncertain_helper.NegotiationIssue]:
         self._issue_bank = uncertain_helper.sanitize_issue_bank(issues)
         return list(self._issue_bank)
-    def _update_own_reservation_from_context(self, context: str) -> str:
-        # TODO: refine prompt to include more specific examples of the flat (what the LLM should look out for)
-        """Update own reservation belief based on new context information."""
-        prompt = (
+
+    def _build_own_reservation_update_prompt(self, context: str) -> str:
+        """Build the structured prompt for a buyer self-belief update."""
+        truncated_context = uncertain_helper.truncate_prompt_text(
+            context,
+            max_chars=BUYER_OBSERVATION_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        preferences_text = uncertain_helper.truncate_prompt_text(
+            self._preferences,
+            max_chars=BUYER_PREFERENCES_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        return (
             "# Role\n"
             "You are a buyer in an HDB resale negotiation with imperfect information.\n\n"
             "# Task\n"
-            "You observe a new situation (Observation). Given your preferences and current beliefs, decide whether this observation contains material information that should update **your own reservation value** for this flat.\n\n"
-            "# Inputs\n"
+            "Decide whether the observation materially changes your own reservation value for this flat.\n\n"
+            "# Input\n"
             "## Observation\n"
-            f"{context}\n\n"
+            f"{truncated_context}\n\n"
             "## Preferences\n"
-            f"{self._preferences}\n\n"
+            f"{preferences_text}\n\n"
             "## Current Belief\n"
             f"- Current reservation value: {self._beliefs['own_reservation'].get_expected_mean:.2f}\n"
             f"- Current confidence level: {self._beliefs['own_reservation'].confidence:.2f}\n\n"
-            "# Private Reasoning Process (MUST FOLLOW)\n"
-            "Think step by step **privately** before answering:\n\n"
-            "1. Identify any concrete new facts in the observation that affect your valuation of the flat.\n"
-            "2. Ignore facts that **DO NOT** materially change your willingness to pay.\n"
-            "3. Decide whether these new facts justify changing your reservation value at all.\n"
-            "4. If yes, estimate the updated reservation value and assign a confidence level`[0, 1]`.\n"
-            "5. If no, do **not** invent a value. Return an empty object instead.\n\n"
-            "# Rules\n"
-            "- Use only information grounded in the provided observation and preferences.\n"
-            "- Do not use `0` or `0.0` as a placeholder estimate.\n"
-            "- The updated reservation value must be a valid monetary amount (in Singapore Dollars).\n"
-            "- Do not simply return the current reservation value if there is no meaningful update. If there is no meaningful update, return an empty object `{}` instead to indicate that your reservation value remains unchanged.\n"
-            "- If there is no meaningful new signal, you are allowed to return an empty object. `{}` \n\n"
+            "# Private Reasoning Process\n"
+            "1. Identify concrete new facts that change your valuation.\n"
+            "2. Ignore facts that do not materially change willingness to pay.\n"
+            "3. If there is a real update, estimate the new value and confidence in `[0, 1]`.\n"
+            "4. Otherwise return `{}`. Do not reveal your reasoning.\n\n"
             "# Output\n"
             "- Return JSON only.\n"
             "- Match the provided schema exactly.\n"
+            "- Use only the observation and preferences.\n"
+            "- Never use `0` or `0.0` as a placeholder estimate.\n"
+            "- Any updated reservation value must be a valid SGD amount.\n"
+            "- If there is no meaningful new signal, return `{}` instead of repeating the current value.\n\n"
         )
 
-        response = self._model.sample_text(
-            prompt,
-            json_schema=negotiation_schemas.UpdateOwnBeliefInfo.model_json_schema(),
-        )
-
-        # Ignore malformed model output so one bad response does not crash the turn.
+    def _apply_own_reservation_update_response(self, response: str) -> str:
+        """Apply one buyer self-belief update response."""
         try:
-            info_update = negotiation_schemas.UpdateOwnBeliefInfo.model_validate_json(response)
+            info_update = negotiation_schemas.UpdateOwnBeliefInfo.model_validate_json(
+                response
+            )
         except ValidationError:
             return 'Own reservation unchanged: model output was invalid.'
         if info_update.reservation_info:
@@ -541,63 +567,56 @@ class UncertainBuyer(
             )
         return 'Own reservation unchanged: no reservation signal extracted.'
 
-        
-    def _update_counterpart_reservation_from_context(self, context: str) -> str:
-        """Update beliefs based on new context information."""
-        # TODO: we are going to use the LLM as a black box to extract relevant info and give confidence estimates on whether the given price is driven
-        # by market sentiments OR private valuations (e.g. urgency, relationship, etc). 
-        # We will update the respective beliefs separately based on the estimates given by the LLM output. 
-        prompt = (
+    def _build_counterpart_reservation_update_prompt(self, context: str) -> str:
+        """Build the structured prompt for a buyer counterpart-belief update."""
+        truncated_context = uncertain_helper.truncate_prompt_text(
+            context,
+            max_chars=BUYER_OBSERVATION_PROMPT_MAX_CHARS,
+            middle=True,
+        )
+        return (
             "# Role\n"
             "You are a buyer in an HDB resale negotiation with imperfect information.\n\n"
             "# Task\n"
-            "Given an observation, infer the following: \n"
-            "- **seller's likely reservation value**, with a confidence level.\n"
-            "- (ONLY if there is no usable signal on reservation value) **trust level signal** on the seller based on the new information [-1 to 1], where -1 indicates negative trust and 1 indicates positive trust.\n\n"
+            "From the observation, infer either:\n"
+            "- the seller's likely reservation value with confidence, or\n"
+            "- if no usable reservation signal exists, a trust signal in `[-1, 1]`.\n\n"
+            "# Input\n"
             "## Observation\n"
-            f"{context}\n\n"
+            f"{truncated_context}\n\n"
             "## Current Belief about Seller's Reservation Value\n"
             f"- Reservation Value Estimate: {self._beliefs['counterpart_reservation'].get_expected_mean:.2f}\n"
             f"- Confidence in Reservation Value: `{self._beliefs['counterpart_reservation'].confidence:.2f}\n\n"
-            "## Important Prior Guardrail\n"
-            "- Your current belief already includes the seller-side listing-price anchor as the prior.\n"
-            "- Therefore, a listing price, asking price, or repeated ask is NOT by itself a new reason to update `budget_info`.\n\n"
             "# Private Reasoning Process\n"
-            "Think step by step **privately** before answering:\n\n"
-            "1. Extract **ONLY** concrete evidence about the seller's minimum acceptable price.\n"
-            "2. Ignore any information that is not directly related to the seller's reservation value.\n"
-            "3. Treat listing prices, stated asks, offers, counters, urgency, and willingness to compromise as evidence, "
-            "but do not assume any single number is automatically the true reservation value.\n"
-            "4. If the observation only repeats the existing listing/asking price anchor without new evidence about flexibility, urgency, bottom line, constraints, or willingness to concede, do not update `budget_info`.\n"
-            "5. Decide whether there is enough usable evidence to estimate `budget_info`.\n"
-            "6. If yes, provide your best estimate of the seller's reservation value and a confidence level (0-1) for that estimate based on the strength of the evidence.\n"
-            "7. (IMPORTANT) If there is no available estimate on the seller's reservation value, extract **ANY INFORMATION** about the trustworthiness of the seller based on the given observation.\n"
-            "   - For example, if you observe that the seller is intentionally hiding information, being evasive, or providing inconsistent signals, that would be a negative trust signal.\n"
-            "   - For example, if you observe the seller being transparent, providing reasonable justifications for their price, or showing willingness to find a mutually beneficial deal, that would be a positive trust signal.\n"
-            "8. Decide whether there is enough usable evidence to estimate `trust_info`. If yes, provide a trust level signal between -1 and 1 through the provided schema.\n"
-            "9. Return only the final JSON object. Do not reveal your reasoning.\n\n"
-            "# Decision Rules\n"
-            "- Return `budget_info` only if the context contains a genuine budget, reservation, or flexibility signal.\n"
-            "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
-            "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
-            "- If the observation only echoes the listing price or current ask, return an empty object `{}` for `budget_info` because that anchor is already captured in the prior.\n"
-            "- Do not return the same reservation estimate repeatedly if the context does not provide new evidence. If there is no new evidence to update the reservation estimate, return an empty object `{}` for `budget_info` to indicate that the reservation belief remains unchanged.\n"
-            "- If there is no usable budget signal but the context suggests how trustworthy the seller is, return `trust_info`.\n"
-            "- If there is neither a usable budget signal nor a trust signal, you can return an empty JSON object `{}`. Do not be coerced into returning a value when there is no evidence.\n"
-            "- Do not fabricate private numbers.\n\n"
+            "1. Extract only evidence about the seller's minimum acceptable price.\n"
+            "2. Ignore unrelated details and do not treat a single ask as the true reservation value.\n"
+            "3. If the observation only repeats the prior listing/ask anchor, do not update `budget_info`.\n"
+            "4. If there is usable reservation evidence, output `budget_info` with estimate and confidence.\n"
+            "5. Otherwise, if the observation contains a trust signal, output `trust_info`.\n"
+            "6. Otherwise return `{}`. Do not reveal your reasoning.\n\n"
             "# Output\n"
             "- Return JSON only.\n"
             "- Match the provided schema exactly.\n"
+            "- Your current belief already includes the seller-side listing-price anchor as the prior.\n"
+            "- A listing price, asking price, or repeated ask alone is not enough to update `budget_info`.\n"
+            "- Return `budget_info` only for a genuine reservation or flexibility signal.\n"
+            "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
+            "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
+            "- If the observation only echoes the listing price or current ask, return an empty object `{}` for `budget_info` because that anchor is already captured in the prior.\n"
+            "- If there is no new reservation evidence, do not repeat the current estimate.\n"
+            "- If there is no usable budget signal but the context suggests how trustworthy the seller is, return `trust_info`.\n"
+            "- If there is neither a usable budget signal nor a trust signal, return `{}`.\n"
+            "- Do not fabricate private numbers.\n\n"
         )
 
-        response = self._model.sample_text(
-            prompt,
-            json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
-        )
-
-        # Ignore malformed model output so one bad response does not crash the turn.
+    def _apply_counterpart_reservation_update_response(self, response: str) -> str:
+        """Apply one buyer counterpart-belief update response."""
         try:
-            info_update = negotiation_schemas.UpdateOpposingBeliefInfo.model_validate_json(response)
+            info_update = (
+                negotiation_schemas.UpdateOpposingBeliefInfo.model_validate_json(
+                    response
+                )
+            )
         except ValidationError:
             return 'Counterpart reservation unchanged: model output was invalid.'
         if info_update.budget_info:
@@ -613,7 +632,7 @@ class UncertainBuyer(
                 f'using estimate={uncertain_helper.format_money(info_update.budget_info.estimate)} '
                 f'confidence={info_update.budget_info.confidence:.2f}.'
             )
-        elif info_update.trust_info: # if there is no explicit budget info, we update our beliefs based on the trust level of the counterpart instead.
+        if info_update.trust_info:
             self._beliefs['counterpart_reservation'].update_trust(
                 info_update.trust_info.trust_level
             )
@@ -622,6 +641,25 @@ class UncertainBuyer(
                 f'trust_level={info_update.trust_info.trust_level:.2f}.'
             )
         return 'Counterpart reservation unchanged: no budget or trust signal extracted.'
+    def _update_own_reservation_from_context(self, context: str) -> str:
+        # TODO: refine prompt to include more specific examples of the flat (what the LLM should look out for)
+        """Update own reservation belief based on new context information."""
+        response = self._model.sample_text(
+            self._build_own_reservation_update_prompt(context),
+            json_schema=negotiation_schemas.UpdateOwnBeliefInfo.model_json_schema(),
+            max_tokens=BUYER_BELIEF_UPDATE_MAX_TOKENS,
+        )
+        return self._apply_own_reservation_update_response(response)
+
+        
+    def _update_counterpart_reservation_from_context(self, context: str) -> str:
+        """Update beliefs based on new context information."""
+        response = self._model.sample_text(
+            self._build_counterpart_reservation_update_prompt(context),
+            json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
+            max_tokens=BUYER_BELIEF_UPDATE_MAX_TOKENS,
+        )
+        return self._apply_counterpart_reservation_update_response(response)
 
     def _generate_scenarios(self) -> List[uncertain_helper.ScenarioAnalysis]:
         """
@@ -693,7 +731,7 @@ class UncertainBuyer(
         mu_diff = mu_own - mu_cp
         sigma_diff = math.sqrt(var_own + var_cp)
 
-        # TODO: we assume independence for now (i.e. covariance = 0) but assumption is weak since we are talking about the same product. 
+        # We assume independence for now (i.e. covariance = 0) but assumption is weak since we are talking about the same product aka same flat. 
         # However, it is fine for now, since we assume maximum variance between the differences => more conservative estimates for ZOPA. 
         zopa_dist = NormalDist(mu_diff, sigma_diff)
         confidence_threshold = 1-self._risk_tolerance
@@ -792,7 +830,7 @@ class UncertainBuyer(
         return ""
 
     def pre_observe(self, observation: str) -> str:
-        """Process incoming observation text to update beliefs."""
+        """Record incoming observations and defer LLM belief updates."""
         observation_text = observation.strip()
         if not observation_text:
             uncertain_helper.append_debug_trace(self._debug_trace, 'Skipped empty observation.')
@@ -823,15 +861,58 @@ class UncertainBuyer(
                 'Listing handoff observation recorded without duplicate belief update.',
             )
             return ""
+        self._pending_observations.append(observation_text)
         uncertain_helper.append_debug_trace(
             self._debug_trace,
-            self._update_own_reservation_from_context(observation),
-        )
-        uncertain_helper.append_debug_trace(
-            self._debug_trace,
-            self._update_counterpart_reservation_from_context(observation),
+            'Queued observation for batched belief update.',
         )
         return ""
+
+    def build_observation_requests(
+        self,
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
+        requests: list[structured_setup_batching.StructuredSetupRequest] = []
+        for index, observation in enumerate(self._pending_observations):
+            requests.append(
+                structured_setup_batching.StructuredSetupRequest(
+                    component=self,
+                    response_key=f'own_reservation::{index}',
+                    prompt_text=self._build_own_reservation_update_prompt(observation),
+                    specific_schema=negotiation_schemas.UpdateOwnBeliefInfo,
+                    max_tokens=BUYER_BELIEF_UPDATE_MAX_TOKENS,
+                )
+            )
+            requests.append(
+                structured_setup_batching.StructuredSetupRequest(
+                    component=self,
+                    response_key=f'counterpart_reservation::{index}',
+                    prompt_text=self._build_counterpart_reservation_update_prompt(
+                        observation
+                    ),
+                    specific_schema=negotiation_schemas.UpdateOpposingBeliefInfo,
+                    max_tokens=BUYER_BELIEF_UPDATE_MAX_TOKENS,
+                )
+            )
+        return requests
+
+    def apply_observation_responses(
+        self,
+        responses_by_key: Dict[str, str],
+    ) -> None:
+        for index, _ in enumerate(self._pending_observations):
+            uncertain_helper.append_debug_trace(
+                self._debug_trace,
+                self._apply_own_reservation_update_response(
+                    responses_by_key.get(f'own_reservation::{index}', '')
+                ),
+            )
+            uncertain_helper.append_debug_trace(
+                self._debug_trace,
+                self._apply_counterpart_reservation_update_response(
+                    responses_by_key.get(f'counterpart_reservation::{index}', '')
+                ),
+            )
+        self._pending_observations = []
 
     def get_state(self) -> Dict[str, Any]:
         """Get component state."""
@@ -867,6 +948,7 @@ class UncertainBuyer(
                 issue.model_dump()
                 for issue in self._issue_bank
             ],
+            'pending_observations': list(self._pending_observations),
             'action_confidence': action_confidence,
             'avg_confidence': action_confidence,
             'uncertainty_level': 1.0 - action_confidence,
@@ -908,6 +990,9 @@ class UncertainBuyer(
         self._issue_bank = uncertain_helper.restore_issue_bank(
             state.get('issue_bank', []),
         )
+        self._pending_observations = [
+            str(item) for item in state.get('pending_observations', [])
+        ]
         
     def update(self) -> None:
         """Update uncertainty-aware component state."""

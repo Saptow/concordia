@@ -13,6 +13,7 @@ from concordia.components import agent as agent_components
 from concordia.components.agent import hdb_acting_component
 from concordia.hdb_simulation.models.schemas import common as common_schemas
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
+from concordia.prefabs.entity.negotiation import structured_setup_batching
 from concordia.prefabs.entity.negotiation.components import (
     uncertain_buyer,
     uncertain_seller,
@@ -21,20 +22,9 @@ from concordia.language_model import language_model
 from concordia.typing import prefab as prefab_lib
 
 # Import our negotiation components
-from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
-
-DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
-    f'HDB RESALE ETHICAL CONSTRAINTS: \n'
-    f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).\n'
-    f'- If you are unsure about a fact, say you are unsure instead of guessing or making up an answer.\n'
-    f'- You may withhold private limits (true budget/reservation/urgency), but if you answer a factual question, answer truthfully or say you are unsure.\n'
-    f'- Do not propose or encourage terms that contradict HDB’s prescribed OTP/deposit framework or any side payments; keep commitments realistic within HDB timelines.\n'
-    f'- Treat inferences as hypotheses; ask clarifying questions instead of asserting unverified claims.\n'
-    f'- No coercion/harassment or exploitation of vulnerability; keep a clear written record of offers and key terms.'
-)
 
 HDB_ACTION_CHOICE_GUARDRAILS = (
     "ACTION-CHOICE GUARDRAILS:\n"
@@ -50,9 +40,24 @@ HDB_CONTEXT_ANCHOR = (
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
 )
-ACTION_REASONING_MEMORY_WINDOW = 6
+
+# Engineering Constants
+ACTION_REASONING_MEMORY_WINDOW = 4
 MIN_ACTION_REASONING_MEMORY_WINDOW = 4
-MAX_ACTION_REASONING_MEMORY_WINDOW = 12
+MAX_ACTION_REASONING_MEMORY_WINDOW = 8
+
+
+def _resolve_memory_bank_limit(value: object) -> int | None:
+    """Resolve the retained-memory cap for HDB negotiators."""
+    if value is None:
+        return NegotiationComponentConfig.DEFAULT_MEMORY_BANK_LIMIT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return NegotiationComponentConfig.DEFAULT_MEMORY_BANK_LIMIT
+    if parsed <= 0:
+        return None
+    return parsed
 
 
 def _clamp_memory_window(value: object) -> int:
@@ -74,29 +79,52 @@ def _estimate_action_reasoning_memory_window(
     description: str,
 ) -> int:
     """Estimate a persona-specific memory window once at agent initialization."""
-    prompt = (
+    prompt = _build_action_reasoning_memory_window_prompt(
+        agent_name=agent_name,
+        description=description,
+    )
+    try:
+        response = model.sample_text(
+            prompt=prompt,
+            json_schema=negotiation_schemas.PersonaMemoryWindow.model_json_schema(),
+            max_tokens=120,
+        )
+        return _parse_action_reasoning_memory_window_response(response)
+    except Exception:
+        return ACTION_REASONING_MEMORY_WINDOW
+
+
+def _build_action_reasoning_memory_window_prompt(
+    *,
+    agent_name: str,
+    description: str,
+) -> str:
+    lower = MIN_ACTION_REASONING_MEMORY_WINDOW
+    upper = MAX_ACTION_REASONING_MEMORY_WINDOW
+    balanced = ACTION_REASONING_MEMORY_WINDOW
+    return (
         '# Role\n'
         'You decide how many recent memories a negotiator should review before acting.\n\n'
         '# Task\n'
-        'Return `num_memories_to_retrieve` as a single integer between 4 and 12.\n'
+        f'Return `num_memories_to_retrieve` as a single integer between {lower} and {upper}.\n'
         'The choice must be based only on the negotiator persona in the description.\n\n'
         '# Heuristic\n'
         '- Careful, reflective, analytical, detail-heavy, strategic, or cautious personas should get longer memory windows.\n'
         '- Spontaneous, impulsive, present-focused, low-deliberation, or decisive personas should get shorter memory windows.\n'
-        '- Balanced or ambiguous personas should stay near 6.\n\n'
+        f'- Balanced or ambiguous personas should stay near {balanced}.\n\n'
         '# Few-shot examples\n'
         'Example 1\n'
         'Description: A careful planner who double-checks details, thinks through trade-offs, remembers prior conversations, and dislikes making rushed decisions.\n'
-        'Output: {"num_memories_to_retrieve": 10}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {upper}}}\n\n'
         'Example 2\n'
         'Description: Lives in the moment, reacts quickly, dislikes overthinking, and prefers to decide based on the latest signal rather than long context.\n'
-        'Output: {"num_memories_to_retrieve": 4}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {lower}}}\n\n'
         'Example 3\n'
         'Description: Generally practical and balanced. Reviews some recent context before acting, but does not dwell too long on the past.\n'
-        'Output: {"num_memories_to_retrieve": 6}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {balanced}}}\n\n'
         'Example 4\n'
         'Description: Highly strategic and methodical, tracks patterns across prior exchanges, and adjusts carefully based on accumulated context.\n'
-        'Output: {"num_memories_to_retrieve": 11}\n\n'
+        f'Output: {{"num_memories_to_retrieve": {upper}}}\n\n'
         '# Rules\n'
         '- Use only the description below.\n'
         '- Return JSON only.\n'
@@ -107,12 +135,10 @@ def _estimate_action_reasoning_memory_window(
         '# Output\n'
         'Return a JSON object matching the schema exactly.\n'
     )
+
+
+def _parse_action_reasoning_memory_window_response(response: str) -> int:
     try:
-        response = model.sample_text(
-            prompt=prompt,
-            json_schema=negotiation_schemas.PersonaMemoryWindow.model_json_schema(),
-            max_tokens=120,
-        )
         parsed = negotiation_schemas.PersonaMemoryWindow.model_validate_json(
             response
         )
@@ -144,7 +170,6 @@ class Entity(prefab_lib.Prefab):
         'description': 'Reach a mutually beneficial agreement',
         'reservation_value': '0.0',
         'flat_listing': '',
-        'ethical_constraints': DEFAULT_ETHICS,
         'modules': '', # e.g. uncertainty_buyer, uncertainty_seller
         'modules_config': '', # e.g. config parameters for the modules in JSON format
         'negotiation_config': '', # e.g. config parameters for negotiation strategy and instructions in JSON format
@@ -172,16 +197,24 @@ class Entity(prefab_lib.Prefab):
 
         agent_name = self.params.get('name', 'Negotiator')
         description = self.params.get('description', '')
-        action_reasoning_memory_window = _clamp_memory_window(
-            negotiation_config.get(
-                'action_reasoning_memory_window',
+        raw_action_reasoning_memory_window = negotiation_config.get(
+            'action_reasoning_memory_window'
+        )
+        if raw_action_reasoning_memory_window is None:
+            raw_action_reasoning_memory_window = (
                 _estimate_action_reasoning_memory_window(
                     model=model,
                     agent_name=agent_name,
                     description=description,
-                ),
+                )
             )
+        action_reasoning_memory_window = _clamp_memory_window(
+            raw_action_reasoning_memory_window
         )
+        memory_bank_limit = _resolve_memory_bank_limit(
+            negotiation_config.get('memory_bank_limit')
+        )
+        memory_bank.set_max_entries(memory_bank_limit)
         reservation = float(
             negotiation_config.get(
                 'reservation_value',
@@ -189,8 +222,7 @@ class Entity(prefab_lib.Prefab):
             )
         )
         flat_listing_raw = negotiation_config.get('flat_listing', '')
-        ethics = self.params.get('ethical_constraints', DEFAULT_ETHICS)
-        # TODO: revise the ethical constraints based on HDB negotiation context
+        ethics = self.params.get('ethical_constraints') or None
         try:
             flat_listing = json.loads(flat_listing_raw) if flat_listing_raw else {}
             if not isinstance(flat_listing, dict):
@@ -240,11 +272,6 @@ class Entity(prefab_lib.Prefab):
         )
         policy_tool_prompt = hdb_policy_tool_prompt.HDBPolicyToolPrompt(
             model=model,
-            observation_component_key=(
-                NegotiationComponentConfig.OBSERVATION_COMPONENT_KEY
-            ),
-            memory_component_key=agent_components.memory.DEFAULT_MEMORY_COMPONENT_KEY,
-            num_memories_to_retrieve=action_reasoning_memory_window,
             policy_jsonl_filenames=tuple(
                 str(filename)
                 for filename in negotiation_config.get(
@@ -288,6 +315,9 @@ class Entity(prefab_lib.Prefab):
                 role=role,
                 uncertain_context=uncertain_context,
                 description=description,
+                buyer_walkaway_threshold=negotiation_config.get(
+                    'buyer_walkaway_threshold'
+                ),
                 verbose=True,
             )
 
@@ -321,6 +351,9 @@ class Entity(prefab_lib.Prefab):
                 role=role,
                 uncertain_context=uncertain_context,
                 description=description,
+                seller_exploration_threshold=negotiation_config.get(
+                    'seller_exploration_threshold'
+                ),
             )
         # Build a formatting-safe self-description prompt block.
         safe_description = _escape_format_braces(description)
@@ -333,7 +366,9 @@ class Entity(prefab_lib.Prefab):
             ),
             answer_prefix=f'{agent_name} is a {role} who',
             add_to_memory=False,
-            memory_tag='[self perception]'
+            memory_tag='[self perception]',
+            num_memories_to_retrieve=action_reasoning_memory_window,
+            persist_pre_act_value_across_updates=True,
         )
 
         # Create question components for context and reasoning
@@ -346,40 +381,34 @@ class Entity(prefab_lib.Prefab):
             answer_prefix=f'{agent_name} is currently',
             add_to_memory=False,
             memory_tag='[situation perception]',
-            components = [uncertain_key]
+            components = [uncertain_key],
+            num_memories_to_retrieve=action_reasoning_memory_window,
         )
 
-        has_active_offer = (
-            str(strategy.fields.get('hasActiveOffer', 'False')).lower()
-            == 'true'
-        )
         if role == common_schemas.RoleType.BUYER:
-            role_action_types = (
-                negotiation_schemas.BUYER_OFFER_ACTIONS
-                if has_active_offer
-                else negotiation_schemas.BUYER_NON_OFFER_ACTIONS
+            role_action_types = tuple(
+                dict.fromkeys(
+                    negotiation_schemas.BUYER_NON_OFFER_ACTIONS
+                    + negotiation_schemas.BUYER_OFFER_ACTIONS
+                )
             )
         else:
-            role_action_types = (
-                negotiation_schemas.SELLER_OFFER_ACTIONS
-                if has_active_offer
-                else negotiation_schemas.SELLER_NON_OFFER_ACTIONS
+            role_action_types = tuple(
+                dict.fromkeys(
+                    negotiation_schemas.SELLER_NON_OFFER_ACTIONS
+                    + negotiation_schemas.SELLER_OFFER_ACTIONS
+                )
             )
-        negotiation_action_type_descriptions = negotiation_schemas.format_action_type_descriptions(
-            role_action_types
-        )
 
         if role == common_schemas.RoleType.SELLER:
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
-                f'Action type descriptions:\n{negotiation_action_type_descriptions}\n'
                 f'{HDB_CONTEXT_ANCHOR}\n'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
             )
         else:
             question = (
                 f'Given the negotiation context, what would be the **MOST** appropriate next action for {agent_name}?\n'
-                f'Action type descriptions:\n{negotiation_action_type_descriptions}\n'
                 f'{HDB_CONTEXT_ANCHOR}'
                 f'{HDB_ACTION_CHOICE_GUARDRAILS}'
                 f'If strategy guidance indicates patience is exceeded and you want to terminate without agreement, ONLY use WALK_AWAY.\n'
@@ -402,7 +431,10 @@ class Entity(prefab_lib.Prefab):
             components=action_components,
             output_schema=common_schemas.ActionChoiceWithRationale,
             choice_responses=role_action_types,
-            num_memories_to_retrieve=action_reasoning_memory_window
+            choice_response_descriptions=(
+                negotiation_schemas.NEGOTIATION_ACTION_TYPE_DESCRIPTIONS
+            ),
+            num_memories_to_retrieve=0,
         )
         
         # TODO: look into more refined strategy integration on later stage
@@ -474,12 +506,137 @@ class Entity(prefab_lib.Prefab):
 
         return agent
 
+    def build_initialization_requests(
+        self,
+        *,
+        model: language_model.LanguageModel,
+    ) -> list[structured_setup_batching.StructuredSetupRequest]:
+        negotiation_config = self.params.get('negotiation_config', {})
+        if not isinstance(negotiation_config, Mapping):
+            negotiation_config = {}
 
-def update_agent_from_listing(
-    agent: entity_agent_with_logging.EntityAgentWithLogging,
-    listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+        request_component = SimpleNamespace(_model=model)
+        agent_name = str(self.params.get('name', 'Negotiator'))
+        description = str(self.params.get('description', ''))
+        role = str(self.params.get('role', '')).strip().lower()
+
+        requests: list[structured_setup_batching.StructuredSetupRequest] = []
+        if 'action_reasoning_memory_window' not in negotiation_config:
+            requests.append(
+                structured_setup_batching.StructuredSetupRequest(
+                    component=request_component,
+                    response_key='action_reasoning_memory_window',
+                    prompt_text=_build_action_reasoning_memory_window_prompt(
+                        agent_name=agent_name,
+                        description=description,
+                    ),
+                    specific_schema=negotiation_schemas.PersonaMemoryWindow,
+                    max_tokens=120,
+                )
+            )
+        if (
+            role == common_schemas.RoleType.BUYER.value
+            and 'buyer_walkaway_threshold' not in negotiation_config
+        ):
+            requests.append(
+                structured_setup_batching.StructuredSetupRequest(
+                    component=request_component,
+                    response_key='buyer_walkaway_threshold',
+                    prompt_text=(
+                        hdb_negotiation_strategy.HDBNegotiationStrategy
+                        ._build_walkaway_threshold_prompt(
+                            agent_name=agent_name,
+                            description=description,
+                        )
+                    ),
+                    specific_schema=hdb_negotiation_strategy.WalkAwayThreshold,
+                    max_tokens=120,
+                )
+            )
+        if (
+            role == common_schemas.RoleType.SELLER.value
+            and 'seller_exploration_threshold' not in negotiation_config
+        ):
+            requests.append(
+                structured_setup_batching.StructuredSetupRequest(
+                    component=request_component,
+                    response_key='seller_exploration_threshold',
+                    prompt_text=(
+                        hdb_negotiation_strategy.HDBNegotiationStrategy
+                        ._build_seller_exploration_threshold_prompt(
+                            agent_name=agent_name,
+                            description=description,
+                            weeks_since_listed=negotiation_config.get(
+                                'weeks_since_listed'
+                            ),
+                        )
+                    ),
+                    specific_schema=(
+                        hdb_negotiation_strategy.SellerExplorationThreshold
+                    ),
+                    max_tokens=120,
+                )
+            )
+        return requests
+
+    def apply_initialization_responses(
+        self,
+        responses_by_key: Mapping[str, str],
+    ) -> None:
+        negotiation_config = self.params.get('negotiation_config', {})
+        if isinstance(negotiation_config, Mapping):
+            updated_negotiation_config = dict(negotiation_config)
+        else:
+            updated_negotiation_config = {}
+
+        if 'action_reasoning_memory_window' in responses_by_key:
+            updated_negotiation_config['action_reasoning_memory_window'] = (
+                _parse_action_reasoning_memory_window_response(
+                    responses_by_key['action_reasoning_memory_window']
+                )
+            )
+        if 'buyer_walkaway_threshold' in responses_by_key:
+            updated_negotiation_config['buyer_walkaway_threshold'] = (
+                hdb_negotiation_strategy.HDBNegotiationStrategy
+                ._parse_walkaway_threshold_response(
+                    responses_by_key['buyer_walkaway_threshold'],
+                    agent_name=str(self.params.get('name', 'Negotiator')),
+                    verbose=False,
+                )
+            )
+        if 'seller_exploration_threshold' in responses_by_key:
+            updated_negotiation_config['seller_exploration_threshold'] = (
+                hdb_negotiation_strategy.HDBNegotiationStrategy
+                ._parse_seller_exploration_threshold_response(
+                    responses_by_key['seller_exploration_threshold'],
+                    agent_name=str(self.params.get('name', 'Negotiator')),
+                    verbose=False,
+                )
+            )
+
+        updated_params = dict(self.params)
+        updated_params['negotiation_config'] = updated_negotiation_config
+        self.params = updated_params
+
+
+def batch_update_agents_from_listings(
+    agent_payload_pairs: tuple[
+        tuple[
+            entity_agent_with_logging.EntityAgentWithLogging,
+            negotiation_schemas.ListingNegotiationTransferPayload,
+        ],
+        ...,
+    ]
+    | list[
+        tuple[
+            entity_agent_with_logging.EntityAgentWithLogging,
+            negotiation_schemas.ListingNegotiationTransferPayload,
+        ]
+    ],
 ) -> None:
-    def _buyer_safe_payload() -> SimpleNamespace:
+    def _buyer_safe_payload(
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             match_id=listing_payload.match_id,
             week_matched=listing_payload.week_matched,
@@ -496,7 +653,9 @@ def update_agent_from_listing(
             ),
         )
 
-    def _seller_safe_payload() -> SimpleNamespace:
+    def _seller_safe_payload(
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             match_id=listing_payload.match_id,
             week_matched=listing_payload.week_matched,
@@ -510,39 +669,86 @@ def update_agent_from_listing(
             ),
         )
 
-    buyer_safe_payload = _buyer_safe_payload()
-    seller_safe_payload = _seller_safe_payload()
-    instructions_payload = SimpleNamespace(listing_record=listing_payload.listing_record)
+    pending_structured_updates: list[
+        tuple[
+            object,
+            object,
+            list[structured_setup_batching.StructuredSetupRequest],
+        ]
+    ] = []
+    direct_updates: list[tuple[object, object]] = []
+    all_requests: list[structured_setup_batching.StructuredSetupRequest] = []
 
-    for component_name in (
-        'NegotiationInstructions',
-        'uncertain_buyer',
-        'uncertain_seller',
-        'NegotiationStrategy',
-    ):
-        try:
-            component = agent.get_component(component_name)
-        except Exception:
-            continue
-        apply_listing_handoff = getattr(component, 'apply_listing_handoff', None)
-        if not callable(apply_listing_handoff):
-            continue
-        if component_name == 'NegotiationInstructions':
-            apply_listing_handoff(instructions_payload)
-            continue
-        if component_name == 'uncertain_buyer':
-            apply_listing_handoff(buyer_safe_payload)
-            continue
-        if component_name == 'uncertain_seller':
-            apply_listing_handoff(seller_safe_payload)
-            continue
-        component_role = getattr(component, '_role', None)
-        if component_role == common_schemas.RoleType.BUYER:
-            apply_listing_handoff(buyer_safe_payload)
-        elif component_role == common_schemas.RoleType.SELLER:
-            apply_listing_handoff(seller_safe_payload)
-        else:
-            apply_listing_handoff(instructions_payload)
+    for agent, listing_payload in agent_payload_pairs:
+        buyer_safe_payload = _buyer_safe_payload(listing_payload)
+        seller_safe_payload = _seller_safe_payload(listing_payload)
+        instructions_payload = SimpleNamespace(
+            listing_record=listing_payload.listing_record
+        )
+
+        for component_name in (
+            'NegotiationInstructions',
+            'uncertain_buyer',
+            'uncertain_seller',
+            'NegotiationStrategy',
+        ):
+            try:
+                component = agent.get_component(component_name)
+            except Exception:
+                continue
+            apply_listing_handoff = getattr(component, 'apply_listing_handoff', None)
+            if not callable(apply_listing_handoff):
+                continue
+            if component_name == 'NegotiationInstructions':
+                apply_listing_handoff(instructions_payload)
+                continue
+            if component_name == 'uncertain_buyer':
+                target_payload = buyer_safe_payload
+            elif component_name == 'uncertain_seller':
+                target_payload = seller_safe_payload
+            else:
+                component_role = getattr(component, '_role', None)
+                if component_role == common_schemas.RoleType.BUYER:
+                    target_payload = buyer_safe_payload
+                elif component_role == common_schemas.RoleType.SELLER:
+                    target_payload = seller_safe_payload
+                else:
+                    target_payload = instructions_payload
+
+            build_requests = getattr(component, 'build_listing_handoff_requests', None)
+            apply_responses = getattr(
+                component, 'apply_listing_handoff_responses', None
+            )
+            if callable(build_requests) and callable(apply_responses):
+                component_requests = list(build_requests(target_payload) or ())
+                if component_requests:
+                    pending_structured_updates.append(
+                        (component, target_payload, component_requests)
+                    )
+                    all_requests.extend(component_requests)
+                    continue
+            direct_updates.append((component, target_payload))
+
+    raw_responses = structured_setup_batching.execute_setup_requests(all_requests)
+    response_index = 0
+    for component, target_payload, component_requests in pending_structured_updates:
+        response_count = len(component_requests)
+        component_responses = raw_responses[
+            response_index: response_index + response_count
+        ]
+        response_index += response_count
+        getattr(component, 'apply_listing_handoff_responses')(
+            target_payload,
+            {
+                request.response_key: response
+                for request, response in zip(
+                    component_requests, component_responses
+                )
+            },
+        )
+
+    for component, target_payload in direct_updates:
+        component.apply_listing_handoff(target_payload)
 
 def build_agent(
     model: language_model.LanguageModel,

@@ -27,6 +27,14 @@ class PortalSearchResult(ListingRecord):
     score: float = Field(ge=0.0)
 
 
+class CompactPortalSearchResult(BaseModel):
+    listing_id: str
+    seller_id: str
+    seller_name: str
+    listing_price: float = Field(ge=0.0)
+    score: float = Field(ge=0.0)
+
+
 class ListingSchedulerSnapshot(BaseModel):
     week_number: int = Field(ge=0)
     active_player_names: list[str] = Field(default_factory=list)

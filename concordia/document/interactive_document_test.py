@@ -35,6 +35,17 @@ MODEL_RESPONSE = functools.partial(
 
 class InteractiveDocumentTest(parameterized.TestCase):
 
+  def test_statement_does_not_duplicate_existing_newline(self):
+    model = mock.create_autospec(
+        language_model.LanguageModel, instance=True, spec_set=True
+    )
+
+    doc = interactive_document.InteractiveDocument(model)
+    doc.statement('Hello\n')
+
+    self.assertEqual(doc.text(), 'Hello\n')
+    self.assertEqual(doc.contents(), (STATEMENT('Hello\n'),))
+
   def test_open_question(self):
     model = mock.create_autospec(
         language_model.LanguageModel, instance=True, spec_set=True

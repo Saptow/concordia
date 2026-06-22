@@ -8,10 +8,43 @@ from enum import StrEnum
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
+from concordia.components import helpers as component_helpers
 from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas.common import NormalDistribution
 from pydantic import BaseModel, Field, ValidationError
 from scipy import stats
+
+ISSUE_BANK_PROMPT_MAX_CHARS = 1_000
+RECENT_MEMORIES_PROMPT_MAX_CHARS = 1_000
+FULL_CONTEXT_PROMPT_MAX_CHARS = 1_600
+DISCOVER_ISSUES_MAX_TOKENS = 512
+
+
+def truncate_prompt_text(
+    text: Any,
+    *,
+    max_chars: int,
+    middle: bool = False,
+) -> str:
+    normalized = str(text or '').strip()
+    if max_chars <= 0 or len(normalized) <= max_chars:
+        return normalized
+    if max_chars <= 10:
+        return normalized[:max_chars]
+    if not middle:
+        return component_helpers.truncate_text(normalized, max_chars=max_chars)
+
+    marker = '\n\n... [truncated] ...\n\n'
+    available = max_chars - len(marker)
+    if available <= 2:
+        return normalized[:max_chars]
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return (
+        normalized[:head_chars].rstrip()
+        + marker
+        + normalized[-tail_chars:].lstrip()
+    )
 
 
 def build_compact_listing_context(listing_record: Any) -> str:
@@ -269,9 +302,7 @@ def format_interval(interval: Tuple[float, float]) -> str:
 
 def format_observation_summary(observation: str, max_chars: int = 180) -> str:
     normalized = ' '.join(str(observation).split())
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[: max_chars - 3].rstrip() + '...'
+    return component_helpers.truncate_text(normalized, max_chars=max_chars)
 
 
 def append_debug_trace(debug_trace: List[str], message: str, limit: int = 12) -> None:
@@ -298,29 +329,10 @@ def normalize_text(value: str) -> str:
 
 
 def coerce_positive_float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
+    parsed = component_helpers.coerce_positive_float_or_none(value)
+    if parsed is None:
         return float(default)
-    return parsed if parsed > 0.0 else float(default)
-
-
-def extract_first_json_object(text: str) -> str | None:
-    candidate = str(text or '').strip()
-    start = candidate.find('{')
-    if start < 0:
-        return None
-    candidate = candidate[start:]
-    depth = 0
-    for idx, ch in enumerate(candidate):
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                return candidate[: idx + 1]
-    return None
-
+    return parsed
 
 def extract_listing_handoff_state(observation: str) -> Dict[str, Any] | None:
     marker = 'Listing handoff context for this negotiation:'
@@ -328,13 +340,16 @@ def extract_listing_handoff_state(observation: str) -> Dict[str, Any] | None:
     if marker not in text:
         return None
     _, _, payload = text.partition(marker)
-    payload_json = extract_first_json_object(payload)
+    payload_text = str(payload).strip()
+    if not payload_text:
+        return {}
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
-        return None
+        return {'listing_summary': payload_text}
     try:
         parsed = json.loads(payload_json)
     except json.JSONDecodeError:
-        return None
+        return {'listing_summary': payload_text}
     return parsed if isinstance(parsed, dict) else None
 
 
@@ -552,6 +567,21 @@ def discover_issues(
     issue_bank: List[NegotiationIssue],
     recent_memories: List[str],
 ) -> List[NegotiationIssue]:
+    issue_bank_json = truncate_prompt_text(
+        json.dumps([issue.model_dump() for issue in issue_bank], ensure_ascii=False),
+        max_chars=ISSUE_BANK_PROMPT_MAX_CHARS,
+        middle=True,
+    )
+    recent_memories_json = truncate_prompt_text(
+        json.dumps(recent_memories, ensure_ascii=False),
+        max_chars=RECENT_MEMORIES_PROMPT_MAX_CHARS,
+        middle=True,
+    )
+    truncated_context = truncate_prompt_text(
+        context,
+        max_chars=FULL_CONTEXT_PROMPT_MAX_CHARS,
+        middle=True,
+    )
     prompt = (
         "# Role\n"
         f"You are a {role_description}.\n\n"
@@ -559,11 +589,11 @@ def discover_issues(
         "Given the full context below, as well as the current issue bank and recent memories, identify up to 5 **open issues** that matter right now in this negotiation.\n\n"
         "# Inputs\n"
         "## Current Issue Bank\n"
-        f"{json.dumps([issue.model_dump() for issue in issue_bank], ensure_ascii=False)}\n\n"
+        f"{issue_bank_json}\n\n"
         "## Recent Memories\n"
-        f"{json.dumps(recent_memories, ensure_ascii=False)}\n\n"
+        f"{recent_memories_json}\n\n"
         "## Full Context\n"
-        f"{context}\n\n"
+        f"{truncated_context}\n\n"
         "# Private Reasoning Process\n"
         "Think step by step **privately** before answering:\n\n"
         "1. Review the current issue bank against the Full Context and Recent Memories and keep only issues that are still open and relevant now.\n"
@@ -593,6 +623,7 @@ def discover_issues(
     response = model.sample_text(
         prompt,
         json_schema=NegotiationIssueResponse.model_json_schema(),
+        max_tokens=DISCOVER_ISSUES_MAX_TOKENS,
     )
     try:
         issue_response = NegotiationIssueResponse.model_validate_json(response)
@@ -630,7 +661,6 @@ __all__ = [
     'coerce_positive_float',
     'compute_issue_score',
     'discover_issues',
-    'extract_first_json_object',
     'extract_listing_handoff_state',
     'extract_observation_actor',
     'format_interval',
@@ -648,4 +678,5 @@ __all__ = [
     'retrieve_recent_memories',
     'sanitize_issue_bank',
     'summarize_top_issue',
+    'truncate_prompt_text',
 ]

@@ -34,6 +34,36 @@ def _listing_price_for_seller(seller: listing_schemas.PortalSeller) -> float:
   return max(min_price, max_price)
 
 
+def _normalize_max_workers(value: object) -> int | None:
+  """Parse worker counts while allowing `None` to mean executor default."""
+  if value is None:
+    return None
+  try:
+    parsed = int(value)
+  except (TypeError, ValueError):
+    return 1
+  if parsed <= 0:
+    return None
+  return parsed
+
+
+def _chunk_pairs_evenly[T](
+    values: Sequence[T],
+    *,
+    max_chunks: int | None,
+) -> list[list[T]]:
+  """Split a sequence into up to `max_chunks` non-empty chunks."""
+  if not values:
+    return []
+  if max_chunks is None or max_chunks <= 0:
+    return [list(values)]
+  chunk_count = max(1, min(int(max_chunks), len(values)))
+  chunks: list[list[T]] = [[] for _ in range(chunk_count)]
+  for index, value in enumerate(values):
+    chunks[index % chunk_count].append(value)
+  return [chunk for chunk in chunks if chunk]
+
+
 def _derive_failed_negotiation_learning_signal(
     *,
     payload: negotiation_schemas.NegotiationToListingPayload,
@@ -58,13 +88,16 @@ def execute_listing_week(
     week_number: int,
     active_player_ids: Sequence[str],
     active_player_names: Sequence[str],
+    seller_listing_max_workers: int | None = 1,
+    buyer_search_max_workers: int | None = 1,
+    seller_review_max_workers: int | None = 1,
 ) -> listing_schemas.ListingWeeklyBatchOutcome:
   """Executes one scripted listing week for the provided active participants.
 
   Phase order is fixed across the week:
   1. Unlisted active sellers activate their listing.
   2. Active buyers search and submit requests.
-  3. Previously listed sellers review requests and create matches.
+  3. Active listed sellers review requests and create matches.
 
   Each phase runs participant-local work concurrently, then collates the
   results into a single weekly outcome.
@@ -109,7 +142,7 @@ def execute_listing_week(
   listed_results, listing_errors = (
       concurrency.run_tasks_in_background(
           seller_listing_tasks,
-          max_workers=1,
+          max_workers=seller_listing_max_workers,
       )
       if seller_listing_tasks
       else ({}, {})
@@ -127,34 +160,52 @@ def execute_listing_week(
       continue
     newly_listed_listing_ids.append(listing_id)
 
+  seller_listing_status_after_listing = {
+      seller_id: portal.is_seller_listed(seller_id)
+      for seller_id in sellers
+      if seller_id in assigned_ids and not portal.is_player_closed(seller_id)
+  }
+
   eligible_buyers = [
       (buyer_id, buyer)
       for buyer_id, buyer in buyers.items()
       if buyer_id in assigned_ids and not portal.is_player_closed(buyer_id)
   ]
+  buyer_chunks = _chunk_pairs_evenly(
+      eligible_buyers,
+      max_chunks=buyer_search_max_workers,
+  )
   buyer_tasks = {
-      buyer_id: functools.partial(
-          portal.search_and_request,
-          buyer,
+      f'buyer_batch_{index}': functools.partial(
+          portal.search_and_request_many,
+          [buyer for _, buyer in buyer_chunk],
           week=week_number,
       )
-      for buyer_id, buyer in eligible_buyers
+      for index, buyer_chunk in enumerate(buyer_chunks)
   }
-  buyer_results, buyer_errors = (
+  buyer_batch_results, buyer_errors = (
       concurrency.run_tasks_in_background(
           buyer_tasks,
-          max_workers=1,
+          max_workers=buyer_search_max_workers,
       )
       if buyer_tasks
       else ({}, {})
   )
-  for buyer_id, error in buyer_errors.items():
+  for batch_key, error in buyer_errors.items():
     logging.error(
-        'Listing week %s: failed buyer %s portal search/request: %s',
+        'Listing week %s: failed %s portal search/request batch: %s',
         week_number,
-        buyer_id,
+        batch_key,
         error,
     )
+  buyer_results: dict[str, listing_portal_lib.SearchAndRequestResult] = {}
+  for batch_result in buyer_batch_results.values():
+    if not isinstance(batch_result, dict):
+      continue
+    buyer_results.update({
+        str(buyer_id): result
+        for buyer_id, result in batch_result.items()
+    })
 
   for buyer_id, buyer in eligible_buyers:
     if buyer_results.get(buyer_id) is None:
@@ -167,7 +218,7 @@ def execute_listing_week(
       if (
           seller_id in assigned_ids
           and not portal.is_player_closed(seller_id)
-          and seller_listing_status_at_week_start.get(seller_id, False)
+          and seller_listing_status_after_listing.get(seller_id, False)
       )
   ]
   seller_review_tasks = {
@@ -181,7 +232,7 @@ def execute_listing_week(
   review_results, review_errors = (
       concurrency.run_tasks_in_background(
           seller_review_tasks,
-          max_workers=1,
+          max_workers=seller_review_max_workers,
       )
       if seller_review_tasks
       else ({}, {})
@@ -254,6 +305,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       db_path: str | None = None,
       random_seed: int = 0,
       max_rounds: int | None = None,
+      seller_listing_max_workers: int | None = 1,
+      buyer_search_max_workers: int | None = 1,
+      seller_review_max_workers: int | None = 1,
       enabled: bool = True,
       pre_act_label: str = 'Listing module',
   ):
@@ -273,6 +327,15 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
     self._id_to_name = dict(zip(self._player_ids, self._player_names))
     self._max_rounds = max_rounds if max_rounds and max_rounds > 0 else None
+    self._seller_listing_max_workers = _normalize_max_workers(
+        seller_listing_max_workers
+    )
+    self._buyer_search_max_workers = _normalize_max_workers(
+        buyer_search_max_workers
+    )
+    self._seller_review_max_workers = _normalize_max_workers(
+        seller_review_max_workers
+    )
     self._completed_weeks = 0
     self._last_run_week = 0
     self._stage_exhausted = False
@@ -599,8 +662,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     """Reopens failed negotiation pairs back into the listing workflow.
 
     Each reopened pair removes the buyer and seller from the portal's closed
-    participant sets. The seller's listing stays inactive until a later
-    listing week relists it through the normal `list_flat` flow.
+    participant sets and immediately reactivates the seller's listing in the
+    portal so the flat is available again without waiting for the next listing
+    week.
 
     Args:
       pair_records: Closed-pair summary records, typically from negotiation.
@@ -675,6 +739,11 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
       )
       portal.closed_buyers.discard(buyer_id)
       portal.closed_sellers.discard(seller_id)
+      portal.list_flat(
+          seller,
+          week=max(1, int(payload.negotiation_history.end_week or 1)),
+          listing_price=_listing_price_for_seller(seller),
+      )
       reopened_pairs.append(payload.model_dump(mode='json'))
     return reopened_pairs
 
@@ -733,6 +802,9 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         week_number=week_number,
         active_player_ids=active_player_ids,
         active_player_names=active_player_names,
+        seller_listing_max_workers=self._seller_listing_max_workers,
+        buyer_search_max_workers=self._buyer_search_max_workers,
+        seller_review_max_workers=self._seller_review_max_workers,
     )
     newly_listed_ids = set(outcome.newly_listed_listing_ids)
     reviewed_seller_names = set(outcome.sellers_reviewed)
@@ -787,9 +859,55 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
 
   def _buyer_state(self, player_id: str) -> negotiation_schemas.ListingBuyerState:
     """Builds a runtime listing snapshot for one buyer."""
+    return self._buyer_state_with_options(
+        player_id,
+        include_search_results=True,
+    )
+
+  def _search_results_summary(
+      self,
+      player_id: str,
+  ) -> str:
+    """Builds a compact search-results summary for logging snapshots."""
+    portal = self._ensure_portal()
+    results = list(portal.search_results_by_buyer.get(player_id, ()))
+    if not results:
+      return 'No recent search results.'
+
+    preview = []
+    for result in results[:3]:
+      seller_name = str(getattr(result, 'seller_name', '') or '').strip() or 'Unknown'
+      listing_price = getattr(result, 'listing_price', None)
+      if isinstance(listing_price, (int, float)):
+        preview.append(f'{seller_name} at SGD {float(listing_price):,.0f}')
+      else:
+        preview.append(seller_name)
+
+    remaining_count = max(0, len(results) - len(preview))
+    summary = (
+        f'{len(results)} result(s). Top matches: ' + '; '.join(preview)
+        if preview
+        else f'{len(results)} result(s).'
+    )
+    if remaining_count:
+      summary += f'; plus {remaining_count} more.'
+    return summary
+
+  def _buyer_state_with_options(
+      self,
+      player_id: str,
+      *,
+      include_search_results: bool,
+  ) -> negotiation_schemas.ListingBuyerState:
+    """Builds a buyer snapshot, optionally omitting heavy search results."""
     buyer = self._buyers[player_id]
     portal = self._ensure_portal()
     market_state = portal._buyer_market_state(buyer)
+    latest_search_results = (
+        list(portal.search_results_by_buyer.get(player_id, []))
+        if include_search_results
+        else []
+    )
     return negotiation_schemas.ListingBuyerState(
         id=player_id,
         name=buyer.name,
@@ -801,7 +919,8 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
             record.model_copy(deep=True) for record in buyer.negotiation_history
         ],
         effective_reservation=market_state.effective_reservation,
-        latest_search_results=list(portal.search_results_by_buyer.get(player_id, [])),
+        latest_search_results=latest_search_results,
+        latest_search_results_summary=self._search_results_summary(player_id),
         latest_market_feedback=portal.market_feedback_by_buyer.get(
             player_id,
             'No market feedback yet.',
@@ -843,7 +962,10 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
     snapshot = negotiation_schemas.ListingPortalSnapshot(
         week_number=max(1, self._last_run_week or 1),
         buyers=[
-            self._buyer_state(buyer_id)
+            self._buyer_state_with_options(
+                buyer_id,
+                include_search_results=False,
+            )
             for buyer_id in self._buyers
             if not self._portal.is_player_closed(buyer_id)
         ],
@@ -882,7 +1004,12 @@ class ListingModule(action_spec_ignored.ActionSpecIgnored):
         continue
       if portal.is_player_closed(buyer_id):
         continue
-      buyers.append(self._buyer_state(buyer_id).model_dump(mode='json'))
+      buyers.append(
+          self._buyer_state_with_options(
+              buyer_id,
+              include_search_results=False,
+          ).model_dump(mode='json')
+      )
 
     listed_sellers: list[dict[str, Any]] = []
     for seller_id in self._sellers:
