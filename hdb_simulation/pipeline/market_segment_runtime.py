@@ -10,7 +10,7 @@ from absl import logging
 from fastembed import SparseTextEmbedding
 from sentence_transformers import SentenceTransformer
 
-from configs import QdrantConfig, REPO_ROOT, SegmentConfig
+from configs import QdrantConfig, SegmentConfig
 from concordia.concordia.contrib.language_models.vllm.vllm_model import (
     VLLMLanguageModel,
 )
@@ -19,7 +19,21 @@ from concordia.hdb_simulation.pipeline import flat_embedding
 from concordia.hdb_simulation.pipeline import market_segment_processing
 
 
-def read_jsonl_records(path: str | Path) -> list[dict[str, object]]:
+MANIFEST_BUNDLE_PATH_KEYS = (
+    'flat_units_path',
+    'sellers_path',
+    'buyers_broad_path',
+    'buyers_retained_path',
+)
+MANIFEST_OPTIONAL_PATH_KEYS = ('qdrant_db_path',)
+MANIFEST_OPTIONAL_SCALAR_KEYS = (
+    'qdrant_collection_name',
+    'market_segment_name',
+    'town',
+)
+
+
+def _read_jsonl_records(path: str | Path) -> list[dict[str, object]]:
     file_path = Path(path)
     return [
         json.loads(line)
@@ -35,32 +49,19 @@ def _resolve_manifest_artifact_path(
     candidate = Path(str(raw_path))
     if candidate.is_absolute():
         return str(candidate.resolve())
-
-    manifest_relative = (manifest_file.parent / candidate).resolve()
-    if manifest_relative.exists():
-        return str(manifest_relative)
-
-    repo_relative = (REPO_ROOT / candidate).resolve()
-    if repo_relative.exists():
-        return str(repo_relative)
-
-    return str(manifest_relative)
+    return str((manifest_file.parent / candidate).resolve())
 
 
-def load_bundle_from_manifest(
+def _resolve_market_manifest(
     manifest_path: str | Path,
-) -> tuple[dict[str, object], dict[str, object]]:
-    manifest_file = Path(manifest_path)
+) -> dict[str, object]:
+    manifest_file = Path(manifest_path).resolve()
     manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
 
-    required_keys = (
-        'flat_units_path',
-        'sellers_path',
-        'buyers_broad_path',
-        'buyers_retained_path',
-    )
     missing_keys = [
-        key for key in required_keys if not str(manifest.get(key, '')).strip()
+        key
+        for key in MANIFEST_BUNDLE_PATH_KEYS
+        if not str(manifest.get(key, '')).strip()
     ]
     if missing_keys:
         raise ValueError(
@@ -68,27 +69,22 @@ def load_bundle_from_manifest(
             f'{missing_keys}'
         )
 
-    resolved_manifest = {
+    resolved_manifest: dict[str, object] = {
         key: _resolve_manifest_artifact_path(manifest_file, manifest[key])
-        for key in required_keys
+        for key in MANIFEST_BUNDLE_PATH_KEYS
     }
-    optional_path_keys = ('qdrant_db_path',)
-    for key in optional_path_keys:
-        raw_value = str(manifest.get(key, '')).strip()
-        if not raw_value:
-            continue
-        resolved_manifest[key] = _resolve_manifest_artifact_path(
-            manifest_file,
-            raw_value,
-        )
-    optional_scalar_keys = ('qdrant_collection_name', 'market_segment_name')
-    for key in optional_scalar_keys:
+    for key in MANIFEST_OPTIONAL_PATH_KEYS:
         raw_value = str(manifest.get(key, '')).strip()
         if raw_value:
-            resolved_manifest[key] = raw_value
-    town_value = str(manifest.get('town', '')).strip()
-    if town_value:
-        resolved_manifest['town'] = town_value
+            resolved_manifest[key] = _resolve_manifest_artifact_path(
+                manifest_file,
+                raw_value,
+            )
+    for key in MANIFEST_OPTIONAL_SCALAR_KEYS:
+        raw_value = manifest.get(key)
+        if str(raw_value or '').strip():
+            resolved_manifest[key] = str(raw_value).strip()
+
     planning_areas = manifest.get('planning_areas')
     if isinstance(planning_areas, list):
         resolved_manifest['planning_areas'] = [
@@ -97,11 +93,49 @@ def load_bundle_from_manifest(
             if str(value).strip()
         ]
 
+    return resolved_manifest
+
+
+def _resolve_listing_index_paths(
+    *,
+    segment_config: SegmentConfig,
+    manifest: dict[str, object],
+    listing_index_path: str | Path | None,
+) -> tuple[str, str, str]:
+    market_segment_name = (
+        str(manifest.get('market_segment_name', '')).strip()
+        or segment_config.market_segment_name
+    )
+    collection_name = (
+        str(manifest.get('qdrant_collection_name', '')).strip()
+        or QdrantConfig.market_collection_name(
+            market_segment_name=market_segment_name
+        )
+    )
+    requested_db_path = (
+        str(listing_index_path or '').strip()
+        or str(manifest.get('qdrant_db_path', '')).strip()
+    )
+    persisted_db_path = (
+        str(Path(requested_db_path).expanduser().resolve())
+        if requested_db_path
+        else QdrantConfig.market_db_path(
+            market_segment_name=market_segment_name,
+        )
+    )
+    return market_segment_name, collection_name, persisted_db_path
+
+
+def load_bundle_from_manifest(
+    manifest_path: str | Path,
+) -> tuple[dict[str, object], dict[str, object]]:
+    resolved_manifest = _resolve_market_manifest(manifest_path)
+
     bundle = {
-        'flats': read_jsonl_records(resolved_manifest['flat_units_path']),
-        'sellers': read_jsonl_records(resolved_manifest['sellers_path']),
-        'buyers_broad': read_jsonl_records(resolved_manifest['buyers_broad_path']),
-        'buyers_retained': read_jsonl_records(
+        'flats': _read_jsonl_records(resolved_manifest['flat_units_path']),
+        'sellers': _read_jsonl_records(resolved_manifest['sellers_path']),
+        'buyers_broad': _read_jsonl_records(resolved_manifest['buyers_broad_path']),
+        'buyers_retained': _read_jsonl_records(
             resolved_manifest['buyers_retained_path']
         ),
     }
@@ -113,6 +147,8 @@ def build_or_load_market_segment(
     segment_config: SegmentConfig,
     model: VLLMLanguageModel | None = None,
     market_manifest_path: str | Path | None = None,
+    model_source: str = 'local',
+    download_dir: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Build a market segment or reuse an existing manifest."""
     if market_manifest_path:
@@ -131,6 +167,8 @@ def build_or_load_market_segment(
     bundle = market_segment_processing.build_transaction_conditioned_segment(
         segment_config,
         model=model,
+        model_source=model_source,
+        download_dir=download_dir,
     )
     market_segment_processing.save_segment_outputs(
         bundle,
@@ -145,6 +183,7 @@ def ensure_market_segment_listing_index(
     *,
     segment_config: SegmentConfig,
     manifest: dict[str, object],
+    model: VLLMLanguageModel | None = None,
     dense_embedder: SentenceTransformer,
     sparse_embedder: SparseTextEmbedding | None = None,
     client: Any | None = None,
@@ -152,47 +191,40 @@ def ensure_market_segment_listing_index(
     listing_index_path: str | Path | None = None,
 ) -> tuple[dict[str, object], int]:
     """Ensure the market-segment listing index exists and return an enriched manifest."""
-    market_segment_name = (
-        str(manifest.get('market_segment_name', '')).strip()
-        or segment_config.market_segment_name
+    (
+        market_segment_name,
+        collection_name,
+        persisted_qdrant_db_path,
+    ) = _resolve_listing_index_paths(
+        segment_config=segment_config,
+        manifest=manifest,
+        listing_index_path=listing_index_path,
     )
-    collection_name = (
-        str(manifest.get('qdrant_collection_name', '')).strip()
-        or QdrantConfig.market_collection_name(
-            market_segment_name=market_segment_name
-        )
-    )
-    requested_qdrant_db_path = str(listing_index_path or '').strip() or str(
-        manifest.get('qdrant_db_path', '')
-    ).strip()
-    if requested_qdrant_db_path:
-        persisted_qdrant_db_path = str(
-            Path(requested_qdrant_db_path).expanduser().resolve()
-        )
-    else:
-        persisted_qdrant_db_path = QdrantConfig.market_db_path(
-            market_segment_name=market_segment_name,
-        )
 
     enriched_manifest = dict(manifest)
     enriched_manifest['market_segment_name'] = market_segment_name
     enriched_manifest['qdrant_db_path'] = persisted_qdrant_db_path
     enriched_manifest['qdrant_collection_name'] = collection_name
 
-    if not rebuild and requested_qdrant_db_path:
+    if not rebuild:
         existing_client = qdrant_schemas.make_qdrant_client(persisted_qdrant_db_path)
-        if existing_client.collection_exists(collection_name):
+        try:
+            if existing_client.collection_exists(collection_name):
+                logging.info(
+                    'Reusing existing market-segment Qdrant index %s from %s.',
+                    collection_name,
+                    persisted_qdrant_db_path,
+                )
+                return enriched_manifest, 0
             logging.info(
-                'Reusing existing market-segment Qdrant index %s from %s.',
+                'No existing market-segment Qdrant index %s found at %s; rebuilding.',
                 collection_name,
                 persisted_qdrant_db_path,
             )
-            return enriched_manifest, 0
-        logging.warning(
-            'Manifest pointed to %s, but collection %s was missing; rebuilding listing index.',
-            persisted_qdrant_db_path,
-            collection_name,
-        )
+        finally:
+            close_fn = getattr(existing_client, 'close', None)
+            if callable(close_fn):
+                close_fn()
 
     logging.info(
         'Indexing generated flats into Qdrant collection %s.',
@@ -206,6 +238,7 @@ def ensure_market_segment_listing_index(
     records = flat_embedding.index_market_segment_flats(
         flat_data_path=manifest['flat_units_path'],
         seller_data_path=manifest['sellers_path'],
+        model=model,
         dense_embedder=dense_embedder,
         sparse_embedder=sparse_embedder,
         client=runtime_client,

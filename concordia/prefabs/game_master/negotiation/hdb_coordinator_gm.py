@@ -140,6 +140,9 @@ class GameMaster(prefab_lib.Prefab):
         pair_max_workers=int(
             negotiation_params.get('pair_max_workers', 1) or 1
         ),
+        closed_pair_archive_jsonl_path=negotiation_params.get(
+            'closed_pair_archive_jsonl_path'
+        ),
         enabled=bool(negotiation_params.get('enabled', True)),
         make_observation_component_key=make_observation_key,
     )

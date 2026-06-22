@@ -281,10 +281,9 @@ class UncertainBuyer(
 
         return (
             "# Role\n"
-            "You are calibrating initial buyer-side priors for a buyer who has just "
-            "started a new HDB resale negotiation.\n\n"
+            "You are calibrating initial buyer-side priors for a new HDB resale negotiation.\n\n"
             "# Task\n"
-            "Estimate both `own_confidence` and `counterpart_confidence` between 0 and 1.\n\n"
+            "Estimate `own_confidence` and `counterpart_confidence` in `[0, 1]`.\n\n"
             "# Input\n"
             "## Buyer Description / Persona\n"
             f"{agent_description}\n\n"
@@ -298,9 +297,22 @@ class UncertainBuyer(
             f"{failed_history_summary}\n\n"
             "## Listing Snapshot\n"
             f"{listing_context}\n\n"
-            "# Calibration Heuristics\n"
-            "- `own_confidence` should mainly reflect how grounded, decisive, and valuation-disciplined the buyer is, adjusted upward by more failed negotiations and listing-stage observation count.\n"
-            "- `counterpart_confidence` should mainly reflect how informative the listing is and how much the buyer's preferences and failed-negotiation history help infer the seller's likely reservation value.\n\n"
+            "# Private Reasoning Process\n"
+            "1. Reason briefly in private from the persona, preferences, listing, and history.\n"
+            "2. Infer `own_confidence` from how grounded the buyer seems.\n"
+            "3. Infer `counterpart_confidence` from how informative the listing and history are.\n"
+            "4. Return JSON only. Do not reveal your reasoning.\n\n"
+            "# Rubric\n"
+            "## `own_confidence`\n"
+            "- `0.0` to `0.25`: very uncertain or indecisive.\n"
+            "- `0.25` to `0.5`: below-average confidence.\n"
+            "- `0.5` to `0.75`: moderately grounded.\n"
+            "- `0.75` to `1.0`: highly grounded and decisive.\n\n"
+            "## `counterpart_confidence`\n"
+            "- `0.0` to `0.25`: very weak basis for inferring the seller.\n"
+            "- `0.25` to `0.5`: limited, ambiguous evidence.\n"
+            "- `0.5` to `0.75`: moderately informative evidence.\n"
+            "- `0.75` to `1.0`: strong, coherent evidence.\n\n"
             "# Few-Shot Examples\n"
             "Example 1:\n"
             "- Buyer persona: analytical, budget-disciplined, compares transactions carefully.\n"
@@ -312,12 +324,12 @@ class UncertainBuyer(
             "- Failed negotiations: 0\n"
             "- Listing is partial, ambiguous, and only weakly aligned with buyer preferences.\n"
             '- Output: {"own_confidence": 0.38, "counterpart_confidence": 0.34}\n\n'
-            "# Rules\n"
+            "# Output\n"
             "- Return JSON only.\n"
+            "- Match the provided schema exactly.\n"
             "- Keep both values within [0, 1].\n"
-            "- Use the persona and negotiation history as the main signal for `own_confidence`.\n"
-            "- Use buyer preferences, listing clarity, and failed-negotiation history as the main signal for `counterpart_confidence`.\n"
-            "- Use the examples as anchors, not as fixed templates.\n"
+            "- Use the rubric and examples together when calibrating both values.\n"
+            "- Use the examples as anchors, not templates.\n"
         )
 
     def _parse_initial_pairing_priors_response(
@@ -509,8 +521,8 @@ class UncertainBuyer(
             "# Role\n"
             "You are a buyer in an HDB resale negotiation with imperfect information.\n\n"
             "# Task\n"
-            "You observe a new situation (Observation). Given your preferences and current beliefs, decide whether this observation contains material information that should update **your own reservation value** for this flat.\n\n"
-            "# Inputs\n"
+            "Decide whether the observation materially changes your own reservation value for this flat.\n\n"
+            "# Input\n"
             "## Observation\n"
             f"{truncated_context}\n\n"
             "## Preferences\n"
@@ -518,22 +530,18 @@ class UncertainBuyer(
             "## Current Belief\n"
             f"- Current reservation value: {self._beliefs['own_reservation'].get_expected_mean:.2f}\n"
             f"- Current confidence level: {self._beliefs['own_reservation'].confidence:.2f}\n\n"
-            "# Private Reasoning Process (MUST FOLLOW)\n"
-            "Think step by step **privately** before answering:\n\n"
-            "1. Identify any concrete new facts in the observation that affect your valuation of the flat.\n"
-            "2. Ignore facts that **DO NOT** materially change your willingness to pay.\n"
-            "3. Decide whether these new facts justify changing your reservation value at all.\n"
-            "4. If yes, estimate the updated reservation value and assign a confidence level`[0, 1]`.\n"
-            "5. If no, do **not** invent a value. Return an empty object instead.\n\n"
-            "# Rules\n"
-            "- Use only information grounded in the provided observation and preferences.\n"
-            "- Do not use `0` or `0.0` as a placeholder estimate.\n"
-            "- The updated reservation value must be a valid monetary amount (in Singapore Dollars).\n"
-            "- Do not simply return the current reservation value if there is no meaningful update. If there is no meaningful update, return an empty object `{}` instead to indicate that your reservation value remains unchanged.\n"
-            "- If there is no meaningful new signal, you are allowed to return an empty object. `{}` \n\n"
+            "# Private Reasoning Process\n"
+            "1. Identify concrete new facts that change your valuation.\n"
+            "2. Ignore facts that do not materially change willingness to pay.\n"
+            "3. If there is a real update, estimate the new value and confidence in `[0, 1]`.\n"
+            "4. Otherwise return `{}`. Do not reveal your reasoning.\n\n"
             "# Output\n"
             "- Return JSON only.\n"
             "- Match the provided schema exactly.\n"
+            "- Use only the observation and preferences.\n"
+            "- Never use `0` or `0.0` as a placeholder estimate.\n"
+            "- Any updated reservation value must be a valid SGD amount.\n"
+            "- If there is no meaningful new signal, return `{}` instead of repeating the current value.\n\n"
         )
 
     def _apply_own_reservation_update_response(self, response: str) -> str:
@@ -570,43 +578,35 @@ class UncertainBuyer(
             "# Role\n"
             "You are a buyer in an HDB resale negotiation with imperfect information.\n\n"
             "# Task\n"
-            "Given an observation, infer the following: \n"
-            "- **seller's likely reservation value**, with a confidence level.\n"
-            "- (ONLY if there is no usable signal on reservation value) **trust level signal** on the seller based on the new information [-1 to 1], where -1 indicates negative trust and 1 indicates positive trust.\n\n"
+            "From the observation, infer either:\n"
+            "- the seller's likely reservation value with confidence, or\n"
+            "- if no usable reservation signal exists, a trust signal in `[-1, 1]`.\n\n"
+            "# Input\n"
             "## Observation\n"
             f"{truncated_context}\n\n"
             "## Current Belief about Seller's Reservation Value\n"
             f"- Reservation Value Estimate: {self._beliefs['counterpart_reservation'].get_expected_mean:.2f}\n"
             f"- Confidence in Reservation Value: `{self._beliefs['counterpart_reservation'].confidence:.2f}\n\n"
-            "## Important Prior Guardrail\n"
-            "- Your current belief already includes the seller-side listing-price anchor as the prior.\n"
-            "- Therefore, a listing price, asking price, or repeated ask is NOT by itself a new reason to update `budget_info`.\n\n"
             "# Private Reasoning Process\n"
-            "Think step by step **privately** before answering:\n\n"
-            "1. Extract **ONLY** concrete evidence about the seller's minimum acceptable price.\n"
-            "2. Ignore any information that is not directly related to the seller's reservation value.\n"
-            "3. Treat listing prices, stated asks, offers, counters, urgency, and willingness to compromise as evidence, "
-            "but do not assume any single number is automatically the true reservation value.\n"
-            "4. If the observation only repeats the existing listing/asking price anchor without new evidence about flexibility, urgency, bottom line, constraints, or willingness to concede, do not update `budget_info`.\n"
-            "5. Decide whether there is enough usable evidence to estimate `budget_info`.\n"
-            "6. If yes, provide your best estimate of the seller's reservation value and a confidence level (0-1) for that estimate based on the strength of the evidence.\n"
-            "7. (IMPORTANT) If there is no available estimate on the seller's reservation value, extract **ANY INFORMATION** about the trustworthiness of the seller based on the given observation.\n"
-            "   - For example, if you observe that the seller is intentionally hiding information, being evasive, or providing inconsistent signals, that would be a negative trust signal.\n"
-            "   - For example, if you observe the seller being transparent, providing reasonable justifications for their price, or showing willingness to find a mutually beneficial deal, that would be a positive trust signal.\n"
-            "8. Decide whether there is enough usable evidence to estimate `trust_info`. If yes, provide a trust level signal between -1 and 1 through the provided schema.\n"
-            "9. Return only the final JSON object. Do not reveal your reasoning.\n\n"
-            "# Decision Rules\n"
-            "- Return `budget_info` only if the context contains a genuine budget, reservation, or flexibility signal.\n"
-            "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
-            "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
-            "- If the observation only echoes the listing price or current ask, return an empty object `{}` for `budget_info` because that anchor is already captured in the prior.\n"
-            "- Do not return the same reservation estimate repeatedly if the context does not provide new evidence. If there is no new evidence to update the reservation estimate, return an empty object `{}` for `budget_info` to indicate that the reservation belief remains unchanged.\n"
-            "- If there is no usable budget signal but the context suggests how trustworthy the seller is, return `trust_info`.\n"
-            "- If there is neither a usable budget signal nor a trust signal, you can return an empty JSON object `{}`. Do not be coerced into returning a value when there is no evidence.\n"
-            "- Do not fabricate private numbers.\n\n"
+            "1. Extract only evidence about the seller's minimum acceptable price.\n"
+            "2. Ignore unrelated details and do not treat a single ask as the true reservation value.\n"
+            "3. If the observation only repeats the prior listing/ask anchor, do not update `budget_info`.\n"
+            "4. If there is usable reservation evidence, output `budget_info` with estimate and confidence.\n"
+            "5. Otherwise, if the observation contains a trust signal, output `trust_info`.\n"
+            "6. Otherwise return `{}`. Do not reveal your reasoning.\n\n"
             "# Output\n"
             "- Return JSON only.\n"
             "- Match the provided schema exactly.\n"
+            "- Your current belief already includes the seller-side listing-price anchor as the prior.\n"
+            "- A listing price, asking price, or repeated ask alone is not enough to update `budget_info`.\n"
+            "- Return `budget_info` only for a genuine reservation or flexibility signal.\n"
+            "- If `budget_info` is returned, `estimate` must be a plausible positive SGD value and `confidence` must be greater than `0`.\n"
+            "- Never use `budget_info` with `estimate=0`, `confidence=0`, or any zero placeholder to mean \"no signal\".\n"
+            "- If the observation only echoes the listing price or current ask, return an empty object `{}` for `budget_info` because that anchor is already captured in the prior.\n"
+            "- If there is no new reservation evidence, do not repeat the current estimate.\n"
+            "- If there is no usable budget signal but the context suggests how trustworthy the seller is, return `trust_info`.\n"
+            "- If there is neither a usable budget signal nor a trust signal, return `{}`.\n"
+            "- Do not fabricate private numbers.\n\n"
         )
 
     def _apply_counterpart_reservation_update_response(self, response: str) -> str:
@@ -654,9 +654,6 @@ class UncertainBuyer(
         
     def _update_counterpart_reservation_from_context(self, context: str) -> str:
         """Update beliefs based on new context information."""
-        # TODO: we are going to use the LLM as a black box to extract relevant info and give confidence estimates on whether the given price is driven
-        # by market sentiments OR private valuations (e.g. urgency, relationship, etc). 
-        # We will update the respective beliefs separately based on the estimates given by the LLM output. 
         response = self._model.sample_text(
             self._build_counterpart_reservation_update_prompt(context),
             json_schema=negotiation_schemas.UpdateOpposingBeliefInfo.model_json_schema(),
@@ -734,7 +731,7 @@ class UncertainBuyer(
         mu_diff = mu_own - mu_cp
         sigma_diff = math.sqrt(var_own + var_cp)
 
-        # TODO: we assume independence for now (i.e. covariance = 0) but assumption is weak since we are talking about the same product. 
+        # We assume independence for now (i.e. covariance = 0) but assumption is weak since we are talking about the same product aka same flat. 
         # However, it is fine for now, since we assume maximum variance between the differences => more conservative estimates for ZOPA. 
         zopa_dist = NormalDist(mu_diff, sigma_diff)
         confidence_threshold = 1-self._risk_tolerance

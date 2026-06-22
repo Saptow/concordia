@@ -29,6 +29,7 @@ def _unique_market_display_name(
     requested_name: str,
     record: Mapping[str, Any],
     role_label: str,
+    model: language_model.LanguageModel | None,
     seen_names: set[str],
 ) -> str:
   """Returns a display name that is unique across the whole market."""
@@ -40,11 +41,12 @@ def _unique_market_display_name(
   disambiguated_name = disambiguate_profile_name(
       requested_name=candidate,
       record=record,
+      model=model,
       role_label=role_label,
   )
   if disambiguated_name and disambiguated_name not in seen_names:
     logging.warning(
-        'Duplicate participant display name %r detected; using persona-based surname disambiguation %r instead.',
+        'Duplicate participant display name %r detected; using persona-based expansion %r instead.',
         candidate,
         disambiguated_name,
     )
@@ -97,6 +99,7 @@ def build_market_profiles(
         requested_name=buyer_name,
         record=buyer,
         role_label='Buyer',
+        model=model,
         seen_names=seen_names,
     )
     description = str(buyer.get('general_persona', '')).strip()
@@ -127,6 +130,7 @@ def build_market_profiles(
         requested_name=seller_name,
         record=seller,
         role_label='Seller',
+        model=model,
         seen_names=seen_names,
     )
     flat = seller['flat']
@@ -185,10 +189,12 @@ def _buyer_negotiation_reservation_price(payload: Mapping[str, Any]) -> float:
 def build_entity_params(
     buyer_profiles: Mapping[str, Mapping[str, Any]],
     seller_profiles: Mapping[str, Mapping[str, Any]],
+    week_number: int = 1,
 ) -> tuple[list[prefab_lib.InstanceConfig], dict[str, dict[str, object]]]:
   """Build participant specs and entity configs for negotiation agents."""
   instance_configs: list[prefab_lib.InstanceConfig] = []
   participant_specs: dict[str, dict[str, object]] = {}
+  current_week_number = max(1, int(week_number))
 
   for buyer_id, payload in buyer_profiles.items():
     buyer_reservation_price = _buyer_negotiation_reservation_price(payload)
@@ -224,6 +230,7 @@ def build_entity_params(
     )
 
   for seller_id, payload in seller_profiles.items():
+    listing_release_week = int(payload.get('listing_release_week', 1) or 1)
     seller_params = {
         'id': seller_id,
         'role': 'seller',
@@ -242,11 +249,9 @@ def build_entity_params(
             'b': 100,
             'reservation_value': str(payload['expectations']['min_price']),
             'flat_listing': json.dumps(payload['flat'], ensure_ascii=False),
-            'initial_window_position': int(
-                payload.get('initial_window_position', 0) or 0
-            ),
-            'initial_window_size': int(
-                payload.get('initial_window_size', 0) or 0
+            'weeks_since_listed': max(
+                0,
+                current_week_number - listing_release_week,
             ),
         },
     }

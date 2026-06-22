@@ -12,6 +12,7 @@ import json
 import math
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +44,18 @@ from concordia.hdb_simulation.pipeline.resident_population_processing import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Engineering Constants/Thresholds 
 DEFAULT_LLM_RETRIES = 3
-MAX_REACHABLE_MARKET_SAMPLE_FLATS = 30
 MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS = 5
 MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR = 20
-MARKET_QUANTILE_DOMINANCE_GRID = (0.2, 0.4, 0.6, 0.8)
 MIN_FEASIBLE_RETAINED_BUYERS_PER_SELLER = 5
 MIN_BUYER_INCOME_BAND_LOWER = 3000.0
+MIN_HEDONIC_FIT_ROWS = 30
+DEFAULT_NEMOTRON_DATASET_ID = "nvidia/Nemotron-Personas-Singapore"
 DEFAULT_SURVEY_ARCHETYPES_DIR = (
     Path(__file__).resolve().parents[3] / "data" / "processed" / "survey"
 )
@@ -57,6 +63,8 @@ DEFAULT_BUYER_ARCHETYPES_PATH = DEFAULT_SURVEY_ARCHETYPES_DIR / "buyer_archetype
 DEFAULT_SELLER_ARCHETYPES_PATH = (
     DEFAULT_SURVEY_ARCHETYPES_DIR / "seller_archetypes.json"
 )
+
+# These labels are based on the data used.
 BUYER_AGE_PRIOR_GROUPS = (
     "20 - 24",
     "25 - 29",
@@ -82,6 +90,7 @@ FLAT_TYPE_LABELS = {
     "EXECUTIVE": "Executive",
 }
 
+# Name extraction strategy for buyer personas, in order of precedence:
 FLAT_TYPE_DWELLING_LABELS = {
     "1-Room": ["1- and 2-Room Flats", "HDB Dwellings"],
     "2-Room": ["1- and 2-Room Flats", "HDB Dwellings"],
@@ -95,6 +104,37 @@ FLAT_TYPE_DWELLING_LABELS = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# Local Schemas
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class HedonicCalibration:
+    design_columns: tuple[str, ...]
+    beta: np.ndarray | None
+    anchor_log: float
+    sigma_log: float
+    training_rows: int
+    uses_town_feature: bool = False
+
+
+@dataclass(frozen=True)
+class HedonicCalibrationStore:
+    by_flat_type: dict[str, HedonicCalibration]
+    by_town: dict[str, dict[str, HedonicCalibration]]
+
+
+class SellerMotivationProfile(BaseModel):
+    seller_archetype_type: str = ""
+    motivation_summary: str = ""
+    reasons: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Shared Helpers
+# ---------------------------------------------------------------------------
+
+# Shared text, parsing, normalization, and IO helpers.
 def _clean_amenity_name(value: Any) -> str:
     """Normalize amenity names and drop placeholder/null-like values."""
     if value is None:
@@ -116,21 +156,46 @@ def _split_clean_amenity_names(value: Any, *, delimiter: str = "|") -> list[str]
     text = str(value or "").strip()
     if not text:
         return []
-
-    cleaned_names: list[str] = []
-    for part in text.split(delimiter):
-        cleaned = _clean_amenity_name(part)
-        if cleaned:
-            cleaned_names.append(cleaned)
-    return cleaned_names
-
-class SellerMotivationProfile(BaseModel):
-    seller_archetype_type: str = ""
-    motivation_summary: str = ""
-    reasons: list[str] = Field(default_factory=list)
+    return [
+        cleaned
+        for part in text.split(delimiter)
+        if (cleaned := _clean_amenity_name(part))
+    ]
 
 
-# Generic text / file utilities.
+def _parse_literal_list(value: Any) -> list[Any]:
+    """Parse a list-valued field that may arrive as a Python-literal string."""
+    if isinstance(value, list):
+        return value
+
+    text = str(value or "").strip()
+    if not text or text == "[]":
+        return []
+    try:
+        parsed = ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _extract_clean_names(
+    items: list[Any],
+    *,
+    dict_key: str | None = None,
+) -> list[str]:
+    """Clean and deduplicate amenity names from scalar or dict-backed items."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        raw_value = item.get(dict_key, "") if dict_key and isinstance(item, dict) else item
+        cleaned = _clean_amenity_name(raw_value)
+        if not cleaned or cleaned in seen:
+            continue
+        names.append(cleaned)
+        seen.add(cleaned)
+    return names
+
+
 def _normalize_text(value: Any) -> str:
     return str(value or "").strip().casefold()
 
@@ -216,7 +281,7 @@ def _flat_type_from_row(value: Any) -> str:
     return FLAT_TYPE_LABELS.get(key, str(value or "").strip())
 
 
-# Sampling helpers used for demographic generation.
+# Shared demographic and sampling helpers.
 def _parse_age_band(label: str, *, adult_floor: int = 21) -> tuple[int, int]:
     text = str(label or "").strip()
     if not text:
@@ -309,10 +374,63 @@ def _filter_dwelling_distribution(
     ].copy()
 
 
-def _load_nemotron_pool(nemotron_dir: Path) -> pd.DataFrame:
+def _download_nemotron_parquet_files(
+    nemotron_dir: Path,
+    *,
+    dataset_name: str = DEFAULT_NEMOTRON_DATASET_ID,
+    download_dir: str | None = None,
+) -> list[Path]:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "Nemotron parquet download requested, but huggingface_hub is not "
+            "available in this environment."
+        ) from exc
+
+    nemotron_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = str(Path(download_dir).expanduser().resolve()) if download_dir else None
+    logging.info(
+        "No local Nemotron parquet files found under %s; downloading %s.",
+        nemotron_dir,
+        dataset_name,
+    )
+    snapshot_download(
+        repo_id=dataset_name,
+        repo_type="dataset",
+        allow_patterns="*.parquet",
+        local_dir=str(nemotron_dir),
+        cache_dir=cache_dir,
+    )
     parquet_files = sorted(nemotron_dir.glob("*.parquet"))
     if not parquet_files:
-        raise FileNotFoundError(f"No parquet files found in {nemotron_dir}.")
+        raise FileNotFoundError(
+            f"Downloaded dataset {dataset_name} did not produce any parquet files "
+            f"under {nemotron_dir}."
+        )
+    return parquet_files
+
+
+def _load_nemotron_pool(
+    nemotron_dir: Path,
+    *,
+    allow_download: bool = False,
+    download_dir: str | None = None,
+    dataset_name: str = DEFAULT_NEMOTRON_DATASET_ID,
+) -> pd.DataFrame:
+    parquet_files = sorted(nemotron_dir.glob("*.parquet"))
+    if not parquet_files and allow_download:
+        parquet_files = _download_nemotron_parquet_files(
+            nemotron_dir,
+            dataset_name=dataset_name,
+            download_dir=download_dir,
+        )
+    if not parquet_files:
+        raise FileNotFoundError(
+            f"No parquet files found in {nemotron_dir}. "
+            "Run with download mode enabled to try fetching the Nemotron donor "
+            f"dataset ({dataset_name}) automatically."
+        )
 
     logging.info(
         "Loading Nemotron donor pool from %s parquet file(s) under %s.",
@@ -396,6 +514,7 @@ def _hedonic_feature_frame(flats: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
+                "town": str(flat.get("town", "")).strip(),
                 "flat_type": flat["flat_type"],
                 "flat_model": flat["flat_model"],
                 "floor_area_sqm": float(flat["floor_area_sqm"]),
@@ -408,84 +527,1149 @@ def _hedonic_feature_frame(flats: list[dict[str, Any]]) -> pd.DataFrame:
     )
 
 
-def _select_hedonic_training_flats(
+def _hedonic_design_frame(
+    feature_frame: pd.DataFrame,
+    *,
+    include_town: bool,
+) -> pd.DataFrame:
+    """Build the hedonic design matrix for one reusable flat-type calibration."""
+    # Every reusable calibration is already fit on one flat-type slice, so
+    # `flat_type` is constant within the sample and should not enter the
+    # regression alongside the intercept. `town` is only informative for the
+    # broad cross-town fallback model; town-specific calibrations should omit it.
+    excluded_columns = ["observed_resale_price", "flat_type"]
+    dummy_columns = ["flat_model"]
+    if not include_town:
+        excluded_columns.append("town")
+    else:
+        dummy_columns.append("town")
+    return pd.get_dummies(
+        feature_frame.drop(columns=excluded_columns),
+        columns=dummy_columns,
+        dtype=float,
+    )
+
+
+def _fit_hedonic_calibration(
     training_flats: list[dict[str, Any]],
     *,
-    town: Any,
-    preferred_flat_types: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """Filter the fixed pre-window hedonic pool to town, then to preferred flat types if available."""
-    target_flat_types = {flat_type for flat_type in (preferred_flat_types or []) if flat_type}
-    town_flats = [
-        flat for flat in training_flats if _matches_planning_area(flat["town"], town)
-    ]
-    if not target_flat_types:
-        return town_flats
-
-    filtered = [flat for flat in town_flats if flat["flat_type"] in target_flat_types]
-    if filtered:
-        return filtered
-    return town_flats
-
-
-def _estimate_hedonic_price(
-    training_flats: list[dict[str, Any]],
-    *,
-    target_flat: dict[str, Any] | None = None,
-) -> tuple[float, float]:
-    """Fit a simple hedonic anchor on log prices and return log-space stats."""
+    include_town: bool = False,
+) -> HedonicCalibration:
+    """Fit one reusable hedonic calibration on a fixed training subset."""
+    if not training_flats:
+        raise ValueError("Cannot fit a hedonic calibration on an empty training pool.")
 
     training_frame = _hedonic_feature_frame(training_flats)
     y = training_frame["observed_resale_price"].astype(float).to_numpy()
     log_y = np.log(np.clip(y, a_min=1.0, a_max=None))
-
-    if target_flat is None:
-        target_frame = training_frame.iloc[[0]].copy()
-        target_frame.loc[:, "floor_area_sqm"] = training_frame["floor_area_sqm"].mean()
-        target_frame.loc[:, "remaining_lease_years"] = training_frame[
-            "remaining_lease_years"
-        ].mean()
-        target_frame.loc[:, "storey_mid"] = training_frame["storey_mid"].mean()
-        target_frame.loc[:, "flat_type"] = training_frame["flat_type"].mode().iloc[0]
-        target_frame.loc[:, "flat_model"] = training_frame["flat_model"].mode().iloc[0]
-    else:
-        target_frame = _hedonic_feature_frame([target_flat])
-
-    training_design = pd.get_dummies(
-        training_frame.drop(columns=["observed_resale_price"]),
-        columns=["flat_type", "flat_model"],
-        dtype=float,
+    training_design = _hedonic_design_frame(
+        training_frame,
+        include_town=include_town,
     )
-    target_design = pd.get_dummies(
-        target_frame.drop(columns=["observed_resale_price"]),
-        columns=["flat_type", "flat_model"],
-        dtype=float,
-    ).reindex(columns=training_design.columns, fill_value=0.0)
+    sigma_log = float(np.std(log_y, ddof=0)) if len(log_y) > 1 else 0.05
+    fallback_anchor_log = float(np.median(log_y))
 
     if len(training_frame) < 8 or training_design.shape[1] >= len(training_frame):
-        anchor_log = float(np.median(log_y))
-        sigma_log = float(np.std(log_y, ddof=0)) if len(log_y) > 1 else 0.05
-        return anchor_log, max(sigma_log, 0.05)
+        return HedonicCalibration(
+            design_columns=tuple(training_design.columns),
+            beta=None,
+            anchor_log=fallback_anchor_log,
+            sigma_log=max(sigma_log, 0.05),
+            training_rows=len(training_frame),
+            uses_town_feature=include_town,
+        )
 
     x_train = np.column_stack(
         [np.ones(len(training_design)), training_design.to_numpy(dtype=float)]
     )
-    x_target = np.column_stack(
-        [np.ones(len(target_design)), target_design.to_numpy(dtype=float)]
-    )
-
     beta, *_ = np.linalg.lstsq(x_train, log_y, rcond=None)
     fitted = x_train @ beta
     residuals = log_y - fitted
     sigma_log = float(np.sqrt(np.mean(residuals**2))) if len(residuals) else 0.0
-    anchor_log = float((x_target @ beta)[0])
+    anchor_log = float(np.median(fitted)) if len(fitted) else fallback_anchor_log
 
     if not np.isfinite(anchor_log):
-        anchor_log = float(np.median(log_y))
-    sigma_log = max(sigma_log, 0.05)
-    return anchor_log, sigma_log
+        anchor_log = fallback_anchor_log
+    return HedonicCalibration(
+        design_columns=tuple(training_design.columns),
+        beta=beta,
+        anchor_log=anchor_log,
+        sigma_log=max(sigma_log, 0.05),
+        training_rows=len(training_frame),
+        uses_town_feature=include_town,
+    )
 
 
+def _calibration_meets_min_fit(calibration: HedonicCalibration) -> bool:
+    return calibration.training_rows >= MIN_HEDONIC_FIT_ROWS
+
+
+def _predict_hedonic_price(
+    calibration: HedonicCalibration,
+    *,
+    target_flat: dict[str, Any] | None = None,
+) -> tuple[float, float]:
+    """Return the log-price anchor and spread from a reusable calibration."""
+    if target_flat is None or calibration.beta is None:
+        return calibration.anchor_log, calibration.sigma_log
+
+    target_frame = _hedonic_feature_frame([target_flat])
+    target_design = _hedonic_design_frame(
+        target_frame,
+        include_town=calibration.uses_town_feature,
+    ).reindex(
+        columns=calibration.design_columns,
+        fill_value=0.0,
+    )
+    x_target = np.column_stack(
+        [np.ones(len(target_design)), target_design.to_numpy(dtype=float)]
+    )
+    anchor_log = float((x_target @ calibration.beta)[0])
+    if not np.isfinite(anchor_log):
+        anchor_log = calibration.anchor_log
+    return anchor_log, calibration.sigma_log
+
+
+def _build_hedonic_calibrations(
+    training_flats: list[dict[str, Any]],
+) -> HedonicCalibrationStore:
+    """Pre-train reusable hedonic calibrations by town and flat type."""
+    by_flat_type: dict[str, HedonicCalibration] = {}
+    by_town: dict[str, dict[str, HedonicCalibration]] = {}
+
+    grouped_by_flat_type: dict[str, list[dict[str, Any]]] = {}
+    grouped_by_town: dict[str, list[dict[str, Any]]] = {}
+    for flat in training_flats:
+        flat_type = str(flat.get("flat_type", "")).strip()
+        if flat_type:
+            grouped_by_flat_type.setdefault(flat_type, []).append(flat)
+        normalized_town = _normalize_text(flat.get("town", ""))
+        if normalized_town:
+            grouped_by_town.setdefault(normalized_town, []).append(flat)
+
+    for flat_type, flat_type_flats in grouped_by_flat_type.items():
+        by_flat_type[flat_type] = _fit_hedonic_calibration(
+            flat_type_flats,
+            include_town=True,
+        )
+
+    for normalized_town, town_flats in grouped_by_town.items():
+        town_models: dict[str, HedonicCalibration] = {}
+        grouped_town_flat_types: dict[str, list[dict[str, Any]]] = {}
+        for flat in town_flats:
+            flat_type = str(flat.get("flat_type", "")).strip()
+            if flat_type:
+                grouped_town_flat_types.setdefault(flat_type, []).append(flat)
+        for flat_type, flat_type_flats in grouped_town_flat_types.items():
+            town_models[flat_type] = _fit_hedonic_calibration(
+                flat_type_flats,
+                include_town=False,
+            )
+        by_town[normalized_town] = town_models
+
+    return HedonicCalibrationStore(
+        by_flat_type=by_flat_type,
+        by_town=by_town,
+    )
+
+
+def _rank_flat_type_calibrations(
+    calibrations: dict[str, HedonicCalibration],
+) -> list[HedonicCalibration]:
+    return sorted(
+        (
+            calibration
+            for calibration in calibrations.values()
+            if _calibration_meets_min_fit(calibration)
+        ),
+        key=lambda calibration: calibration.training_rows,
+        reverse=True,
+    )
+
+
+def _select_hedonic_calibration(
+    calibrations: HedonicCalibrationStore,
+    *,
+    town: Any,
+    preferred_flat_types: list[str] | None = None,
+) -> HedonicCalibration:
+    """Resolve the best flat-type calibration without using a market-wide fallback."""
+    target_flat_types = [flat_type for flat_type in (preferred_flat_types or []) if flat_type]
+    planning_areas = _coerce_planning_areas(town)
+    for planning_area in planning_areas:
+        town_models = calibrations.by_town.get(_normalize_text(planning_area))
+        if town_models is None:
+            continue
+        for flat_type in target_flat_types:
+            calibration = town_models.get(flat_type)
+            if calibration is not None and _calibration_meets_min_fit(calibration):
+                return calibration
+        if not target_flat_types:
+            ranked_town_calibrations = _rank_flat_type_calibrations(town_models)
+            if ranked_town_calibrations:
+                return ranked_town_calibrations[0]
+
+    for flat_type in target_flat_types:
+        calibration = calibrations.by_flat_type.get(flat_type)
+        if calibration is not None and _calibration_meets_min_fit(calibration):
+            return calibration
+    if not target_flat_types:
+        ranked_global_calibrations = _rank_flat_type_calibrations(
+            calibrations.by_flat_type
+        )
+        if ranked_global_calibrations:
+            return ranked_global_calibrations[0]
+    raise ValueError(
+        "No hedonic calibration satisfies the minimum fit floor for the requested "
+        "town / flat-type context."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Load transaction inputs and demographic priors.
+# ---------------------------------------------------------------------------
+def _load_resale_transactions(config: SegmentConfig) -> pd.DataFrame:
+    """Load all successful resale transactions with shared preprocessing applied."""
+    frame = pd.read_csv(config.resale_path)
+    frame["Date"] = pd.to_datetime(frame["Date"])
+    frame["flat_type_label"] = frame["flat_type"].map(_flat_type_from_row)
+    frame["sale_id"] = frame["sale_id"].astype(int)
+    return frame.sort_values(["Date", "sale_id"]).reset_index(drop=True)
+
+
+def _load_town_transactions(
+    config: SegmentConfig,
+    *,
+    transactions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Load all successful resale transactions for the configured town."""
+    frame = transactions if transactions is not None else _load_resale_transactions(config)
+    town_rows = frame[
+        frame["town"].map(lambda value: _matches_planning_area(value, config.town))
+    ].copy()
+    if town_rows.empty:
+        raise ValueError(
+            f"No resale rows found for planning_area={_planning_area_label(config.town)!r}."
+        )
+    return town_rows.sort_values(["Date", "sale_id"]).reset_index(drop=True)
+
+
+def _load_transactions(
+    config: SegmentConfig,
+    *,
+    town_rows: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Load the simulation window for the configured town-year segment."""
+    town_rows = (
+        town_rows if town_rows is not None else _load_town_transactions(config)
+    )
+    filtered = town_rows[town_rows["year"].astype(int) == int(config.year)].copy()
+    filtered = filtered[filtered["Date"].dt.month.isin(config.segment_months)].copy()
+    if filtered.empty:
+        raise ValueError(
+            "No successful resale rows found for "
+            f"planning_area={_planning_area_label(config.town)!r} year={config.year} "
+            f"segment={config.segment_label!r}."
+    )
+    return filtered.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Sample and restrain the observed transaction window.
+# ---------------------------------------------------------------------------
+def _sample_indices_uniformly(total_count: int, cap: int) -> list[int]:
+    if cap <= 0 or total_count <= 0:
+        return []
+    if total_count <= cap:
+        return list(range(total_count))
+
+    step = (total_count - 1) / float(cap - 1) if cap > 1 else 0.0
+    sampled_indices: list[int] = []
+    seen_indices: set[int] = set()
+    for position in range(cap):
+        candidate_index = int(round(position * step)) if cap > 1 else 0
+        if candidate_index in seen_indices:
+            continue
+        sampled_indices.append(candidate_index)
+        seen_indices.add(candidate_index)
+
+    if len(sampled_indices) < cap:
+        for candidate_index in range(total_count):
+            if candidate_index in seen_indices:
+                continue
+            sampled_indices.append(candidate_index)
+            seen_indices.add(candidate_index)
+            if len(sampled_indices) >= cap:
+                break
+
+    sampled_indices.sort()
+    return sampled_indices
+
+
+def _allocate_stratified_counts(
+    stratum_sizes: dict[str, int],
+    cap: int,
+) -> dict[str, int]:
+    """Allocate a fixed sample size proportionally across strata."""
+    total_count = sum(max(0, int(size)) for size in stratum_sizes.values())
+    if cap <= 0 or total_count <= 0:
+        return {stratum: 0 for stratum in stratum_sizes}
+
+    capped_total = min(cap, total_count)
+    allocated: dict[str, int] = {}
+    remainders: list[tuple[float, str]] = []
+    for stratum, size in stratum_sizes.items():
+        normalized_size = max(0, int(size))
+        exact_share = (normalized_size / total_count) * capped_total
+        floor_share = min(normalized_size, int(math.floor(exact_share)))
+        allocated[stratum] = floor_share
+        remainders.append((exact_share - floor_share, stratum))
+
+    remaining = capped_total - sum(allocated.values())
+    remainders.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
+    while remaining > 0:
+        progressed = False
+        for _, stratum in remainders:
+            capacity_left = max(0, int(stratum_sizes[stratum])) - allocated[stratum]
+            if capacity_left <= 0:
+                continue
+            allocated[stratum] += 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            break
+
+    return allocated
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Build hedonic calibrations and the flat universe.
+# ---------------------------------------------------------------------------
+def _restrain_transactions(
+    transactions: pd.DataFrame,
+    *,
+    restrained_seller_count: int | None,
+    sampled_flat_ratio: float | None = None,
+    rng: random.Random | None = None,
+) -> pd.DataFrame:
+    """Downsample transactions while preserving the observed flat-type mix."""
+    transactions = transactions.reset_index(drop=True)
+
+    if sampled_flat_ratio is not None:
+        if not (0 < sampled_flat_ratio <= 1):
+            raise ValueError("sampled_flat_ratio must be within (0, 1].")
+        if sampled_flat_ratio >= 1:
+            return transactions.reset_index(drop=True)
+
+        selected_frames: list[pd.DataFrame] = []
+        normalized_towns = transactions["town"].map(_normalize_text)
+        ordered_towns = list(dict.fromkeys(normalized_towns.tolist()))
+        for normalized_town in ordered_towns:
+            town_rows = transactions[normalized_towns == normalized_town].copy()
+            if town_rows.empty:
+                continue
+            town_target_count = max(
+                1,
+                math.ceil(len(town_rows) * sampled_flat_ratio),
+            )
+            if town_target_count >= len(town_rows):
+                selected_frames.append(town_rows)
+                continue
+            selected_frames.append(
+                _restrain_transactions(
+                    town_rows,
+                    restrained_seller_count=town_target_count,
+                    sampled_flat_ratio=None,
+                    rng=rng,
+                )
+            )
+
+        if not selected_frames:
+            return transactions.iloc[0:0].copy().reset_index(drop=True)
+        return (
+            pd.concat(selected_frames, ignore_index=True)
+            .sort_values(["Date", "sale_id"])
+            .reset_index(drop=True)
+        )
+
+    if restrained_seller_count is None:
+        return transactions.reset_index(drop=True)
+    if restrained_seller_count <= 0:
+        raise ValueError("restrained_seller_count must be positive when provided.")
+    if len(transactions) <= restrained_seller_count:
+        return transactions.reset_index(drop=True)
+
+    flat_type_series = (
+        transactions["flat_type_label"]
+        .fillna("unknown")
+        .astype(str)
+        .str.strip()
+        .replace("", "unknown")
+    )
+    stratum_sizes = {
+        str(flat_type): int(count)
+        for flat_type, count in flat_type_series.value_counts(sort=False).items()
+    }
+    allocated_counts = _allocate_stratified_counts(
+        stratum_sizes,
+        restrained_seller_count,
+    )
+
+    selected_indices: list[int] = []
+    for flat_type, sample_count in sorted(allocated_counts.items()):
+        if sample_count <= 0:
+            continue
+        stratum_indices = flat_type_series[flat_type_series == flat_type].index.tolist()
+        if sample_count >= len(stratum_indices):
+            selected_indices.extend(stratum_indices)
+            continue
+        if rng is None:
+            relative_indices = _sample_indices_uniformly(
+                total_count=len(stratum_indices),
+                cap=sample_count,
+            )
+            selected_indices.extend(
+                stratum_indices[index] for index in relative_indices
+            )
+        else:
+            selected_indices.extend(rng.sample(stratum_indices, k=sample_count))
+
+    selected_indices = sorted(set(selected_indices))
+    if len(selected_indices) < restrained_seller_count:
+        selected_set = set(selected_indices)
+        remaining_indices = [
+            index for index in transactions.index.tolist() if index not in selected_set
+        ]
+        deficit = restrained_seller_count - len(selected_indices)
+        if rng is None:
+            relative_indices = _sample_indices_uniformly(
+                total_count=len(remaining_indices),
+                cap=deficit,
+            )
+            selected_indices.extend(
+                remaining_indices[index] for index in relative_indices
+            )
+        else:
+            selected_indices.extend(rng.sample(remaining_indices, k=deficit))
+        selected_indices = sorted(selected_indices)
+
+    return transactions.iloc[selected_indices].copy().reset_index(drop=True)
+
+
+def _build_hedonic_training_flats(
+    transactions: pd.DataFrame,
+    *,
+    window_start: pd.Timestamp,
+) -> list[dict[str, Any]]:
+    """Build the fixed 6-month pre-window pool used for hedonic calibration."""
+    cutoff_date = window_start - pd.Timedelta(days=183)
+    training_rows = transactions[
+        (transactions["Date"] < window_start)
+        & (transactions["Date"] >= cutoff_date)
+    ].copy()
+
+    training_flats: list[dict[str, Any]] = []
+    for row in training_rows.itertuples(index=False):
+        training_flats.append(
+            {
+                "town": str(row.town).strip(),
+                "transaction_date": pd.Timestamp(row.Date).date().isoformat(),
+                "flat_type": str(row.flat_type_label),
+                "flat_model": str(row.flat_model).strip(),
+                "floor_area_sqm": float(row.floor_area_sqm),
+                "floor_range": str(row.storey_range).strip(),
+                "remaining_lease_years": round(float(row.remaining_lease) / 12.0, 2),
+                "observed_resale_price": float(row.resale_price),
+            }
+        )
+    return training_flats
+
+
+def _build_past_price_trends(
+    transactions: pd.DataFrame,
+    *,
+    town: str,
+    flat_type: str,
+    reference_date: pd.Timestamp,
+    fallback_price: float,
+) -> dict[str, Any]:
+    """Summarise same-town, same-flat-type transactions in the prior 6 months."""
+    cutoff_date = reference_date - pd.Timedelta(days=183)
+    history = transactions[
+        (transactions["town"].map(_normalize_text) == _normalize_text(town))
+        & (transactions["flat_type_label"] == flat_type)
+        & (transactions["Date"] < reference_date)
+        & (transactions["Date"] >= cutoff_date)
+    ].copy()
+
+    if history.empty:
+        return {
+            "transactions_6m": 0,
+            "min_price_6m": round(float(fallback_price), 2),
+            "max_price_6m": round(float(fallback_price), 2),
+        }
+
+    prices = history["resale_price"].astype(float)
+    return {
+        "transactions_6m": int(len(history)),
+        "min_price_6m": round(float(prices.min()), 2),
+        "max_price_6m": round(float(prices.max()), 2),
+    }
+
+
+def _build_flat_universe(
+    transactions: pd.DataFrame,
+    town_transactions: pd.DataFrame,
+    config: SegmentConfig,
+) -> list[dict[str, Any]]:
+    """Convert observed successful transactions into the simulated flat universe."""
+    date_min = transactions["Date"].min()
+    date_max = transactions["Date"].max()
+    date_span_days = max(1, int((date_max - date_min).days))
+    transaction_months = [
+        pd.Timestamp(value).to_period("M")
+        for value in transactions["Date"].tolist()
+    ]
+    ordered_months = sorted(dict.fromkeys(transaction_months))
+    initial_window_month_count = min(
+        config.initial_window_months,
+        len(ordered_months),
+    )
+    initial_window_months = set(ordered_months[:initial_window_month_count])
+    month_index_by_period = {
+        month_period: index
+        for index, month_period in enumerate(ordered_months)
+    }
+    initial_window_transaction_count = sum(
+        1 for month_period in transaction_months if month_period in initial_window_months
+    )
+    negotiating_cutoff = initial_window_transaction_count // 2
+
+    flats: list[dict[str, Any]] = []
+    initial_window_position = 0
+    for order_index, row in enumerate(transactions.itertuples(index=False), start=1):
+        transaction_date = pd.Timestamp(row.Date)
+        relative_timing = round((transaction_date - date_min).days / date_span_days, 6)
+        transaction_month = transaction_date.to_period("M")
+        month_index = month_index_by_period[transaction_month]
+        if transaction_month in initial_window_months:
+            initial_window_position += 1
+            current_initial_window_position = initial_window_position
+            if initial_window_position <= negotiating_cutoff:
+                initial_state = "negotiating"
+            else:
+                initial_state = "listed"
+            listing_release_week = 1
+        else:
+            current_initial_window_position = 0
+            initial_state = "not_yet_listed"
+            # Expand the active transaction window by one calendar month every
+            # four simulation weeks after the week-1 bootstrap window.
+            listing_release_week = (
+                1 + (4 * (month_index - initial_window_month_count + 1))
+            )
+
+        mall_names = _extract_clean_names(
+            _parse_literal_list(row.nearby_mall_names)
+        )
+        mrt_names = _extract_clean_names(
+            _parse_literal_list(row.nearby_mrt_names_lines),
+            dict_key="station_name",
+        )
+        school_names = _split_clean_amenity_names(row.pri_school_names_0_2km)
+        hawker_names = _split_clean_amenity_names(row.hawker_names_0_1km)
+        remaining_lease_years = round(float(row.remaining_lease) / 12.0, 2)
+        observed_price = float(row.resale_price)
+        past_price_trends = _build_past_price_trends(
+            town_transactions,
+            town=str(row.town).strip(),
+            flat_type=str(row.flat_type_label),
+            reference_date=transaction_date,
+            fallback_price=observed_price,
+        )
+
+        normalized_town = _normalize_text(row.town).replace(" ", "_")
+        flat_id_prefix = f"{config.year}_{normalized_town}"
+        if not config.is_full_year_segment:
+            flat_id_prefix = f"{flat_id_prefix}_{config.segment_label}"
+        flat_id = f"{flat_id_prefix}_{order_index:05d}"
+        flats.append(
+            {
+                "flat_id": flat_id,
+                "town": str(row.town).strip(),
+                "year": int(config.year),
+                "segment": config.segment_label,
+                "transaction_date": transaction_date.date().isoformat(),
+                "transaction_year_month": str(transaction_month),
+                "simulated_market_entry_date": (
+                    transaction_date
+                    - pd.DateOffset(months=config.lead_months)
+                ).date().isoformat(),
+                "initialization_order": order_index,
+                "relative_transaction_timing": relative_timing,
+                "initial_market_state": initial_state,
+                "initial_window_position": int(current_initial_window_position),
+                "initial_window_size": int(initial_window_transaction_count),
+                "listing_release_week": int(max(1, listing_release_week)),
+                "address": str(row.address).strip(),
+                "flat_type": str(row.flat_type_label),
+                "floor_range": str(row.storey_range).strip(),
+                "floor_area_sqm": float(row.floor_area_sqm),
+                "flat_model": str(row.flat_model).strip(),
+                "lease_commencement_year": int(row.lease_commence_date),
+                "remaining_lease_years": remaining_lease_years,
+                "observed_resale_price": observed_price,
+                "amenities": {
+                    "mrt": {
+                        "count": len(mrt_names),
+                        "station_names": mrt_names,
+                    },
+                    "primary_schools": {
+                        "count": int(row.num_pri_schools_0_2km),
+                        "school_names": school_names,
+                    },
+                    "malls": {
+                        "count": len(mall_names),
+                        "mall_names": mall_names,
+                    },
+                    "hawker_centres": {
+                        "count": len(hawker_names),
+                        "hawker_names": hawker_names,
+                    },
+                },
+                "past_price_trends": past_price_trends,
+            }
+        )
+
+    return flats
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Build synthetic sellers from the flat universe.
+# ---------------------------------------------------------------------------
+def _sample_seller_demographics(
+    flat_type: str,
+    distribution_tables: dict[str, pd.DataFrame],
+    rng: random.Random,
+) -> dict[str, Any]:
+    """Sample seller demographics conditional on the observed flat type."""
+    age_frame = _filter_dwelling_distribution(distribution_tables["age"], flat_type)
+    marital_frame = _filter_dwelling_distribution(
+        distribution_tables["marital"], flat_type
+    )
+    education_frame = _filter_dwelling_distribution(
+        distribution_tables["education"], flat_type
+    )
+    occupation_frame = _filter_dwelling_distribution(
+        distribution_tables["occupation"], flat_type
+    )
+
+    age_band = str(_weighted_choice(age_frame, age_frame.columns[1], "count", rng))
+    marital_status = str(
+        _weighted_choice(marital_frame, marital_frame.columns[1], "count", rng)
+    )
+    education_level = str(
+        _weighted_choice(education_frame, education_frame.columns[1], "count", rng)
+    )
+    occupation_category = str(
+        _weighted_choice(occupation_frame, occupation_frame.columns[1], "count", rng)
+    )
+
+    return {
+        "age": _sample_age_from_band(age_band, rng),
+        "marital_status": marital_status,
+        "education_level": education_level,
+        "occupation_category": occupation_category,
+    }
+
+
+def _build_seller_flat(flat: dict[str, Any]) -> dict[str, Any]:
+    """Map flat-universe fields into the shared Flat schema used by sellers."""
+    nearby_amenities = [
+        Amenity(name=name, type=AmenityType.MRT, radius="Within 1km").model_dump()
+        for raw_name in flat["amenities"]["mrt"]["station_names"]
+        if (name := _clean_amenity_name(raw_name))
+    ]
+    nearby_amenities.extend(
+        Amenity(
+            name=name, type=AmenityType.SCHOOL, radius="Within 2km"
+        ).model_dump()
+        for raw_name in flat["amenities"]["primary_schools"]["school_names"]
+        if (name := _clean_amenity_name(raw_name))
+    )
+    nearby_amenities.extend(
+        Amenity(name=name, type=AmenityType.MALL, radius="Within 1km").model_dump()
+        for raw_name in flat["amenities"]["malls"]["mall_names"]
+        if (name := _clean_amenity_name(raw_name))
+    )
+    nearby_amenities.extend(
+        Amenity(
+            name=name, type=AmenityType.HAWKER, radius="Within 1km"
+        ).model_dump()
+        for raw_name in flat["amenities"]["hawker_centres"]["hawker_names"]
+        if (name := _clean_amenity_name(raw_name))
+    )
+
+    return Flat(
+        flat_type=flat["flat_type"],
+        address=flat["address"],
+        description=(
+            f'{flat["flat_type"]} flat in {flat["town"]} with '
+            f'{flat["floor_area_sqm"]:.0f} sqm and '
+            f'{flat["remaining_lease_years"]:.1f} years remaining lease.'
+        ),
+        town=flat["town"],
+        storey_range=flat["floor_range"],
+        remaining_lease=flat["remaining_lease_years"],
+        contra=False,
+        extension_of_stay=False,
+        ethnic_eligibility="Unknown",
+        spr_eligibility="Unknown",
+        floor_area_sqm=flat["floor_area_sqm"],
+        nearby_amenities=nearby_amenities,
+    ).model_dump()
+
+
+def _build_seller_expectations(
+    flat: dict[str, Any],
+    hedonic_calibrations: HedonicCalibrationStore,
+    *,
+    rng: random.Random,
+) -> dict[str, Any]:
+    """Sample a seller reservation / asking range from a flat-type calibration."""
+    calibration = _select_hedonic_calibration(
+        hedonic_calibrations,
+        town=flat.get("town"),
+        preferred_flat_types=[str(flat.get("flat_type", "")).strip()],
+    )
+    anchor_log_price, sigma_log_price = _predict_hedonic_price(
+        calibration,
+        target_flat=flat,
+    )
+    reservation_price = float(
+        np.exp(rng.normalvariate(anchor_log_price, sigma_log_price))
+    )
+    ask_price = max(
+        reservation_price,
+        float(np.exp(anchor_log_price + sigma_log_price)),
+    )
+    return SellerExpectationRange(
+        min_price=round(reservation_price, 2),
+        max_price=round(ask_price, 2),
+    ).model_dump()
+
+
+def _build_sellers(
+    flats: list[dict[str, Any]],
+    hedonic_calibrations: HedonicCalibrationStore,
+    distribution_tables: dict[str, pd.DataFrame],
+    donors: pd.DataFrame,
+    seller_archetypes: list[dict[str, Any]],
+    *,
+    config: SegmentConfig,
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    """Create one synthetic seller per observed flat and attach LLM-ready motivation input."""
+    sellers: list[dict[str, Any]] = []
+    for index, flat in enumerate(flats, start=1):
+        demographics = _sample_seller_demographics(
+            flat["flat_type"], distribution_tables, rng
+        )
+        donor = _sample_nemotron_donor(
+            donors,
+            rng=rng,
+            planning_area=flat["town"],
+            age=demographics["age"],
+            marital_status=demographics["marital_status"],
+            education_level=demographics["education_level"],
+            occupation=demographics["occupation_category"],
+        )
+
+        seller_record = {
+            "seller_id": f"seller_{config.year}_{index:05d}",
+            "linked_flat_id": flat["flat_id"],
+            "initialization_order": flat["initialization_order"],
+            "initial_market_state": flat["initial_market_state"],
+            "initial_window_position": int(flat.get("initial_window_position", 0) or 0),
+            "initial_window_size": int(flat.get("initial_window_size", 0) or 0),
+            "listing_release_week": int(flat.get("listing_release_week", 1) or 1),
+            "transaction_year_month": str(flat.get("transaction_year_month", "")).strip(),
+            "age": demographics["age"],
+            "marital_status": demographics["marital_status"],
+            "education_level": demographics["education_level"],
+            "occupation_category": demographics["occupation_category"],
+            "industry": str(donor.get("industry", "")).strip(),
+            "general_persona": str(donor.get("persona", "")).strip(),
+            "flat": _build_seller_flat(flat),
+            "expectations": _build_seller_expectations(
+                flat,
+                hedonic_calibrations,
+                rng=rng,
+            ),
+            "seller_motivations": {
+                "seller_archetype_type": "",
+                "motivation_summary": "",
+                "reasons": [],
+            },
+        }
+        seller_record["seller_motivation_generation_input"] = (
+            _build_seller_motivation_generation_input(seller_record, seller_archetypes)
+        )
+        sellers.append(seller_record)
+    return sellers
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Build buyers conditioned on the sampled seller market.
+# ---------------------------------------------------------------------------
+def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
+    """Load the town-level buyer age prior used to seed the broad buyer pool."""
+    planning_areas = _coerce_planning_areas(town)
+    frame = pd.read_csv(path).fillna("")
+    if not {"planning_area", "age_group", "population"}.issubset(frame.columns):
+        frame = pd.concat(
+            [build_planning_area_age_groups(planning_area) for planning_area in planning_areas],
+            ignore_index=True,
+        ).fillna("")
+    subset = frame[
+        frame["planning_area"].map(lambda value: _matches_planning_area(value, town))
+    ].copy()
+    subset["age_group"] = subset["age_group"].map(_canonical_buyer_age_prior_group)
+    subset = subset[subset["age_group"].astype(bool)].copy()
+    if subset.empty:
+        raise ValueError(
+            "No buyer age prior found for planning_area="
+            f"{_planning_area_label(town)!r} within the supported age range "
+            f"{BUYER_AGE_PRIOR_GROUPS[0]!r} to {BUYER_AGE_PRIOR_GROUPS[-1]!r}."
+        )
+    age_group_order = {
+        label: index for index, label in enumerate(BUYER_AGE_PRIOR_GROUPS)
+    }
+    grouped = (
+        subset.groupby("age_group", as_index=False)["population"]
+        .sum()
+        .reset_index(drop=True)
+    )
+    grouped["age_group_order"] = grouped["age_group"].map(age_group_order)
+    grouped = grouped.sort_values("age_group_order").reset_index(drop=True)
+    grouped = grouped.drop(columns=["age_group_order"])
+    grouped["population"] = grouped["population"].astype(float)
+    return grouped[grouped["population"] > 0].copy()
+
+
+def _load_buyer_age_priors_by_town(
+    path: Path,
+    towns: Any,
+) -> dict[str, pd.DataFrame]:
+    planning_areas = _coerce_planning_areas(towns)
+    return {
+        planning_area: _load_buyer_age_prior(path, planning_area)
+        for planning_area in planning_areas
+    }
+
+
+def _sample_income_band(
+    income_prior: pd.DataFrame, age_band: str, rng: random.Random
+) -> str:
+    def _income_band_allowed(value: object) -> bool:
+        band = INCOME_BANDS.get(str(value).strip())
+        if band is None:
+            return False
+        lower = band.get("lower")
+        return lower is not None and float(lower) >= MIN_BUYER_INCOME_BAND_LOWER
+
+    age_group = _income_age_group_for_band(age_band, rng)
+    subset = income_prior[
+        (income_prior["age_group"].map(_normalize_text) == _normalize_text(age_group))
+        & (income_prior["sex"].map(_normalize_text) == "total")
+        & (income_prior["income_band"].map(_normalize_text) != "total")
+    ].copy()
+    if subset.empty:
+        subset = income_prior[
+            (income_prior["sex"].map(_normalize_text) == "total")
+            & (income_prior["income_band"].map(_normalize_text) != "total")
+        ].copy()
+    subset = subset[subset["income_band"].map(_income_band_allowed)]
+    subset["count"] = subset["count"].astype(float)
+    subset = subset[subset["count"] > 0]
+    if subset.empty:
+        raise ValueError(
+            "No eligible buyer income bands remain after applying the minimum "
+            f"lower-bound filter of {MIN_BUYER_INCOME_BAND_LOWER:.0f}."
+        )
+    return str(_weighted_choice(subset, "income_band", "count", rng))
+
+
+def _sample_overall_distribution(
+    frame: pd.DataFrame,
+    value_column: str,
+    rng: random.Random,
+) -> str:
+    dwelling_col = frame.columns[0]
+    subset = frame[
+        frame[dwelling_col].map(_normalize_text) == _normalize_text("HDB Dwellings")
+    ].copy()
+    subset["count"] = subset["count"].astype(float)
+    subset = subset[subset["count"] > 0]
+    return str(_weighted_choice(subset, value_column, "count", rng))
+
+
+def _sample_donor_value(
+    donor: dict[str, Any],
+    donor_field: str,
+    distribution: pd.DataFrame,
+    rng: random.Random,
+) -> str:
+    value = str(donor.get(donor_field, "")).strip()
+    if value:
+        return value
+    return _sample_overall_distribution(
+        distribution,
+        distribution.columns[1],
+        rng,
+    )
+
+
+def _buyer_preferred_flat_types(buyer: dict[str, Any]) -> list[str]:
+    preference_payload = buyer.get("preferences", {})
+    if not preference_payload.get("preferences"):
+        return []
+    return BuyerPreferenceProfile.model_validate(preference_payload).values_for(
+        "flat_type"
+    )
+
+
+def _estimate_buyer_hedonic_anchor(
+    buyer: dict[str, Any],
+    hedonic_calibrations: HedonicCalibrationStore,
+) -> tuple[float, float]:
+    """Estimate the buyer-specific hedonic anchor and spread."""
+    calibration = _select_hedonic_calibration(
+        hedonic_calibrations,
+        town=buyer["town"],
+        preferred_flat_types=_buyer_preferred_flat_types(buyer),
+    )
+    return _predict_hedonic_price(calibration)
+
+
+def _draw_buyer_value_prior(
+    buyer: dict[str, Any],
+    hedonic_calibrations: HedonicCalibrationStore,
+    *,
+    rng: random.Random,
+) -> float:
+    """Draw a buyer's private valuation prior from the relevant hedonic market."""
+    anchor_log_price, sigma_log_price = _estimate_buyer_hedonic_anchor(
+        buyer,
+        hedonic_calibrations,
+    )
+    return float(np.exp(rng.normalvariate(anchor_log_price, sigma_log_price)))
+
+
+def _build_buyer_budget(
+    buyer: dict[str, Any],
+    hedonic_calibrations: HedonicCalibrationStore,
+    *,
+    rng: random.Random,
+) -> dict[str, Any]:
+    """Build hard buyer budget bounds from financial feasibility."""
+    del rng  # Budget bounds are deterministic once buyer features are fixed.
+    anchor_log_price, sigma_log_price = _estimate_buyer_hedonic_anchor(
+        buyer,
+        hedonic_calibrations,
+    )
+    max_price = float(buyer["financials"]["effective_ceiling"])
+    min_price = max(0.0, float(np.exp(anchor_log_price - sigma_log_price)))
+    if max_price < min_price:
+        min_price = max(0.0, min(max_price, min_price))
+    return BuyerBudgetRange(
+        min_price=round(min_price, 2),
+        max_price=round(max_price, 2),
+    ).model_dump()
+
+
+def _annotate_buyer_market_feasibility(
+    buyer: dict[str, Any],
+    flats: list[dict[str, Any]],
+    price_by_flat_id: dict[str, float],
+    archetypes: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Annotate buyer feasibility against the sampled flat market."""
+    flat_index = {flat["flat_id"]: flat for flat in flats}
+    effective_ceiling = float(buyer["financials"]["effective_ceiling"])
+    feasible_flat_ids = [
+        flat["flat_id"]
+        for flat in flats
+        if float(price_by_flat_id.get(str(flat["flat_id"]), 0.0)) <= effective_ceiling
+    ]
+    buyer["feasible_flat_ids"] = feasible_flat_ids
+    if not feasible_flat_ids:
+        buyer["retained"] = False
+        return False
+
+    if archetypes is not None:
+        reachable_flats = [flat_index[flat_id] for flat_id in feasible_flat_ids]
+        buyer["preferences"] = {"preferences": []}
+        buyer["preference_classification_input"] = (
+            _build_preference_classification_input(
+                buyer,
+                reachable_flats,
+                archetypes,
+            )
+        )
+        buyer["retained"] = True
+    return True
+
+
+def _sample_buyer_home_town(
+    flats: list[dict[str, Any]],
+    planning_areas: tuple[str, ...],
+    *,
+    rng: random.Random,
+) -> str:
+    town_counts: dict[str, int] = {}
+    for flat in flats:
+        town = str(flat.get("town", "")).strip()
+        if not town:
+            continue
+        town_counts[town] = town_counts.get(town, 0) + 1
+
+    eligible_towns = [
+        town for town in planning_areas if town_counts.get(town, 0) > 0
+    ]
+    if eligible_towns:
+        weights = [town_counts[town] for town in eligible_towns]
+        return str(rng.choices(eligible_towns, weights=weights, k=1)[0])
+    if planning_areas:
+        return planning_areas[0]
+    if town_counts:
+        return max(town_counts.items(), key=lambda item: item[1])[0]
+    return ""
+
+
+def _build_broad_buyers(
+    flats: list[dict[str, Any]],
+    price_by_flat_id: dict[str, float],
+    hedonic_calibrations: HedonicCalibrationStore,
+    donors: pd.DataFrame,
+    archetypes: list[dict[str, Any]],
+    *,
+    config: SegmentConfig,
+    rng: random.Random,
+    age_priors_by_town: dict[str, pd.DataFrame],
+    income_prior: pd.DataFrame,
+    distribution_tables: dict[str, pd.DataFrame],
+) -> list[dict[str, Any]]:
+    """Generate broad buyers conditioned on affordability for the sampled flats."""
+    broad_count = max(len(flats), math.ceil(len(flats) * config.buyer_pool_multiplier))
+    buyers: list[dict[str, Any]] = []
+    max_attempts = max(
+        broad_count,
+        broad_count * MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR,
+    )
+    attempts = 0
+    planning_areas = _coerce_planning_areas(config.town)
+
+    while len(buyers) < broad_count and attempts < max_attempts:
+        attempts += 1
+        index = len(buyers) + 1
+        buyer_town = _sample_buyer_home_town(
+            flats,
+            planning_areas,
+            rng=rng,
+        )
+        age_prior = age_priors_by_town.get(buyer_town)
+        if age_prior is None:
+            fallback_town = planning_areas[0] if planning_areas else buyer_town
+            age_prior = age_priors_by_town[fallback_town]
+            buyer_town = fallback_town
+
+        age_band = str(_weighted_choice(age_prior, "age_group", "population", rng))
+        income_band = _sample_income_band(income_prior, age_band, rng)
+        age = _sample_age_from_band(age_band, rng)
+
+        donor = _sample_nemotron_donor(
+            donors,
+            rng=rng,
+            planning_area=buyer_town,
+            age=age,
+        )
+
+        marital_status = _sample_donor_value(
+            donor,
+            "marital_status",
+            distribution_tables["marital"],
+            rng,
+        )
+        education_level = _sample_donor_value(
+            donor,
+            "education_level",
+            distribution_tables["education"],
+            rng,
+        )
+        occupation_category = _sample_donor_value(
+            donor,
+            "occupation",
+            distribution_tables["occupation"],
+            rng,
+        )
+
+        monthly_income = resolve_income_band_upper(income_band)
+        financials = compute_buyer_financials(
+            current_age=age,
+            monthly_income=monthly_income,
+        ).__dict__
+
+        buyer_record = {
+            "buyer_id": f"buyer_{config.year}_{index:05d}",
+            "town": buyer_town,
+            "age": age,
+            "income_band": income_band,
+            "marital_status": marital_status,
+            "education_level": education_level,
+            "occupation_category": occupation_category,
+            "industry": str(donor.get("industry", "")).strip(),
+            "general_persona": str(donor.get("persona", "")).strip(),
+            "financials": financials,
+            "retained": False,
+            "feasible_flat_ids": [],
+            "preferences": {"preferences": []},
+        }
+        reservation_price_prior = _draw_buyer_value_prior(
+            buyer_record,
+            hedonic_calibrations,
+            rng=rng,
+        )
+        buyer_record["reservation_price_prior"] = round(reservation_price_prior, 2)
+        buyer_record["budget"] = _build_buyer_budget(
+            buyer_record,
+            hedonic_calibrations,
+            rng=rng,
+        )
+        if not _annotate_buyer_market_feasibility(
+            buyer_record,
+            flats,
+            price_by_flat_id,
+            archetypes,
+        ):
+            continue
+        buyers.append(buyer_record)
+
+    if len(buyers) < broad_count:
+        logging.warning(
+            "Conditioned broad buyer generation only produced %s buyer(s) after %s attempts; broad target=%s.",
+            len(buyers),
+            attempts,
+            broad_count,
+        )
+
+    return buyers
+
+# ---------------------------------------------------------------------------
+# Step 6: Enrich sellers and buyers with model-based attributes.
+# ---------------------------------------------------------------------------
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
     text = str(raw_text or "").strip()
     try:
@@ -618,106 +1802,6 @@ def _compact_flat_for_preference_summary(flat: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _sample_flats_uniformly(
-    flats: list[dict[str, Any]],
-    *,
-    cap: int = MAX_REACHABLE_MARKET_SAMPLE_FLATS,
-) -> list[dict[str, Any]]:
-    if cap <= 0 or not flats:
-        return []
-    if len(flats) <= cap:
-        return list(flats)
-
-    step = (len(flats) - 1) / float(cap - 1) if cap > 1 else 0.0
-    sampled_indices: list[int] = []
-    seen_indices: set[int] = set()
-    for position in range(cap):
-        candidate_index = int(round(position * step)) if cap > 1 else 0
-        if candidate_index in seen_indices:
-            continue
-        sampled_indices.append(candidate_index)
-        seen_indices.add(candidate_index)
-
-    if len(sampled_indices) < cap:
-        for candidate_index in range(len(flats)):
-            if candidate_index in seen_indices:
-                continue
-            sampled_indices.append(candidate_index)
-            seen_indices.add(candidate_index)
-            if len(sampled_indices) >= cap:
-                break
-
-    sampled_indices.sort()
-    return [flats[index] for index in sampled_indices]
-
-
-def _sample_indices_uniformly(total_count: int, cap: int) -> list[int]:
-    if cap <= 0 or total_count <= 0:
-        return []
-    if total_count <= cap:
-        return list(range(total_count))
-
-    step = (total_count - 1) / float(cap - 1) if cap > 1 else 0.0
-    sampled_indices: list[int] = []
-    seen_indices: set[int] = set()
-    for position in range(cap):
-        candidate_index = int(round(position * step)) if cap > 1 else 0
-        if candidate_index in seen_indices:
-            continue
-        sampled_indices.append(candidate_index)
-        seen_indices.add(candidate_index)
-
-    if len(sampled_indices) < cap:
-        for candidate_index in range(total_count):
-            if candidate_index in seen_indices:
-                continue
-            sampled_indices.append(candidate_index)
-            seen_indices.add(candidate_index)
-            if len(sampled_indices) >= cap:
-                break
-
-    sampled_indices.sort()
-    return sampled_indices
-
-
-def _allocate_stratified_counts(
-    stratum_sizes: dict[str, int],
-    cap: int,
-) -> dict[str, int]:
-    """Allocate a fixed sample size proportionally across strata."""
-    total_count = sum(max(0, int(size)) for size in stratum_sizes.values())
-    if cap <= 0 or total_count <= 0:
-        return {stratum: 0 for stratum in stratum_sizes}
-
-    capped_total = min(cap, total_count)
-    allocated: dict[str, int] = {}
-    remainders: list[tuple[float, str]] = []
-    for stratum, size in stratum_sizes.items():
-        normalized_size = max(0, int(size))
-        exact_share = (normalized_size / total_count) * capped_total
-        floor_share = min(normalized_size, int(math.floor(exact_share)))
-        allocated[stratum] = floor_share
-        remainders.append((exact_share - floor_share, stratum))
-
-    remaining = capped_total - sum(allocated.values())
-    remainders.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
-    while remaining > 0:
-        progressed = False
-        for _, stratum in remainders:
-            capacity_left = max(0, int(stratum_sizes[stratum])) - allocated[stratum]
-            if capacity_left <= 0:
-                continue
-            allocated[stratum] += 1
-            remaining -= 1
-            progressed = True
-            if remaining <= 0:
-                break
-        if not progressed:
-            break
-
-    return allocated
-
-
 def _build_market_bucket_summary(
     flats: list[dict[str, Any]],
     *,
@@ -842,7 +1926,6 @@ def _build_preference_classification_input(
             "industry": buyer["industry"],
             "general_persona": buyer["general_persona"],
         },
-        "financials": buyer["financials"],
         "reachable_market_summary": _build_reachable_market_summary(reachable_flats),
         "archetypes": archetypes,
     }
@@ -960,885 +2043,6 @@ def _constrain_buyer_preferences_to_reachable_market(
     )
 
 
-def _load_town_transactions(config: SegmentConfig) -> pd.DataFrame:
-    """Load all successful resale transactions for the configured town."""
-    frame = pd.read_csv(config.resale_path)
-    town_rows = frame[
-        frame["town"].map(lambda value: _matches_planning_area(value, config.town))
-    ].copy()
-    if town_rows.empty:
-        raise ValueError(
-            f"No resale rows found for planning_area={_planning_area_label(config.town)!r}."
-        )
-
-    town_rows["Date"] = pd.to_datetime(town_rows["Date"])
-    town_rows["flat_type_label"] = town_rows["flat_type"].map(_flat_type_from_row)
-    town_rows["sale_id"] = town_rows["sale_id"].astype(int)
-    return town_rows.sort_values(["Date", "sale_id"]).reset_index(drop=True)
-
-
-def _load_transactions(config: SegmentConfig) -> pd.DataFrame:
-    """Load the simulation window for the configured town-year segment."""
-    town_rows = _load_town_transactions(config)
-    filtered = town_rows[town_rows["year"].astype(int) == int(config.year)].copy()
-    filtered = filtered[filtered["Date"].dt.month.isin(config.segment_months)].copy()
-    if filtered.empty:
-        raise ValueError(
-            "No successful resale rows found for "
-            f"planning_area={_planning_area_label(config.town)!r} year={config.year} "
-            f"segment={config.segment_label!r}."
-        )
-    return filtered.reset_index(drop=True)
-
-
-def _restrain_transactions(
-    transactions: pd.DataFrame,
-    *,
-    restrained_seller_count: int | None,
-    sampled_flat_ratio: float | None = None,
-    rng: random.Random | None = None,
-) -> pd.DataFrame:
-    """Downsample transactions while preserving the observed flat-type mix."""
-    transactions = transactions.reset_index(drop=True)
-
-    if sampled_flat_ratio is not None:
-        if not (0 < sampled_flat_ratio <= 1):
-            raise ValueError("sampled_flat_ratio must be within (0, 1].")
-        if sampled_flat_ratio >= 1:
-            return transactions.reset_index(drop=True)
-
-        selected_frames: list[pd.DataFrame] = []
-        normalized_towns = transactions["town"].map(_normalize_text)
-        ordered_towns = list(dict.fromkeys(normalized_towns.tolist()))
-        for normalized_town in ordered_towns:
-            town_rows = transactions[normalized_towns == normalized_town].copy()
-            if town_rows.empty:
-                continue
-            town_target_count = max(
-                1,
-                math.ceil(len(town_rows) * sampled_flat_ratio),
-            )
-            if town_target_count >= len(town_rows):
-                selected_frames.append(town_rows)
-                continue
-            selected_frames.append(
-                _restrain_transactions(
-                    town_rows,
-                    restrained_seller_count=town_target_count,
-                    sampled_flat_ratio=None,
-                    rng=rng,
-                )
-            )
-
-        if not selected_frames:
-            return transactions.iloc[0:0].copy().reset_index(drop=True)
-        return (
-            pd.concat(selected_frames, ignore_index=True)
-            .sort_values(["Date", "sale_id"])
-            .reset_index(drop=True)
-        )
-
-    if restrained_seller_count is None:
-        return transactions.reset_index(drop=True)
-    if restrained_seller_count <= 0:
-        raise ValueError("restrained_seller_count must be positive when provided.")
-    if len(transactions) <= restrained_seller_count:
-        return transactions.reset_index(drop=True)
-
-    flat_type_series = (
-        transactions["flat_type_label"]
-        .fillna("unknown")
-        .astype(str)
-        .str.strip()
-        .replace("", "unknown")
-    )
-    stratum_sizes = {
-        str(flat_type): int(count)
-        for flat_type, count in flat_type_series.value_counts(sort=False).items()
-    }
-    allocated_counts = _allocate_stratified_counts(
-        stratum_sizes,
-        restrained_seller_count,
-    )
-
-    selected_indices: list[int] = []
-    for flat_type, sample_count in sorted(allocated_counts.items()):
-        if sample_count <= 0:
-            continue
-        stratum_indices = flat_type_series[flat_type_series == flat_type].index.tolist()
-        if sample_count >= len(stratum_indices):
-            selected_indices.extend(stratum_indices)
-            continue
-        if rng is None:
-            relative_indices = _sample_indices_uniformly(
-                total_count=len(stratum_indices),
-                cap=sample_count,
-            )
-            selected_indices.extend(
-                stratum_indices[index] for index in relative_indices
-            )
-        else:
-            selected_indices.extend(rng.sample(stratum_indices, k=sample_count))
-
-    selected_indices = sorted(set(selected_indices))
-    if len(selected_indices) < restrained_seller_count:
-        selected_set = set(selected_indices)
-        remaining_indices = [
-            index for index in transactions.index.tolist() if index not in selected_set
-        ]
-        deficit = restrained_seller_count - len(selected_indices)
-        if rng is None:
-            relative_indices = _sample_indices_uniformly(
-                total_count=len(remaining_indices),
-                cap=deficit,
-            )
-            selected_indices.extend(
-                remaining_indices[index] for index in relative_indices
-            )
-        else:
-            selected_indices.extend(rng.sample(remaining_indices, k=deficit))
-        selected_indices = sorted(selected_indices)
-
-    return transactions.iloc[selected_indices].copy().reset_index(drop=True)
-
-
-def _build_hedonic_training_flats(
-    transactions: pd.DataFrame,
-    *,
-    town: Any,
-    window_start: pd.Timestamp,
-) -> list[dict[str, Any]]:
-    """Build the fixed 6-month pre-window pool used for hedonic calibration."""
-    cutoff_date = window_start - pd.Timedelta(days=183)
-    training_rows = transactions[
-        (transactions["town"].map(lambda value: _matches_planning_area(value, town)))
-        & (transactions["Date"] < window_start)
-        & (transactions["Date"] >= cutoff_date)
-    ].copy()
-
-    training_flats: list[dict[str, Any]] = []
-    for row in training_rows.itertuples(index=False):
-        training_flats.append(
-            {
-                "town": str(row.town).strip(),
-                "transaction_date": pd.Timestamp(row.Date).date().isoformat(),
-                "flat_type": str(row.flat_type_label),
-                "flat_model": str(row.flat_model).strip(),
-                "floor_area_sqm": float(row.floor_area_sqm),
-                "floor_range": str(row.storey_range).strip(),
-                "remaining_lease_years": round(float(row.remaining_lease) / 12.0, 2),
-                "observed_resale_price": float(row.resale_price),
-            }
-        )
-    return training_flats
-
-
-def _build_past_price_trends(
-    transactions: pd.DataFrame,
-    *,
-    town: str,
-    flat_type: str,
-    reference_date: pd.Timestamp,
-    fallback_price: float,
-) -> dict[str, Any]:
-    """Summarise same-town, same-flat-type transactions in the prior 6 months."""
-    cutoff_date = reference_date - pd.Timedelta(days=183)
-    history = transactions[
-        (transactions["town"].map(_normalize_text) == _normalize_text(town))
-        & (transactions["flat_type_label"] == flat_type)
-        & (transactions["Date"] < reference_date)
-        & (transactions["Date"] >= cutoff_date)
-    ].copy()
-
-    if history.empty:
-        return {
-            "transactions_6m": 0,
-            "min_price_6m": round(float(fallback_price), 2),
-            "max_price_6m": round(float(fallback_price), 2),
-        }
-
-    prices = history["resale_price"].astype(float)
-    return {
-        "transactions_6m": int(len(history)),
-        "min_price_6m": round(float(prices.min()), 2),
-        "max_price_6m": round(float(prices.max()), 2),
-    }
-
-
-def _build_flat_universe(
-    transactions: pd.DataFrame,
-    town_transactions: pd.DataFrame,
-    config: SegmentConfig,
-) -> list[dict[str, Any]]:
-    """Convert observed successful transactions into the simulated flat universe."""
-    date_min = transactions["Date"].min()
-    date_max = transactions["Date"].max()
-    date_span_days = max(1, int((date_max - date_min).days))
-    transaction_months = [
-        pd.Timestamp(value).to_period("M")
-        for value in transactions["Date"].tolist()
-    ]
-    ordered_months = sorted(dict.fromkeys(transaction_months))
-    initial_window_month_count = min(
-        config.initial_window_months,
-        len(ordered_months),
-    )
-    initial_window_months = set(ordered_months[:initial_window_month_count])
-    month_index_by_period = {
-        month_period: index
-        for index, month_period in enumerate(ordered_months)
-    }
-    initial_window_transaction_count = sum(
-        1 for month_period in transaction_months if month_period in initial_window_months
-    )
-    negotiating_cutoff = initial_window_transaction_count // 2
-
-    flats: list[dict[str, Any]] = []
-    initial_window_position = 0
-    for order_index, row in enumerate(transactions.itertuples(index=False), start=1):
-        transaction_date = pd.Timestamp(row.Date)
-        relative_timing = round((transaction_date - date_min).days / date_span_days, 6)
-        transaction_month = transaction_date.to_period("M")
-        month_index = month_index_by_period[transaction_month]
-        if transaction_month in initial_window_months:
-            initial_window_position += 1
-            current_initial_window_position = initial_window_position
-            if initial_window_position <= negotiating_cutoff:
-                initial_state = "negotiating"
-            else:
-                initial_state = "listed"
-            listing_release_week = 1
-        else:
-            current_initial_window_position = 0
-            initial_state = "not_yet_listed"
-            # Expand the active transaction window by one calendar month every
-            # four simulation weeks after the week-1 bootstrap window.
-            listing_release_week = (
-                1 + (4 * (month_index - initial_window_month_count + 1))
-            )
-
-        mall_names: list[str] = []
-        mall_value = row.nearby_mall_names
-        if isinstance(mall_value, list):
-            mall_items = mall_value
-        else:
-            mall_text = str(mall_value).strip()
-            if mall_text and mall_text != "[]":
-                try:
-                    parsed_malls = ast.literal_eval(mall_text)
-                    mall_items = parsed_malls if isinstance(parsed_malls, list) else []
-                except (SyntaxError, ValueError):
-                    mall_items = []
-            else:
-                mall_items = []
-        for item in mall_items:
-            cleaned = _clean_amenity_name(item)
-            if cleaned:
-                mall_names.append(cleaned)
-
-        mrt_names: list[str] = []
-        mrt_value = row.nearby_mrt_names_lines
-        if isinstance(mrt_value, list):
-            mrt_items = mrt_value
-        else:
-            mrt_text = str(mrt_value).strip()
-            if mrt_text and mrt_text != "[]":
-                try:
-                    parsed_mrt = ast.literal_eval(mrt_text)
-                    mrt_items = parsed_mrt if isinstance(parsed_mrt, list) else []
-                except (SyntaxError, ValueError):
-                    mrt_items = []
-            else:
-                mrt_items = []
-        for item in mrt_items:
-            if isinstance(item, dict):
-                station_name = _clean_amenity_name(item.get("station_name", ""))
-            else:
-                station_name = _clean_amenity_name(item)
-            if station_name and station_name not in mrt_names:
-                mrt_names.append(station_name)
-
-        school_names = _split_clean_amenity_names(row.pri_school_names_0_2km)
-
-        hawker_names = _split_clean_amenity_names(row.hawker_names_0_1km)
-        remaining_lease_years = round(float(row.remaining_lease) / 12.0, 2)
-        observed_price = float(row.resale_price)
-        past_price_trends = _build_past_price_trends(
-            town_transactions,
-            town=str(row.town).strip(),
-            flat_type=str(row.flat_type_label),
-            reference_date=transaction_date,
-            fallback_price=observed_price,
-        )
-
-        normalized_town = _normalize_text(row.town).replace(" ", "_")
-        flat_id_prefix = f"{config.year}_{normalized_town}"
-        if not config.is_full_year_segment:
-            flat_id_prefix = f"{flat_id_prefix}_{config.segment_label}"
-        flat_id = f"{flat_id_prefix}_{order_index:05d}"
-        flats.append(
-            {
-                "flat_id": flat_id,
-                "town": str(row.town).strip(),
-                "year": int(config.year),
-                "segment": config.segment_label,
-                "transaction_date": transaction_date.date().isoformat(),
-                "transaction_year_month": str(transaction_month),
-                "simulated_market_entry_date": (
-                    transaction_date
-                    - pd.DateOffset(months=config.lead_months)
-                ).date().isoformat(),
-                "initialization_order": order_index,
-                "relative_transaction_timing": relative_timing,
-                "initial_market_state": initial_state,
-                "initial_window_position": int(current_initial_window_position),
-                "initial_window_size": int(initial_window_transaction_count),
-                "listing_release_week": int(max(1, listing_release_week)),
-                "address": str(row.address).strip(),
-                "flat_type": str(row.flat_type_label),
-                "floor_range": str(row.storey_range).strip(),
-                "floor_area_sqm": float(row.floor_area_sqm),
-                "flat_model": str(row.flat_model).strip(),
-                "lease_commencement_year": int(row.lease_commence_date),
-                "remaining_lease_years": remaining_lease_years,
-                "observed_resale_price": observed_price,
-                "amenities": {
-                    "mrt": {
-                        "count": len(mrt_names),
-                        "station_names": mrt_names,
-                    },
-                    "primary_schools": {
-                        "count": int(row.num_pri_schools_0_2km),
-                        "school_names": school_names,
-                    },
-                    "malls": {
-                        "count": len(mall_names),
-                        "mall_names": mall_names,
-                    },
-                    "hawker_centres": {
-                        "count": len(hawker_names),
-                        "hawker_names": hawker_names,
-                    },
-                },
-                "past_price_trends": past_price_trends,
-            }
-        )
-
-    return flats
-
-
-def _sample_seller_demographics(
-    flat_type: str,
-    distribution_tables: dict[str, pd.DataFrame],
-    rng: random.Random,
-) -> dict[str, Any]:
-    """Sample seller demographics conditional on the observed flat type."""
-    age_frame = _filter_dwelling_distribution(distribution_tables["age"], flat_type)
-    marital_frame = _filter_dwelling_distribution(
-        distribution_tables["marital"], flat_type
-    )
-    education_frame = _filter_dwelling_distribution(
-        distribution_tables["education"], flat_type
-    )
-    occupation_frame = _filter_dwelling_distribution(
-        distribution_tables["occupation"], flat_type
-    )
-
-    age_band = str(_weighted_choice(age_frame, age_frame.columns[1], "count", rng))
-    marital_status = str(
-        _weighted_choice(marital_frame, marital_frame.columns[1], "count", rng)
-    )
-    education_level = str(
-        _weighted_choice(education_frame, education_frame.columns[1], "count", rng)
-    )
-    occupation_category = str(
-        _weighted_choice(occupation_frame, occupation_frame.columns[1], "count", rng)
-    )
-
-    return {
-        "age": _sample_age_from_band(age_band, rng),
-        "marital_status": marital_status,
-        "education_level": education_level,
-        "occupation_category": occupation_category,
-    }
-
-
-def _build_seller_flat(flat: dict[str, Any]) -> dict[str, Any]:
-    """Map flat-universe fields into the shared Flat schema used by sellers."""
-    nearby_amenities = [
-        Amenity(name=name, type=AmenityType.MRT, radius="Within 1km").model_dump()
-        for raw_name in flat["amenities"]["mrt"]["station_names"]
-        if (name := _clean_amenity_name(raw_name))
-    ]
-    nearby_amenities.extend(
-        Amenity(
-            name=name, type=AmenityType.SCHOOL, radius="Within 2km"
-        ).model_dump()
-        for raw_name in flat["amenities"]["primary_schools"]["school_names"]
-        if (name := _clean_amenity_name(raw_name))
-    )
-    nearby_amenities.extend(
-        Amenity(name=name, type=AmenityType.MALL, radius="Within 1km").model_dump()
-        for raw_name in flat["amenities"]["malls"]["mall_names"]
-        if (name := _clean_amenity_name(raw_name))
-    )
-    nearby_amenities.extend(
-        Amenity(
-            name=name, type=AmenityType.HAWKER, radius="Within 1km"
-        ).model_dump()
-        for raw_name in flat["amenities"]["hawker_centres"]["hawker_names"]
-        if (name := _clean_amenity_name(raw_name))
-    )
-
-    return Flat(
-        flat_type=flat["flat_type"],
-        address=flat["address"],
-        description=(
-            f'{flat["flat_type"]} flat in {flat["town"]} with '
-            f'{flat["floor_area_sqm"]:.0f} sqm and '
-            f'{flat["remaining_lease_years"]:.1f} years remaining lease.'
-        ),
-        town=flat["town"],
-        storey_range=flat["floor_range"],
-        remaining_lease=flat["remaining_lease_years"],
-        contra=False,
-        extension_of_stay=False,
-        ethnic_eligibility="Unknown",
-        spr_eligibility="Unknown",
-        floor_area_sqm=flat["floor_area_sqm"],
-        nearby_amenities=nearby_amenities,
-    ).model_dump()
-
-
-def _build_seller_expectations(
-    flat: dict[str, Any],
-    hedonic_training_flats: list[dict[str, Any]],
-    *,
-    rng: random.Random,
-) -> dict[str, Any]:
-    """Sample a seller reservation / asking range around the hedonic anchor."""
-    town_conditioned_training_flats = _select_hedonic_training_flats(
-        hedonic_training_flats,
-        town=flat.get("town"),
-    )
-    training_flats = (
-        town_conditioned_training_flats
-        if town_conditioned_training_flats
-        else hedonic_training_flats
-    )
-    anchor_log_price, sigma_log_price = _estimate_hedonic_price(
-        training_flats,
-        target_flat=flat,
-    )
-    reservation_price = float(
-        np.exp(rng.normalvariate(anchor_log_price, sigma_log_price))
-    )
-    ask_price = max(
-        reservation_price,
-        float(np.exp(anchor_log_price + sigma_log_price)),
-    )
-    return SellerExpectationRange(
-        min_price=round(reservation_price, 2),
-        max_price=round(ask_price, 2),
-    ).model_dump()
-
-
-def _build_sellers(
-    flats: list[dict[str, Any]],
-    hedonic_training_flats: list[dict[str, Any]],
-    distribution_tables: dict[str, pd.DataFrame],
-    donors: pd.DataFrame,
-    seller_archetypes: list[dict[str, Any]],
-    *,
-    config: SegmentConfig,
-    rng: random.Random,
-) -> list[dict[str, Any]]:
-    """Create one synthetic seller per observed flat and attach LLM-ready motivation input."""
-    sellers: list[dict[str, Any]] = []
-    for index, flat in enumerate(flats, start=1):
-        demographics = _sample_seller_demographics(
-            flat["flat_type"], distribution_tables, rng
-        )
-        donor = _sample_nemotron_donor(
-            donors,
-            rng=rng,
-            planning_area=flat["town"],
-            age=demographics["age"],
-            marital_status=demographics["marital_status"],
-            education_level=demographics["education_level"],
-            occupation=demographics["occupation_category"],
-        )
-
-        seller_record = {
-            "seller_id": f"seller_{config.year}_{index:05d}",
-            "linked_flat_id": flat["flat_id"],
-            "initialization_order": flat["initialization_order"],
-            "initial_market_state": flat["initial_market_state"],
-            "initial_window_position": int(flat.get("initial_window_position", 0) or 0),
-            "initial_window_size": int(flat.get("initial_window_size", 0) or 0),
-            "listing_release_week": int(flat.get("listing_release_week", 1) or 1),
-            "transaction_year_month": str(flat.get("transaction_year_month", "")).strip(),
-            "age": demographics["age"],
-            "marital_status": demographics["marital_status"],
-            "education_level": demographics["education_level"],
-            "occupation_category": demographics["occupation_category"],
-            "industry": str(donor.get("industry", "")).strip(),
-            "general_persona": str(donor.get("persona", "")).strip(),
-            "flat": _build_seller_flat(flat),
-            "expectations": _build_seller_expectations(
-                flat,
-                hedonic_training_flats,
-                rng=rng,
-            ),
-            "seller_motivations": {
-                "seller_archetype_type": "",
-                "motivation_summary": "",
-                "reasons": [],
-            },
-        }
-        seller_record["seller_motivation_generation_input"] = (
-            _build_seller_motivation_generation_input(seller_record, seller_archetypes)
-        )
-        sellers.append(seller_record)
-    return sellers
-
-
-def _load_buyer_age_prior(path: Path, town: str) -> pd.DataFrame:
-    """Load the town-level buyer age prior used to seed the broad buyer pool."""
-    planning_areas = _coerce_planning_areas(town)
-    frame = pd.read_csv(path).fillna("")
-    if not {"planning_area", "age_group", "population"}.issubset(frame.columns):
-        frame = pd.concat(
-            [build_planning_area_age_groups(planning_area) for planning_area in planning_areas],
-            ignore_index=True,
-        ).fillna("")
-    subset = frame[
-        frame["planning_area"].map(lambda value: _matches_planning_area(value, town))
-    ].copy()
-    subset["age_group"] = subset["age_group"].map(_canonical_buyer_age_prior_group)
-    subset = subset[subset["age_group"].astype(bool)].copy()
-    if subset.empty:
-        raise ValueError(
-            "No buyer age prior found for planning_area="
-            f"{_planning_area_label(town)!r} within the supported age range "
-            f"{BUYER_AGE_PRIOR_GROUPS[0]!r} to {BUYER_AGE_PRIOR_GROUPS[-1]!r}."
-        )
-    age_group_order = {
-        label: index for index, label in enumerate(BUYER_AGE_PRIOR_GROUPS)
-    }
-    grouped = (
-        subset.groupby("age_group", as_index=False)["population"]
-        .sum()
-        .reset_index(drop=True)
-    )
-    grouped["age_group_order"] = grouped["age_group"].map(age_group_order)
-    grouped = grouped.sort_values("age_group_order").reset_index(drop=True)
-    grouped = grouped.drop(columns=["age_group_order"])
-    grouped["population"] = grouped["population"].astype(float)
-    return grouped[grouped["population"] > 0].copy()
-
-
-def _load_buyer_age_priors_by_town(
-    path: Path,
-    towns: Any,
-) -> dict[str, pd.DataFrame]:
-    planning_areas = _coerce_planning_areas(towns)
-    return {
-        planning_area: _load_buyer_age_prior(path, planning_area)
-        for planning_area in planning_areas
-    }
-
-
-def _sample_income_band(
-    income_prior: pd.DataFrame, age_band: str, rng: random.Random
-) -> str:
-    def _income_band_allowed(value: object) -> bool:
-        band = INCOME_BANDS.get(str(value).strip())
-        if band is None:
-            return False
-        lower = band.get("lower")
-        return lower is not None and float(lower) >= MIN_BUYER_INCOME_BAND_LOWER
-
-    age_group = _income_age_group_for_band(age_band, rng)
-    subset = income_prior[
-        (income_prior["age_group"].map(_normalize_text) == _normalize_text(age_group))
-        & (income_prior["sex"].map(_normalize_text) == "total")
-        & (income_prior["income_band"].map(_normalize_text) != "total")
-    ].copy()
-    if subset.empty:
-        subset = income_prior[
-            (income_prior["sex"].map(_normalize_text) == "total")
-            & (income_prior["income_band"].map(_normalize_text) != "total")
-        ].copy()
-    subset = subset[subset["income_band"].map(_income_band_allowed)]
-    subset["count"] = subset["count"].astype(float)
-    subset = subset[subset["count"] > 0]
-    if subset.empty:
-        raise ValueError(
-            "No eligible buyer income bands remain after applying the minimum "
-            f"lower-bound filter of {MIN_BUYER_INCOME_BAND_LOWER:.0f}."
-        )
-    return str(_weighted_choice(subset, "income_band", "count", rng))
-
-
-def _sample_overall_distribution(
-    frame: pd.DataFrame,
-    value_column: str,
-    rng: random.Random,
-) -> str:
-    dwelling_col = frame.columns[0]
-    subset = frame[
-        frame[dwelling_col].map(_normalize_text) == _normalize_text("HDB Dwellings")
-    ].copy()
-    subset["count"] = subset["count"].astype(float)
-    subset = subset[subset["count"] > 0]
-    return str(_weighted_choice(subset, value_column, "count", rng))
-
-
-def _estimate_buyer_hedonic_anchor(
-    buyer: dict[str, Any],
-    hedonic_training_flats: list[dict[str, Any]],
-) -> tuple[float, float]:
-    """Estimate the buyer-specific hedonic anchor and spread."""
-    preference_payload = buyer.get("preferences", {})
-    preferred_flat_types: list[str] = []
-    if preference_payload.get("preferences"):
-        preferred_flat_types = BuyerPreferenceProfile.model_validate(
-            preference_payload
-        ).values_for("flat_type")
-    training_flats = _select_hedonic_training_flats(
-        hedonic_training_flats,
-        town=buyer["town"],
-        preferred_flat_types=preferred_flat_types,
-    )
-    if not training_flats:
-        training_flats = hedonic_training_flats
-    return _estimate_hedonic_price(training_flats)
-
-
-def _draw_buyer_value_prior(
-    buyer: dict[str, Any],
-    hedonic_training_flats: list[dict[str, Any]],
-    *,
-    rng: random.Random,
-) -> float:
-    """Draw a buyer's private valuation prior from the relevant hedonic market."""
-    anchor_log_price, sigma_log_price = _estimate_buyer_hedonic_anchor(
-        buyer,
-        hedonic_training_flats,
-    )
-    return float(np.exp(rng.normalvariate(anchor_log_price, sigma_log_price)))
-
-
-def _build_buyer_budget(
-    buyer: dict[str, Any],
-    hedonic_training_flats: list[dict[str, Any]],
-    *,
-    rng: random.Random,
-) -> dict[str, Any]:
-    """Build hard buyer budget bounds from financial feasibility."""
-    del rng  # Budget bounds are deterministic once buyer features are fixed.
-    anchor_log_price, sigma_log_price = _estimate_buyer_hedonic_anchor(
-        buyer,
-        hedonic_training_flats,
-    )
-    max_price = float(buyer["financials"]["effective_ceiling"])
-    min_price = max(0.0, float(np.exp(anchor_log_price - sigma_log_price)))
-    if max_price < min_price:
-        min_price = max(0.0, min(max_price, min_price))
-    return BuyerBudgetRange(
-        min_price=round(min_price, 2),
-        max_price=round(max_price, 2),
-    ).model_dump()
-
-
-def _annotate_buyer_market_feasibility(
-    buyer: dict[str, Any],
-    flats: list[dict[str, Any]],
-    price_by_flat_id: dict[str, float],
-    archetypes: list[dict[str, Any]] | None = None,
-) -> bool:
-    """Annotate buyer feasibility against the sampled flat market."""
-    flat_index = {flat["flat_id"]: flat for flat in flats}
-    effective_ceiling = float(buyer["financials"]["effective_ceiling"])
-    feasible_flat_ids = [
-        flat["flat_id"]
-        for flat in flats
-        if float(price_by_flat_id.get(str(flat["flat_id"]), 0.0)) <= effective_ceiling
-    ]
-    buyer["feasible_flat_ids"] = feasible_flat_ids
-    if not feasible_flat_ids:
-        buyer["retained"] = False
-        return False
-
-    if archetypes is not None:
-        reachable_flats = [flat_index[flat_id] for flat_id in feasible_flat_ids]
-        buyer["preferences"] = {"preferences": []}
-        buyer["preference_classification_input"] = (
-            _build_preference_classification_input(
-                buyer,
-                reachable_flats,
-                archetypes,
-            )
-        )
-        buyer["retained"] = True
-    return True
-
-
-def _sample_buyer_home_town(
-    flats: list[dict[str, Any]],
-    planning_areas: tuple[str, ...],
-    *,
-    rng: random.Random,
-) -> str:
-    town_counts: dict[str, int] = {}
-    for flat in flats:
-        town = str(flat.get("town", "")).strip()
-        if not town:
-            continue
-        town_counts[town] = town_counts.get(town, 0) + 1
-
-    eligible_towns = [
-        town for town in planning_areas if town_counts.get(town, 0) > 0
-    ]
-    if eligible_towns:
-        weights = [town_counts[town] for town in eligible_towns]
-        return str(rng.choices(eligible_towns, weights=weights, k=1)[0])
-    if planning_areas:
-        return planning_areas[0]
-    if town_counts:
-        return max(town_counts.items(), key=lambda item: item[1])[0]
-    return ""
-
-
-def _build_broad_buyers(
-    flats: list[dict[str, Any]],
-    price_by_flat_id: dict[str, float],
-    hedonic_training_flats: list[dict[str, Any]],
-    donors: pd.DataFrame,
-    archetypes: list[dict[str, Any]],
-    *,
-    config: SegmentConfig,
-    rng: random.Random,
-    age_priors_by_town: dict[str, pd.DataFrame],
-    income_prior: pd.DataFrame,
-    distribution_tables: dict[str, pd.DataFrame],
-) -> list[dict[str, Any]]:
-    """Generate broad buyers conditioned on affordability for the sampled flats."""
-    broad_count = max(len(flats), math.ceil(len(flats) * config.buyer_pool_multiplier))
-    buyers: list[dict[str, Any]] = []
-    max_attempts = max(
-        broad_count,
-        broad_count * MAX_BROAD_BUYER_GENERATION_ATTEMPT_FACTOR,
-    )
-    attempts = 0
-    planning_areas = _coerce_planning_areas(config.town)
-
-    while len(buyers) < broad_count and attempts < max_attempts:
-        attempts += 1
-        index = len(buyers) + 1
-        buyer_town = _sample_buyer_home_town(
-            flats,
-            planning_areas,
-            rng=rng,
-        )
-        age_prior = age_priors_by_town.get(buyer_town)
-        if age_prior is None:
-            fallback_town = planning_areas[0] if planning_areas else buyer_town
-            age_prior = age_priors_by_town[fallback_town]
-            buyer_town = fallback_town
-
-        age_band = str(_weighted_choice(age_prior, "age_group", "population", rng))
-        income_band = _sample_income_band(income_prior, age_band, rng)
-        age = _sample_age_from_band(age_band, rng)
-
-        donor = _sample_nemotron_donor(
-            donors,
-            rng=rng,
-            planning_area=buyer_town,
-            age=age,
-        )
-
-        marital_status = (
-            str(donor.get("marital_status", "")).strip()
-            if str(donor.get("marital_status", "")).strip()
-            else _sample_overall_distribution(
-                distribution_tables["marital"],
-                distribution_tables["marital"].columns[1],
-                rng,
-            )
-        )
-        education_level = (
-            str(donor.get("education_level", "")).strip()
-            if str(donor.get("education_level", "")).strip()
-            else _sample_overall_distribution(
-                distribution_tables["education"],
-                distribution_tables["education"].columns[1],
-                rng,
-            )
-        )
-        occupation_category = (
-            str(donor.get("occupation", "")).strip()
-            if str(donor.get("occupation", "")).strip()
-            else _sample_overall_distribution(
-                distribution_tables["occupation"],
-                distribution_tables["occupation"].columns[1],
-                rng,
-            )
-        )
-
-        monthly_income = resolve_income_band_upper(income_band)
-        financials = compute_buyer_financials(
-            current_age=age,
-            monthly_income=monthly_income,
-        ).__dict__
-
-        buyer_record = {
-            "buyer_id": f"buyer_{config.year}_{index:05d}",
-            "town": buyer_town,
-            "age": age,
-            "income_band": income_band,
-            "marital_status": marital_status,
-            "education_level": education_level,
-            "occupation_category": occupation_category,
-            "industry": str(donor.get("industry", "")).strip(),
-            "general_persona": str(donor.get("persona", "")).strip(),
-            "financials": financials,
-            "retained": False,
-            "feasible_flat_ids": [],
-            "preferences": {"preferences": []},
-        }
-        reservation_price_prior = _draw_buyer_value_prior(
-            buyer_record,
-            hedonic_training_flats,
-            rng=rng,
-        )
-        buyer_record["reservation_price_prior"] = round(reservation_price_prior, 2)
-        buyer_record["budget"] = _build_buyer_budget(
-            buyer_record,
-            hedonic_training_flats,
-            rng=rng,
-        )
-        if not _annotate_buyer_market_feasibility(
-            buyer_record,
-            flats,
-            price_by_flat_id,
-            archetypes,
-        ):
-            continue
-        buyers.append(buyer_record)
-
-    if len(buyers) < broad_count:
-        logging.warning(
-            "Conditioned broad buyer generation only produced %s buyer(s) after %s attempts; broad target=%s.",
-            len(buyers),
-            attempts,
-            broad_count,
-        )
-
-    return buyers
-
-
 def _populate_seller_motivations(
     sellers: list[dict[str, Any]],
     *,
@@ -1860,7 +2064,7 @@ def _populate_seller_motivations(
 
 def _populate_buyer_preferences(
     buyers: list[dict[str, Any]],
-    hedonic_training_flats: list[dict[str, Any]],
+    hedonic_calibrations: HedonicCalibrationStore,
     *,
     model: VLLMLanguageModel,
     rng: random.Random,
@@ -1882,17 +2086,20 @@ def _populate_buyer_preferences(
         ).model_dump()
         reservation_price_prior = _draw_buyer_value_prior(
             buyer,
-            hedonic_training_flats,
+            hedonic_calibrations,
             rng=rng,
         )
         buyer["reservation_price_prior"] = round(reservation_price_prior, 2)
         buyer["budget"] = _build_buyer_budget(
             buyer,
-            hedonic_training_flats,
+            hedonic_calibrations,
             rng=rng,
         )
 
 
+# ---------------------------------------------------------------------------
+# Step 7: Retain, validate, and cap the feasible buyer pool.
+# ---------------------------------------------------------------------------
 def _retain_feasible_buyers(
     buyers: list[dict[str, Any]],
     flats: list[dict[str, Any]],
@@ -1915,6 +2122,9 @@ def _retain_feasible_buyers(
     return retained
 
 
+# ---------------------------------------------------------------------------
+# Step 8: Match sellers to feasible buyers.
+# ---------------------------------------------------------------------------
 def _validate_negotiating_seller_seedability(
     sellers: list[dict[str, Any]],
     buyers: list[dict[str, Any]],
@@ -1951,57 +2161,6 @@ def _validate_seller_candidate_coverage(
             continue
         uncovered_seller_ids.append(seller_id)
     return not uncovered_seller_ids, uncovered_seller_ids
-
-
-def _validate_market_quantile_dominance(
-    sellers: list[dict[str, Any]],
-    buyers: list[dict[str, Any]],
-) -> tuple[bool, dict[str, Any]]:
-    """Computes market-level quantile-dominance diagnostics for buyer ceilings."""
-    listing_prices = np.array(
-        [
-            float(seller.get("expectations", {}).get("max_price", 0.0))
-            for seller in sellers
-            if float(seller.get("expectations", {}).get("max_price", 0.0)) > 0.0
-        ],
-        dtype=float,
-    )
-    buyer_ceilings = np.array(
-        [
-            float(buyer.get("financials", {}).get("effective_ceiling", 0.0))
-            for buyer in buyers
-            if float(buyer.get("financials", {}).get("effective_ceiling", 0.0)) > 0.0
-        ],
-        dtype=float,
-    )
-    if listing_prices.size == 0 or buyer_ceilings.size == 0:
-        diagnostics = {
-            "ok": False,
-            "reason": "empty_market_or_buyers",
-            "listing_count": int(listing_prices.size),
-            "buyer_count": int(buyer_ceilings.size),
-        }
-        return False, diagnostics
-
-    quantiles = np.array(MARKET_QUANTILE_DOMINANCE_GRID, dtype=float)
-    listing_quantiles = np.quantile(listing_prices, quantiles)
-    buyer_quantiles = np.quantile(buyer_ceilings, quantiles)
-    gaps = buyer_quantiles - listing_quantiles
-    top_supported = float(np.max(buyer_ceilings)) >= float(np.max(listing_prices))
-    diagnostics = {
-        "ok": bool(np.all(gaps >= 0.0) and top_supported),
-        "quantiles": quantiles.tolist(),
-        "listing_quantiles": np.round(listing_quantiles, 2).tolist(),
-        "buyer_quantiles": np.round(buyer_quantiles, 2).tolist(),
-        "gaps": np.round(gaps, 2).tolist(),
-        "min_gap": round(float(np.min(gaps)), 2),
-        "max_listing_price": round(float(np.max(listing_prices)), 2),
-        "max_buyer_ceiling": round(float(np.max(buyer_ceilings)), 2),
-        "top_supported": bool(top_supported),
-        "listing_count": int(listing_prices.size),
-        "buyer_count": int(buyer_ceilings.size),
-    }
-    return bool(diagnostics["ok"]), diagnostics
 
 
 def _cap_retained_buyers(
@@ -2288,10 +2447,13 @@ def _annotate_seller_potential_matches(
         )
 
 
+# ---------------------------------------------------------------------------
+# Step 9: Retry buyer-pool generation until segment constraints pass.
+# ---------------------------------------------------------------------------
 def _build_buyer_pools_with_regeneration(
     sellers: list[dict[str, Any]],
     flats: list[dict[str, Any]],
-    hedonic_training_flats: list[dict[str, Any]],
+    hedonic_calibrations: HedonicCalibrationStore,
     donors: pd.DataFrame,
     archetypes: list[dict[str, Any]],
     *,
@@ -2326,7 +2488,7 @@ def _build_buyer_pools_with_regeneration(
         broad_buyers = _build_broad_buyers(
             flats,
             price_by_flat_id,
-            hedonic_training_flats,
+            hedonic_calibrations,
             donors,
             archetypes,
             config=config,
@@ -2365,21 +2527,6 @@ def _build_buyer_pools_with_regeneration(
                 target_retained_buyer_count,
             )
             continue
-
-        (
-            market_support_ok,
-            market_support_diagnostics,
-        ) = _validate_market_quantile_dominance(
-            sellers,
-            oversampled_retained_buyers,
-        )
-        if not market_support_ok:
-            logging.info(
-                "Market quantile dominance diagnostic flagged oversampled buyer pool %s/%s: %s",
-                broad_attempt,
-                MAX_OVERSAMPLED_BUYER_POOL_REGEN_ATTEMPTS,
-                market_support_diagnostics,
-            )
 
         retained_buyers = _cap_retained_buyers(
             sellers,
@@ -2483,9 +2630,15 @@ def _build_buyer_pools_with_regeneration(
     )
 
 
+# ---------------------------------------------------------------------------
+# Main Entry Points
+# ---------------------------------------------------------------------------
 def build_transaction_conditioned_segment(
     config: SegmentConfig,
     model: VLLMLanguageModel | None = None,
+    *,
+    model_source: str = "local",
+    download_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run the end-to-end preprocessing pipeline for one town-year market segment."""
     logging.info(
@@ -2510,7 +2663,11 @@ def build_transaction_conditioned_segment(
     logging.info(
         "Loaded demographic priors and distribution tables from configured CSV inputs."
     )
-    donors = _load_nemotron_pool(config.nemotron_dir)
+    donors = _load_nemotron_pool(
+        config.nemotron_dir,
+        allow_download=str(model_source).strip().casefold() == "download",
+        download_dir=download_dir,
+    )
     buyer_archetypes_path = config.survey_archetypes_path or DEFAULT_BUYER_ARCHETYPES_PATH
     seller_archetypes_path = (
         config.seller_archetypes_path or DEFAULT_SELLER_ARCHETYPES_PATH
@@ -2524,8 +2681,15 @@ def build_transaction_conditioned_segment(
         label="seller",
     )
 
-    town_transactions = _load_town_transactions(config)
-    transactions = _load_transactions(config)
+    all_transactions = _load_resale_transactions(config)
+    town_transactions = _load_town_transactions(
+        config,
+        transactions=all_transactions,
+    )
+    transactions = _load_transactions(
+        config,
+        town_rows=town_transactions,
+    )
     logging.info(
         "Loaded %s town transactions and %s total transaction rows.",
         len(town_transactions),
@@ -2533,12 +2697,12 @@ def build_transaction_conditioned_segment(
     )
     window_start = pd.Timestamp(transactions["Date"].min())
     hedonic_training_flats = _build_hedonic_training_flats(
-        town_transactions,
-        town=config.town,
+        all_transactions,
         window_start=window_start,
     )
+    hedonic_calibrations = _build_hedonic_calibrations(hedonic_training_flats)
     logging.info(
-        "Prepared %s hedonic training flats using transaction window ending at %s.",
+        "Prepared %s all-town hedonic training flats for the reusable fallback-capable calibration pool using the 6-month window ending at %s.",
         len(hedonic_training_flats),
         window_start,
     )
@@ -2584,7 +2748,7 @@ def build_transaction_conditioned_segment(
         flats = _build_flat_universe(restrained_transactions, town_transactions, config)
         sellers = _build_sellers(
             flats,
-            hedonic_training_flats,
+            hedonic_calibrations,
             distribution_tables,
             donors,
             seller_archetypes,
@@ -2595,7 +2759,7 @@ def build_transaction_conditioned_segment(
             broad_buyers, retained_buyers = _build_buyer_pools_with_regeneration(
                 sellers,
                 flats,
-                hedonic_training_flats,
+                hedonic_calibrations,
                 donors,
                 archetypes,
                 config=config,
@@ -2638,7 +2802,7 @@ def build_transaction_conditioned_segment(
         _populate_seller_motivations(sellers, model=model)
         _populate_buyer_preferences(
             retained_buyers,
-            hedonic_training_flats,
+            hedonic_calibrations,
             model=model,
             rng=rng,
         )

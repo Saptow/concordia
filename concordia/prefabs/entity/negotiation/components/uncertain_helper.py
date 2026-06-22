@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
+from concordia.components import helpers as component_helpers
 from concordia.components.agent import memory as memory_component
 from concordia.hdb_simulation.models.schemas.common import NormalDistribution
 from pydantic import BaseModel, Field, ValidationError
@@ -31,7 +32,7 @@ def truncate_prompt_text(
     if max_chars <= 10:
         return normalized[:max_chars]
     if not middle:
-        return normalized[: max_chars - 3].rstrip() + '...'
+        return component_helpers.truncate_text(normalized, max_chars=max_chars)
 
     marker = '\n\n... [truncated] ...\n\n'
     available = max_chars - len(marker)
@@ -301,9 +302,7 @@ def format_interval(interval: Tuple[float, float]) -> str:
 
 def format_observation_summary(observation: str, max_chars: int = 180) -> str:
     normalized = ' '.join(str(observation).split())
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[: max_chars - 3].rstrip() + '...'
+    return component_helpers.truncate_text(normalized, max_chars=max_chars)
 
 
 def append_debug_trace(debug_trace: List[str], message: str, limit: int = 12) -> None:
@@ -330,29 +329,10 @@ def normalize_text(value: str) -> str:
 
 
 def coerce_positive_float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
+    parsed = component_helpers.coerce_positive_float_or_none(value)
+    if parsed is None:
         return float(default)
-    return parsed if parsed > 0.0 else float(default)
-
-
-def extract_first_json_object(text: str) -> str | None:
-    candidate = str(text or '').strip()
-    start = candidate.find('{')
-    if start < 0:
-        return None
-    candidate = candidate[start:]
-    depth = 0
-    for idx, ch in enumerate(candidate):
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                return candidate[: idx + 1]
-    return None
-
+    return parsed
 
 def extract_listing_handoff_state(observation: str) -> Dict[str, Any] | None:
     marker = 'Listing handoff context for this negotiation:'
@@ -363,7 +343,7 @@ def extract_listing_handoff_state(observation: str) -> Dict[str, Any] | None:
     payload_text = str(payload).strip()
     if not payload_text:
         return {}
-    payload_json = extract_first_json_object(payload)
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
         return {'listing_summary': payload_text}
     try:
@@ -681,7 +661,6 @@ __all__ = [
     'coerce_positive_float',
     'compute_issue_score',
     'discover_issues',
-    'extract_first_json_object',
     'extract_listing_handoff_state',
     'extract_observation_actor',
     'format_interval',

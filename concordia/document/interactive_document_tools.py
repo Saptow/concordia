@@ -117,12 +117,10 @@ class InteractiveDocumentWithTools(interactive_document.InteractiveDocument):
     if not self._tools:
       return ''
 
-    lines = ['\nAvailable tools (use JSON format to call):']
+    lines = ['Available tools (use JSON format to call):']
     for name, t in self._tools.items():
       lines.append(f'- {name}: {t.description}')
-    lines.append(
-        '\nTo use a tool, respond with: {"tool": "<name>", "args": {...}}'
-    )
+    lines.append('To use a tool, respond with: {"tool": "<name>", "args": {...}}')
     lines.append('After receiving tool results, provide your final answer.')
     return '\n'.join(lines)
 

@@ -22,8 +22,6 @@ DEFAULT_CURRENT_POLICY_PROMPT = (
     "No simulation-specific policies are currently in effect."
 )
 POLICY_SUMMARY_MAX_TOKENS = 768
-PRE_ACT_POLICY_STATE_MAX_CHARS = 120
-PRE_ACT_POLICY_GUIDANCE_MAX_CHARS = 240
 
 
 class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
@@ -40,9 +38,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         max_directory_candidates: int = (
             PolicyToolConfig.DEFAULT_MAX_DIRECTORY_CANDIDATES
         ),
-        max_page_chars: int = PolicyToolConfig.DEFAULT_MAX_PAGE_CHARS,
-        max_prompt_chars: int = PolicyToolConfig.DEFAULT_MAX_PROMPT_CHARS,
-        max_component_chars: int = PolicyToolConfig.DEFAULT_MAX_COMPONENT_CHARS,
         tool_call_retries: int = PolicyToolConfig.DEFAULT_TOOL_CALL_RETRIES,
         pre_act_label: str = "# POLICY SEARCH TOOL",
     ):
@@ -56,15 +51,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         )
         self._policy_index_paths = self._resolve_policy_index_paths()
         self._max_directory_candidates = max(1, int(max_directory_candidates))
-        self._max_page_chars = max(1000, max_page_chars) if max_page_chars > 0 else 0
-        self._max_prompt_chars = (
-            max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
-        )
-        self._max_component_chars = (
-            max(1_500, max_component_chars)
-            if max_component_chars > 0
-            else 0
-        )
         self._tool_call_retries = max(1, int(tool_call_retries))
         self._last_cache_key: str | None = None
         self._last_cache_value: str | None = None
@@ -78,6 +64,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
     def name(self) -> str:
         return NegotiationComponentConfig.POLICY_TOOL_COMPONENT_KEY
 
+    # Policy index and filesystem helpers.
     def _resolve_policy_index_paths(self) -> tuple[Path, ...]:
         resolved_paths: list[Path] = []
         for filename in self._policy_jsonl_filenames:
@@ -115,6 +102,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         return str(path).strip().replace("\\", "/")
 
     def _load_policy_directory(self) -> list[PolicyPage]:
+        """Load and cache policy summaries keyed by normalized page path."""
         signatures: list[tuple[str, int]] = []
         for policy_index_path in self._policy_index_paths:
             if not policy_index_path.exists():
@@ -192,30 +180,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return ""
         return resolved.read_text(encoding="utf-8", errors="ignore")
 
-    @staticmethod
-    def _maybe_truncate_text(text: str, *, max_chars: int) -> str:
-        normalized = str(text or "").strip()
-        if max_chars <= 0:
-            return normalized
-        if len(normalized) <= max_chars:
-            return normalized
-        return normalized[: max_chars - 3].rstrip() + "..."
-
-    @staticmethod
-    def _truncate_tail_text(text: str, *, max_chars: int) -> str:
-        normalized = str(text or "").strip()
-        if max_chars <= 0:
-            return normalized
-        if len(normalized) <= max_chars:
-            return normalized
-        if max_chars <= 10:
-            return normalized[:max_chars]
-        marker = "\n\n... [truncated] ..."
-        available = max_chars - len(marker)
-        if available <= 0:
-            return normalized[:max_chars]
-        return normalized[:available].rstrip() + marker
-
     def _fit_policy_summary_prompt(
         self,
         *,
@@ -249,108 +213,20 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             "- `## Relevant Policy Summaries`\n"
             "- `## Overall Policy Guidance`\n"
         )
-        prompt = (
+        return (
             prefix
             + current_policy_prompt
             + between_sections
             + full_page_result
             + suffix
         )
-        if self._max_prompt_chars <= 0 or len(prompt) <= self._max_prompt_chars:
-            return prompt
-
-        fixed_without_pages = prefix + current_policy_prompt + between_sections + suffix
-        available_for_pages = self._max_prompt_chars - len(fixed_without_pages)
-        if available_for_pages > 0:
-            prompt = (
-                fixed_without_pages.replace(
-                    between_sections,
-                    between_sections
-                    + self._truncate_tail_text(
-                        full_page_result,
-                        max_chars=available_for_pages,
-                    ),
-                    1,
-                )
-            )
-            if len(prompt) <= self._max_prompt_chars:
-                return prompt
-
-        fixed_without_state = prefix + between_sections + full_page_result + suffix
-        available_for_state = self._max_prompt_chars - len(fixed_without_state)
-        trimmed_state = self._truncate_tail_text(
-            current_policy_prompt,
-            max_chars=max(0, available_for_state),
-        )
-        prompt = prefix + trimmed_state + between_sections + full_page_result + suffix
-        if len(prompt) <= self._max_prompt_chars:
-            return prompt
-
-        available_for_pages = self._max_prompt_chars - len(
-            prefix + trimmed_state + between_sections + suffix
-        )
-        trimmed_pages = self._truncate_tail_text(
-            full_page_result,
-            max_chars=max(0, available_for_pages),
-        )
-        return prefix + trimmed_state + between_sections + trimmed_pages + suffix
-
-    def _fit_pre_act_component_text(
-        self,
-        *,
-        current_policy_prompt: str,
-        policy_guidance: str,
-    ) -> str:
-        prefix = "## Current Policy State\n"
-        between_sections = "\n\n## Relevant Policy Guidance\n"
-        component_text = (
-            prefix + current_policy_prompt + between_sections + policy_guidance
-        )
-        if (
-            self._max_component_chars <= 0
-            or len(component_text) <= self._max_component_chars
-        ):
-            return component_text
-
-        fixed_without_guidance = prefix + current_policy_prompt + between_sections
-        available_for_guidance = (
-            self._max_component_chars - len(fixed_without_guidance)
-        )
-        if available_for_guidance > 0:
-            trimmed_guidance = self._truncate_tail_text(
-                policy_guidance,
-                max_chars=available_for_guidance,
-            )
-            component_text = (
-                prefix + current_policy_prompt + between_sections + trimmed_guidance
-            )
-            if len(component_text) <= self._max_component_chars:
-                return component_text
-
-        fixed_without_state = prefix + between_sections + policy_guidance
-        available_for_state = self._max_component_chars - len(fixed_without_state)
-        trimmed_state = self._truncate_tail_text(
-            current_policy_prompt,
-            max_chars=max(0, available_for_state),
-        )
-        component_text = prefix + trimmed_state + between_sections + policy_guidance
-        if len(component_text) <= self._max_component_chars:
-            return component_text
-
-        available_for_guidance = self._max_component_chars - len(
-            prefix + trimmed_state + between_sections
-        )
-        trimmed_guidance = self._truncate_tail_text(
-            policy_guidance,
-            max_chars=max(0, available_for_guidance),
-        )
-        return prefix + trimmed_state + between_sections + trimmed_guidance
 
     def _run_full_page_retrieval_tool(
         self,
         requested_paths: list[str],
         pages: list[PolicyPage],
     ) -> str:
+        """Materialize the active source pages into the retrieval payload."""
         path_lookup = {page.path: page for page in pages}
         full_pages: list[FullPolicyPage] = []
 
@@ -367,10 +243,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                     source=page.source,
                     summary=page.summary,
                     tags=page.tags,
-                    content=self._maybe_truncate_text(
-                        full_text,
-                        max_chars=self._max_page_chars,
-                    ),
+                    content=full_text,
                 )
             )
 
@@ -385,25 +258,35 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._last_cache_value = result
         return result
 
+    # Active policy context helpers.
+    @staticmethod
+    def _normalize_active_source_paths(
+        active_source_paths: list[str] | tuple[str, ...] | None,
+    ) -> list[str] | None:
+        if active_source_paths is None:
+            return None
+
+        normalized_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for raw_path in active_source_paths:
+            normalized = HDBPolicyToolPrompt._normalize_page_path(str(raw_path))
+            if not normalized or normalized in seen_paths:
+                continue
+            seen_paths.add(normalized)
+            normalized_paths.append(normalized)
+        return normalized_paths
+
     def set_active_policy_context(
         self,
         *,
         current_policy_prompt: str,
         active_source_paths: list[str] | tuple[str, ...] | None,
     ) -> None:
+        """Sync the current policy state shown to the negotiation agent."""
         normalized_prompt = str(current_policy_prompt or "").strip()
-        if active_source_paths is None:
-            normalized_active_source_paths = None
-        else:
-            normalized_paths: list[str] = []
-            seen_paths: set[str] = set()
-            for raw_path in active_source_paths:
-                normalized = self._normalize_page_path(str(raw_path))
-                if not normalized or normalized in seen_paths:
-                    continue
-                seen_paths.add(normalized)
-                normalized_paths.append(normalized)
-            normalized_active_source_paths = normalized_paths
+        normalized_active_source_paths = self._normalize_active_source_paths(
+            active_source_paths
+        )
         if (
             (normalized_prompt or DEFAULT_CURRENT_POLICY_PROMPT)
             == self._current_policy_prompt
@@ -417,20 +300,55 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self._last_cache_key = None
         self._last_cache_value = None
 
+    # Pre-act pipeline helpers.
+    def _build_policy_cache_key(
+        self,
+        *,
+        active_source_paths: list[str] | None,
+    ) -> str:
+        """Capture the inputs that determine the rendered pre-act value."""
+        return json.dumps(
+            {
+                "current_policy_prompt": self._current_policy_prompt,
+                "policy_index_paths": [
+                    self._display_path(path) for path in self._policy_index_paths
+                ],
+                "policy_index_signature": list(self._policy_index_signature()),
+                "active_source_paths": active_source_paths,
+                "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def _load_relevant_policy_pages(
+        self,
+        *,
+        active_source_paths: list[str] | None,
+    ) -> list[PolicyPage]:
+        """Load the policy pages relevant to the current active source set."""
+        return self._filter_pages_to_active_sources(
+            pages=self._load_policy_directory(),
+            active_source_paths=active_source_paths,
+        )
+
+    def _build_full_page_result(
+        self,
+        *,
+        pages: list[PolicyPage],
+        active_source_paths: list[str] | None,
+    ) -> str:
+        """Expand policy summaries into the raw page payload used by the LLM."""
+        requested_paths = active_source_paths or [page.path for page in pages]
+        return self._run_full_page_retrieval_tool(requested_paths, pages)
+
     def _compose_pre_act_value(self, policy_guidance: str) -> str:
-        compact_state = self._truncate_tail_text(
-            self._current_policy_prompt,
-            max_chars=PRE_ACT_POLICY_STATE_MAX_CHARS,
-        )
-        compact_guidance = self._truncate_tail_text(
-            self._dedupe_policy_guidance(
-                policy_guidance or self._no_relevant_policy_summary()
-            ),
-            max_chars=PRE_ACT_POLICY_GUIDANCE_MAX_CHARS,
-        )
-        return self._fit_pre_act_component_text(
-            current_policy_prompt=compact_state,
-            policy_guidance=compact_guidance,
+        """Render the compact pre-act component text shown to the agent."""
+        return (
+            "## Current Policy State\n"
+            f"{self._current_policy_prompt}\n\n"
+            "## Relevant Policy Guidance\n"
+            f"{self._dedupe_policy_guidance(policy_guidance or self._no_relevant_policy_summary())}"
         )
 
     @staticmethod
@@ -471,6 +389,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         pages: list[PolicyPage],
         active_source_paths: list[str] | None,
     ) -> str:
+        """Ask the model to condense active source pages into negotiation guidance."""
         if active_source_paths == []:
             return self._no_relevant_policy_summary()
         if not pages:
@@ -479,9 +398,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         if not callable(sample_text):
             return self._no_relevant_policy_summary()
 
-        full_page_result = self._run_full_page_retrieval_tool(
-            active_source_paths or [page.path for page in pages],
-            pages,
+        full_page_result = self._build_full_page_result(
+            pages=pages,
+            active_source_paths=active_source_paths,
         )
         if not full_page_result.strip():
             return self._no_relevant_policy_summary()
@@ -501,29 +420,19 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         return self._no_relevant_policy_summary()
 
     def _make_pre_act_value(self) -> str:
+        """Build the synchronous pre-act view, using cache when possible."""
         active_source_paths = self._synced_active_source_paths
         if active_source_paths == []:
             return self._compose_pre_act_value(self._no_relevant_policy_summary())
-        cache_key = json.dumps(
-            {
-                "current_policy_prompt": self._current_policy_prompt,
-                "policy_index_paths": [
-                    self._display_path(path) for path in self._policy_index_paths
-                ],
-                "policy_index_signature": list(self._policy_index_signature()),
-                "active_source_paths": active_source_paths,
-                "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+        cache_key = self._build_policy_cache_key(
+            active_source_paths=active_source_paths
         )
         if cache_key == self._last_cache_key and self._last_cache_value is not None:
             return self._last_cache_value
 
         try:
-            pages = self._filter_pages_to_active_sources(
-                pages=self._load_policy_directory(),
-                active_source_paths=active_source_paths,
+            pages = self._load_relevant_policy_pages(
+                active_source_paths=active_source_paths
             )
         except Exception:
             return self._cache_result(
@@ -548,33 +457,23 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         self,
         action_spec: Any | None = None,
     ) -> question_of_recent_memories.TextPreActRequest | None:
+        """Prepare the LLM request for batched pre-act execution."""
         del action_spec
         active_source_paths = self._synced_active_source_paths
         if active_source_paths == []:
             self._pending_batch_cache_key = None
             return None
 
-        cache_key = json.dumps(
-            {
-                "current_policy_prompt": self._current_policy_prompt,
-                "policy_index_paths": [
-                    self._display_path(path) for path in self._policy_index_paths
-                ],
-                "policy_index_signature": list(self._policy_index_signature()),
-                "active_source_paths": active_source_paths,
-                "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+        cache_key = self._build_policy_cache_key(
+            active_source_paths=active_source_paths
         )
         if cache_key == self._last_cache_key and self._last_cache_value is not None:
             self._pending_batch_cache_key = None
             return None
 
         try:
-            pages = self._filter_pages_to_active_sources(
-                pages=self._load_policy_directory(),
-                active_source_paths=active_source_paths,
+            pages = self._load_relevant_policy_pages(
+                active_source_paths=active_source_paths
             )
         except Exception:
             self._pending_batch_cache_key = None
@@ -584,9 +483,9 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             self._pending_batch_cache_key = None
             return None
 
-        full_page_result = self._run_full_page_retrieval_tool(
-            active_source_paths or [page.path for page in pages],
-            pages,
+        full_page_result = self._build_full_page_result(
+            pages=pages,
+            active_source_paths=active_source_paths,
         )
         if not full_page_result.strip():
             self._pending_batch_cache_key = None
@@ -615,6 +514,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
         request: question_of_recent_memories.TextPreActRequest,
         raw_response: str,
     ) -> str:
+        """Finalize the batched pre-act result and update the cache."""
         del request
         cache_key = self._pending_batch_cache_key
         self._pending_batch_cache_key = None
@@ -627,6 +527,7 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             return self._cache_result(cache_key=cache_key, result=result)
         return result
 
+    # Lifecycle and persistence.
     def update(self) -> None:
         super().update()
         self._pending_batch_cache_key = None
@@ -636,9 +537,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
             "policy_jsonl_filenames": list(self._policy_jsonl_filenames),
             "policy_directory": str(self._policy_directory),
             "max_directory_candidates": self._max_directory_candidates,
-            "max_page_chars": self._max_page_chars,
-            "max_prompt_chars": self._max_prompt_chars,
-            "max_component_chars": self._max_component_chars,
             "tool_call_retries": self._tool_call_retries,
             "current_policy_prompt": self._current_policy_prompt,
             "active_source_paths": (
@@ -665,21 +563,6 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                 1,
                 int(state["max_directory_candidates"]),
             )
-        if "max_page_chars" in state:
-            max_page_chars = int(state["max_page_chars"])
-            self._max_page_chars = max(1_000, max_page_chars) if max_page_chars > 0 else 0
-        if "max_prompt_chars" in state:
-            max_prompt_chars = int(state["max_prompt_chars"])
-            self._max_prompt_chars = (
-                max(2_000, max_prompt_chars) if max_prompt_chars > 0 else 0
-            )
-        if "max_component_chars" in state:
-            max_component_chars = int(state["max_component_chars"])
-            self._max_component_chars = (
-                max(1_500, max_component_chars)
-                if max_component_chars > 0
-                else 0
-            )
         if "tool_call_retries" in state:
             self._tool_call_retries = max(1, int(state["tool_call_retries"]))
         if "current_policy_prompt" in state:
@@ -688,18 +571,8 @@ class HDBPolicyToolPrompt(action_spec_ignored.ActionSpecIgnored):
                 current_policy_prompt or DEFAULT_CURRENT_POLICY_PROMPT
             )
         if "active_source_paths" in state:
-            raw_paths = state["active_source_paths"]
-            if raw_paths is None:
-                self._synced_active_source_paths = None
-            else:
-                normalized_paths: list[str] = []
-                seen_paths: set[str] = set()
-                for raw_path in raw_paths:
-                    normalized = self._normalize_page_path(str(raw_path))
-                    if not normalized or normalized in seen_paths:
-                        continue
-                    seen_paths.add(normalized)
-                    normalized_paths.append(normalized)
-                self._synced_active_source_paths = normalized_paths
+            self._synced_active_source_paths = self._normalize_active_source_paths(
+                state["active_source_paths"]
+            )
         self._last_cache_key = None
         self._last_cache_value = None

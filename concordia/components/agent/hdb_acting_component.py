@@ -7,6 +7,7 @@ from typing import Any, override
 from absl import logging
 from pydantic import BaseModel, RootModel
 
+from concordia.components import helpers as component_helpers
 from concordia.document import interactive_document
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.hdb_simulation.models.schemas.common import RoleType
@@ -158,30 +159,13 @@ class HDBStructuredActComponent(
         """Return payload as a normalized JSON string when possible."""
         normalized = self._stringify_structured_output(value)
         try:
-            json_str = self._extract_first_json_object(normalized)
+            json_str = component_helpers.extract_first_json_object(normalized)
+            if json_str is None:
+                raise ValueError("No JSON object found in structured action.")
             payload = json.loads(json_str)
             return json.dumps(payload, ensure_ascii=False)
         except Exception:
             return normalized
-
-    def _extract_first_json_object(self, text: str) -> str:
-        """Extract the first complete JSON object from text."""
-        candidate = text.strip()
-        start = candidate.find("{")
-        if start < 0:
-            _log_error("Structured action does not contain a JSON object.")
-            return "{}"
-        candidate = candidate[start:]
-        depth = 0
-        for idx, ch in enumerate(candidate):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return candidate[: idx + 1]
-        _log_error("Unterminated JSON object in structured action.")
-        return "{}"
 
     @staticmethod
     def _schema_for_action_type(action_type: str) -> type[BaseModel] | None:
@@ -280,19 +264,21 @@ class HDBStructuredActComponent(
             return None
 
         try:
-            payload = json.loads(self._extract_first_json_object(text))
-            if isinstance(payload, dict):
-                for key in (
-                    "type",
-                    "action_type",
-                    "chosen_action_type",
-                    "preferred_action_type",
-                    "action",
-                    "name",
-                ):
-                    hint = _coerce(payload.get(key))
-                    if hint:
-                        return hint
+            payload_json = component_helpers.extract_first_json_object(text)
+            if payload_json is not None:
+                payload = json.loads(payload_json)
+                if isinstance(payload, dict):
+                    for key in (
+                        "type",
+                        "action_type",
+                        "chosen_action_type",
+                        "preferred_action_type",
+                        "action",
+                        "name",
+                    ):
+                        hint = _coerce(payload.get(key))
+                        if hint:
+                            return hint
         except Exception:
             pass
 

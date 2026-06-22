@@ -7,6 +7,7 @@ from qdrant_client import QdrantClient, models as qdrant_models
 from sentence_transformers import SentenceTransformer
 
 from configs import QdrantConfig
+from concordia.language_model import language_model
 from concordia.hdb_simulation.name_utils import resolve_profile_name
 from concordia.hdb_simulation.models.schemas.common import (
     Amenity,
@@ -330,6 +331,7 @@ def build_listing_record(
     flat_payload: dict[str, Any],
     *,
     seller_record: dict[str, Any] | None = None,
+    model: language_model.LanguageModel | None = None,
     listed_week: int = 0,
     active: bool = False,
 ) -> qdrant_schemas.ListingRecord:
@@ -337,7 +339,12 @@ def build_listing_record(
   seller_id = str(
       seller_record.get('seller_id') or f"seller::{flat_payload['flat_id']}"
   ).strip()
-  seller_name = resolve_profile_name(seller_record, fallback_name=seller_id)
+  seller_name = resolve_profile_name(
+      seller_record,
+      fallback_name=seller_id,
+      model=model,
+      role_label='seller',
+  )
   extension_of_stay = bool(
       (seller_record.get('flat') or {}).get('extension_of_stay', False)
   )
@@ -426,6 +433,7 @@ def index_market_segment_flats(
     dense_embedder: SentenceTransformer,
     sparse_embedder: SparseTextEmbedding | None = None,
     client: QdrantClient | None = None,
+    model: language_model.LanguageModel | None = None,
     seller_data_path: str | Path | None = None,
     collection_name: str = QdrantConfig.DEFAULT_COLLECTION_NAME,
     db_path: str = QdrantConfig.DEFAULT_DB_PATH,
@@ -471,6 +479,7 @@ def index_market_segment_flats(
           seller_record=sellers_by_flat_id.get(
               str(flat_row.get('flat_id', '')).strip()
           ),
+          model=model,
           listed_week=listed_week,
           active=active,
       )
@@ -509,15 +518,20 @@ def index_market_segment_flats(
   persist_target = str(persist_db_path or '').strip()
   if persist_target and persist_target != str(db_path).strip():
       persistent_client = qdrant_schemas.make_qdrant_client(persist_target)
-      if persistent_client.collection_exists(collection_name):
-          persistent_client.delete_collection(collection_name)
-      ensure_listing_collection(
-          client=persistent_client,
-          dense_embedder=dense_embedder,
-          collection_name=collection_name,
-      )
-      persistent_client.upsert(
-          collection_name=collection_name,
-          points=points,
-      )
+      try:
+          if persistent_client.collection_exists(collection_name):
+              persistent_client.delete_collection(collection_name)
+          ensure_listing_collection(
+              client=persistent_client,
+              dense_embedder=dense_embedder,
+              collection_name=collection_name,
+          )
+          persistent_client.upsert(
+              collection_name=collection_name,
+              points=points,
+          )
+      finally:
+          close_fn = getattr(persistent_client, 'close', None)
+          if callable(close_fn):
+              close_fn()
   return records

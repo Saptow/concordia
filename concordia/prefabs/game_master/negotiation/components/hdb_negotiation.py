@@ -13,6 +13,7 @@ from concordia.components.agent import hdb_acting_component
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import question_of_recent_memories
+from concordia.components import helpers as component_helpers
 from concordia.components.game_master import make_observation as make_observation_component
 from concordia.hdb_simulation.models.schemas import negotiation as negotiation_schemas
 from concordia.prefabs.entity.negotiation import structured_setup_batching
@@ -98,6 +99,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     self._canonical_entities_by_name: dict[str, entity_component.EntityWithComponents] = {}
     self._pair_start_weeks: dict[str, int] = {}
     self._conversation_replays: dict[str, dict[str, Any]] = {}
+    self._pair_evaluation_records: dict[str, list[dict[str, Any]]] = {}
     self._scheduler = hdb_negotiation_helpers.NegotiationScheduler(
         player_names=(),
         negotiation_pairs=None,
@@ -131,7 +133,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return
     self._ensure_entities_bound()
 
-  # Participant normalization
+  # ------------------------------------------------------------------
+  # Participant normalization and entity binding
+  # ------------------------------------------------------------------
   @staticmethod
   def _normalize_participant_specs(
       participant_specs: Mapping[str, Any] | str,
@@ -260,10 +264,67 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         tuple(str(token) for token in pair) == normalized for pair in pair_queue
     )
 
+  def _participant_has_open_negotiation_pair(self, player_id: str) -> bool:
+    """Return whether the participant is already assigned to an open pair."""
+    normalized_player_id = str(player_id).strip()
+    if not normalized_player_id:
+      return False
+    return any(
+        normalized_player_id in pair
+        for pair in self._scheduler.get_open_pair_queue_ids()
+    )
+
+  def _participant_has_successful_close(self, player_id: str) -> bool:
+    """Return whether the participant has already completed a successful close."""
+    normalized_player_id = str(player_id).strip()
+    if not normalized_player_id:
+      return False
+    self._offer_tracker._ensure_initialized()
+    for pair_key, outcome in self._offer_tracker._closed_pair_outcomes.items():
+      if outcome != negotiation_schemas.NegotiationOutcome.SUCCESS:
+        continue
+      members = self._offer_tracker._pair_members.get(pair_key, ())
+      if normalized_player_id in members:
+        return True
+    return False
+
   def _register_pair(self, buyer_id: str, seller_id: str) -> None:
     """Registers a new pair with the scheduler and offer tracker."""
-    if not self._pair_exists(buyer_id, seller_id):
-      self._scheduler.append_pair(buyer_id, seller_id)
+    buyer_id = str(buyer_id).strip()
+    seller_id = str(seller_id).strip()
+    if not buyer_id or not seller_id:
+      return
+    if self._pair_exists(buyer_id, seller_id):
+      return
+    conflicting_open_ids = [
+        player_id
+        for player_id in (buyer_id, seller_id)
+        if self._participant_has_open_negotiation_pair(player_id)
+    ]
+    if conflicting_open_ids:
+      logging.warning(
+          'Skipping negotiation pair (%s, %s) because participant ids %s are '
+          'already assigned to an open negotiation pair.',
+          buyer_id,
+          seller_id,
+          conflicting_open_ids,
+      )
+      return
+    successful_close_ids = [
+        player_id
+        for player_id in (buyer_id, seller_id)
+        if self._participant_has_successful_close(player_id)
+    ]
+    if successful_close_ids:
+      logging.warning(
+          'Skipping negotiation pair (%s, %s) because participant ids %s already '
+          'have a successful closed transaction.',
+          buyer_id,
+          seller_id,
+          successful_close_ids,
+      )
+      return
+    self._scheduler.append_pair(buyer_id, seller_id)
     self._offer_tracker.register_pair(buyer_id, seller_id)
 
   def _parse_listing_transfer_payload(
@@ -291,6 +352,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       logging.warning('Skipping invalid listing transfer payload: %s', error)
       return None
 
+  # ------------------------------------------------------------------
+  # Listing handoff and pair initialization
+  # ------------------------------------------------------------------
   def _apply_listing_transfer_payload(
       self,
       pair_payload: negotiation_schemas.ListingNegotiationTransferPayload,
@@ -565,6 +629,33 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       })
     return snapshots
 
+  def get_pair_evaluation_records(
+      self,
+      pair_ids: Sequence[Sequence[str]] | None = None,
+  ) -> list[dict[str, Any]]:
+    """Returns stored evaluation records for the requested pairs."""
+    requested_pair_keys = (
+        {
+            hdb_negotiation_helpers.pair_key(str(pair[0]), str(pair[1]))
+            for pair in pair_ids
+            if len(pair) == 2
+        }
+        if pair_ids is not None
+        else set(self._pair_evaluation_records.keys())
+    )
+    records: list[dict[str, Any]] = []
+    for pair_key in sorted(requested_pair_keys):
+      for record in self._pair_evaluation_records.get(pair_key, ()):
+        normalized = dict(record)
+        payload = normalized.get('public_action_payload')
+        if isinstance(payload, Mapping):
+          normalized['public_action_payload'] = dict(payload)
+        signature = normalized.get('numeric_action_signature')
+        if isinstance(signature, Mapping):
+          normalized['numeric_action_signature'] = dict(signature)
+        records.append(normalized)
+    return records
+
   def _effective_reservation_distribution_for_listing(
       self,
       player_id: str,
@@ -647,7 +738,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       payloads.append(payload.model_dump(mode='json'))
     return payloads
 
-  # Observation helpers
+  # ------------------------------------------------------------------
+  # Observation and event helpers
+  # ------------------------------------------------------------------
   @staticmethod
   def _format_entity_action(entity_name: str, raw_action: str) -> str:
     """Normalizes raw entity output into the shared event transcript format."""
@@ -668,9 +761,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     actor, sep, payload = event.partition(':')
     if not sep:
       return event
-    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
-        payload
-    )
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
       return event
     try:
@@ -679,14 +770,209 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return event
     if not isinstance(action, dict):
       return event
-    action.pop('internal_reasoning', None)
-    action.pop('decision_rationale', None)
+    for key in hdb_negotiation_helpers.TURN_EVENT_FIELDS_TO_STRIP:
+      action.pop(key, None)
     sanitized_json = json.dumps(action, ensure_ascii=False)
     start = payload.find(payload_json)
     if start < 0:
       return event
     end = start + len(payload_json)
     return f'{actor}{sep}{payload[:start]}{sanitized_json}{payload[end:]}'
+
+  # ------------------------------------------------------------------
+  # Evaluation extraction helpers
+  # ------------------------------------------------------------------
+  def _build_agent_profile_text(self, player_id: str) -> str:
+    """Build a compact profile string for post-hoc coherence judging.
+
+    Profile serialization should never be able to stop the simulation. If
+    something in the participant spec is unexpectedly non-serializable we fall
+    back to a plain string.
+    """
+    spec = dict(self._participant_specs.get(player_id, {}))
+    if not spec:
+      return ''
+    public_spec = {
+        key: value
+        for key, value in spec.items()
+        if key not in {'id', 'modules', 'negotiation_config'}
+    }
+    try:
+      return json.dumps(public_spec, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+      logging.warning(
+          'Falling back to string profile serialization for %s.',
+          player_id,
+      )
+      return str(public_spec)
+
+  @staticmethod
+  def _build_turn_id(
+      *,
+      pair_key: str,
+      week_number: int,
+      pair_round_number: int,
+      actor_id: str,
+      turn_index: int,
+  ) -> str:
+    """Build a stable id for one evaluated turn."""
+    return (
+        f'{pair_key}:{int(week_number)}:{int(pair_round_number)}:'
+        f'{actor_id}:{int(turn_index)}'
+    )
+
+  def _build_evaluation_record(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      actor_id: str,
+      raw_event: str,
+      week_number: int,
+      pair_round_number: int,
+      turn_index: int,
+      decision_rationale: str = '',
+  ) -> dict[str, Any]:
+    """Build one turn-level post-hoc evaluation record from a raw event.
+
+    The record is intentionally minimal and schema-grounded:
+    - validate the generated action against the buyer/seller action schemas
+    - serialize only public-facing fields into `public_action_payload`
+    - keep private reasoning fields separate for downstream judging
+    """
+    action = hdb_negotiation_helpers.extract_action_from_event(raw_event) or {}
+    validated_action = hdb_negotiation_helpers.validate_action_for_actor(
+        actor_id=actor_id,
+        buyer_id=buyer_id,
+        raw_action=action,
+    )
+    (
+        public_action_payload,
+        internal_reasoning,
+        action_type,
+        public_verbal_text,
+        numeric_action_signature,
+    ) = hdb_negotiation_helpers.evaluation_fields_from_validated_action(
+        validated_action
+    )
+    actor_role = hdb_negotiation_helpers.role_value_for_actor(
+        actor_id,
+        buyer_id,
+    )
+    return {
+        'turn_id': self._build_turn_id(
+            pair_key=pair_key,
+            week_number=week_number,
+            pair_round_number=pair_round_number,
+            actor_id=actor_id,
+            turn_index=turn_index,
+        ),
+        'pair_key': pair_key,
+        'week_number': int(week_number),
+        'pair_round_number': int(pair_round_number),
+        'actor_id': actor_id,
+        'actor_name': self._get_player_name(actor_id),
+        'actor_role': actor_role,
+        'agent_profile_text': self._build_agent_profile_text(actor_id),
+        'action_type': action_type,
+        'public_action_payload': public_action_payload,
+        'public_verbal_text': public_verbal_text,
+        'internal_reasoning': internal_reasoning,
+        'decision_rationale': str(decision_rationale or '').strip(),
+        'numeric_action_signature': numeric_action_signature,
+    }
+
+  def _append_weekly_pair_outputs(
+      self,
+      *,
+      buyer_id: str,
+      seller_id: str,
+      pair_key: str,
+      week_number: int,
+      pair_events: Sequence[Mapping[str, Any]],
+      evaluation_records: list[dict[str, Any]],
+  ) -> None:
+    """Persist replay/evaluation outputs for one negotiated pair.
+
+    Replay records store the sanitized public transcript used by the UI.
+    Evaluation records store the private/public split needed for post-hoc
+    coherence metrics.
+    """
+    pair_round_number = int(
+        self._scheduler.get_pair_round_number(buyer_id, seller_id)
+    )
+    self._append_pair_replay_events(
+        pair_key=pair_key,
+        buyer_id=buyer_id,
+        seller_id=seller_id,
+        week_number=week_number,
+        pair_round_number=pair_round_number,
+        pair_events=pair_events,
+    )
+    evaluation_records.extend(
+        self._append_pair_evaluation_records(
+            pair_key=pair_key,
+            buyer_id=buyer_id,
+            seller_id=seller_id,
+            week_number=week_number,
+            pair_round_number=pair_round_number,
+            pair_events=pair_events,
+        )
+    )
+
+  # ------------------------------------------------------------------
+  # Evaluation persistence helpers
+  # ------------------------------------------------------------------
+  def _append_pair_evaluation_records(
+      self,
+      *,
+      pair_key: str,
+      buyer_id: str,
+      seller_id: str,
+      week_number: int,
+      pair_round_number: int,
+      pair_events: Sequence[Mapping[str, Any]],
+  ) -> list[dict[str, Any]]:
+    """Append evaluation records for one pair and return the new records.
+
+    Evaluation capture is best-effort. A bad record should be skipped rather
+    than breaking the pair or the week.
+    """
+    if not pair_events:
+      return []
+    records = self._pair_evaluation_records.setdefault(pair_key, [])
+    appended: list[dict[str, Any]] = []
+    for turn_index, pair_event in enumerate(pair_events, start=1):
+      actor_id = str(pair_event.get('actor_id', ''))
+      raw_event = str(pair_event.get('event', ''))
+      if not actor_id or not raw_event:
+        continue
+      try:
+        record = self._build_evaluation_record(
+            pair_key=pair_key,
+            buyer_id=buyer_id,
+            seller_id=seller_id,
+            actor_id=actor_id,
+            raw_event=raw_event,
+            week_number=week_number,
+            pair_round_number=pair_round_number,
+            turn_index=turn_index,
+            decision_rationale=str(
+                pair_event.get('decision_rationale', '')
+            ).strip(),
+        )
+      except Exception as error:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            'Skipping evaluation record for pair %s turn %s: %s',
+            pair_key,
+            turn_index,
+            error,
+        )
+        continue
+      records.append(record)
+      appended.append(dict(record))
+    return appended
 
   def _observe_event(self, observer_id: str, event: str) -> None:
     """Delivers a sanitized event directly to one negotiating entity by id."""
@@ -700,6 +986,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return
     entity.observe(self._sanitize_event_for_counterparty(event))
 
+  # ------------------------------------------------------------------
+  # Observation update plumbing
+  # ------------------------------------------------------------------
   def _flush_pending_observation_updates(
       self,
       observer_ids: Sequence[str],
@@ -768,12 +1057,15 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     if callable(advance_pair_round):
       advance_pair_round()
 
+  # ------------------------------------------------------------------
+  # Closed-pair summaries and archival
+  # ------------------------------------------------------------------
   def _closed_pair_records(
       self,
       pair_keys: Sequence[str],
-  ) -> list[dict[str, str]]:
+  ) -> list[dict[str, Any]]:
     """Builds summary records for pairs that closed this week."""
-    records: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
     for pair_key in pair_keys:
       buyer_id, seller_id = self._offer_tracker._pair_members[pair_key]
       outcome = self._offer_tracker._closed_pair_outcomes.get(
@@ -781,10 +1073,14 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           negotiation_schemas.NegotiationOutcome.CLOSED,
       )
       records.append({
+          'pair_key': pair_key,
           'buyer_id': buyer_id,
           'buyer_name': self._get_player_name(buyer_id),
           'seller_id': seller_id,
           'seller_name': self._get_player_name(seller_id),
+          'pair_round_number': int(
+              self._scheduler.get_pair_round_number(buyer_id, seller_id)
+          ),
           'outcome': outcome.value,
         })
     return records
@@ -832,6 +1128,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'offer_history': list(
             self._offer_tracker.get_offer_history_for_pair(buyer_id, seller_id)
         ),
+        'evaluation_records': [
+            dict(record)
+            for record in self._pair_evaluation_records.get(pair_key, ())
+        ],
         'archived_at_week': int(week_number),
     })
     return archive_record
@@ -842,16 +1142,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       *,
       week_number: int,
   ) -> None:
-    """Archives closed-pair transcripts/history, then evicts them from RAM."""
+    """Archives closed-pair transcripts/history when configured, then evicts."""
     if not pair_records:
       return
-    if not self._closed_pair_archive_jsonl_path:
-      logging.warning(
-          'Closed-pair eviction requested but no archive path is configured; '
-          'keeping negotiation state in memory.'
-      )
-      return
-
     pairs_to_evict: list[tuple[str, str]] = []
     archive_records: list[dict[str, Any]] = []
     for pair_record in pair_records:
@@ -860,63 +1153,58 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       if not buyer_id or not seller_id:
         continue
       pairs_to_evict.append((buyer_id, seller_id))
-      archive_records.append(
-          self._build_closed_pair_archive_record(
-              buyer_id=buyer_id,
-              seller_id=seller_id,
-              week_number=week_number,
-              outcome=str(pair_record.get('outcome', 'CLOSED')).strip() or 'CLOSED',
-          )
-      )
+      if self._closed_pair_archive_jsonl_path:
+        archive_records.append(
+            self._build_closed_pair_archive_record(
+                buyer_id=buyer_id,
+                seller_id=seller_id,
+                week_number=week_number,
+                outcome=str(pair_record.get('outcome', 'CLOSED')).strip() or 'CLOSED',
+            )
+        )
 
-    if not archive_records:
+    if not pairs_to_evict:
       return
 
-    archive_dir = os.path.dirname(self._closed_pair_archive_jsonl_path)
-    try:
-      if archive_dir:
-        os.makedirs(archive_dir, exist_ok=True)
-      with open(
-          self._closed_pair_archive_jsonl_path,
-          'a',
-          encoding='utf-8',
-      ) as handle:
-        for archive_record in archive_records:
-          handle.write(json.dumps(archive_record, ensure_ascii=False) + '\n')
-    except OSError:
-      logging.exception(
-          'Failed to archive closed negotiation pairs to %s; keeping state in memory.',
-          self._closed_pair_archive_jsonl_path,
-      )
-      return
+    if self._closed_pair_archive_jsonl_path and archive_records:
+      archive_dir = os.path.dirname(self._closed_pair_archive_jsonl_path)
+      try:
+        if archive_dir:
+          os.makedirs(archive_dir, exist_ok=True)
+        with open(
+            self._closed_pair_archive_jsonl_path,
+            'a',
+            encoding='utf-8',
+        ) as handle:
+          for archive_record in archive_records:
+            handle.write(json.dumps(archive_record, ensure_ascii=False) + '\n')
+      except OSError:
+        logging.exception(
+            'Failed to archive closed negotiation pairs to %s; keeping state in memory.',
+            self._closed_pair_archive_jsonl_path,
+        )
+        return
 
     for buyer_id, seller_id in pairs_to_evict:
       pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
       self._conversation_replays.pop(pair_key, None)
       self._pair_start_weeks.pop(pair_key, None)
+      self._pair_evaluation_records.pop(pair_key, None)
       self._offer_tracker.evict_pair_state(buyer_id, seller_id)
 
   @staticmethod
   def _extract_public_action_from_event(event: str) -> dict[str, Any] | None:
     """Parses the action payload while stripping private reasoning fields."""
-    _, sep, payload = event.partition(':')
-    if not sep:
-      return None
-    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
-        payload
-    )
-    if not payload_json:
-      return None
-    try:
-      action = json.loads(payload_json)
-    except json.JSONDecodeError:
-      return None
-    if not isinstance(action, dict):
+    action = hdb_negotiation_helpers.extract_action_from_event(event)
+    if action is None:
       return None
     action.pop('internal_reasoning', None)
     action.pop('decision_rationale', None)
     return action
 
+  # ------------------------------------------------------------------
+  # Replay transcript persistence
+  # ------------------------------------------------------------------
   def _ensure_pair_replay_record(
       self,
       *,
@@ -1036,7 +1324,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
           week_number=week_number,
       )
 
-  # Pair execution
+  # ------------------------------------------------------------------
+  # Turn preparation and batched execution
+  # ------------------------------------------------------------------
   def _prepare_player_turn(
       self,
       player_id: str,
@@ -1344,6 +1634,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         merged_contexts[NegotiationComponentConfig.ACTION_DECISIONS_COMPONENT_KEY] = (
             phase1_output
         )
+        prepared_turn['decision_rationale'] = (
+            hdb_negotiation_helpers.extract_decision_rationale(phase1_output)
+        )
         prepared_turn['prepared_act'] = entity_agent.PreparedAct(
             action_spec=prepared_act.action_spec,
             contexts=types.MappingProxyType(merged_contexts),
@@ -1531,9 +1824,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     _, sep, payload = event.partition(':')
     if not sep:
       return has_active_offer, is_closed
-    payload_json = hdb_negotiation_helpers.ActiveOfferTracker._extract_json_object(
-        payload
-    )
+    payload_json = component_helpers.extract_first_json_object(payload)
     if not payload_json:
       return has_active_offer, is_closed
     try:
@@ -1551,70 +1842,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       return False, True
     return has_active_offer, is_closed
 
-  def _run_pair_task(
-      self,
-      buyer_id: str,
-      seller_id: str,
-      *,
-      has_active_offer: bool,
-      is_closed: bool,
-  ) -> dict[str, Any]:
-    """Runs one weekly pair slice: buyer once, then seller once if still open."""
-    if is_closed:
-      return {
-          'buyer_id': buyer_id,
-          'seller_id': seller_id,
-          'events': [],
-      }
-
-    pair_events: list[dict[str, str]] = []
-    local_has_active_offer = has_active_offer
-    local_is_closed = is_closed
-    force_close = False
-
-    buyer_event, should_close_pair = self._execute_player_turn(
-        buyer_id,
-        buyer_id=buyer_id,
-        seller_id=seller_id,
-        has_active_offer=local_has_active_offer,
-    )
-    force_close = force_close or should_close_pair
-    if buyer_event is not None:
-      pair_events.append({'actor_id': buyer_id, 'event': buyer_event})
-      local_has_active_offer, local_is_closed = self._advance_pair_local_state(
-          actor_id=buyer_id,
-          buyer_id=buyer_id,
-          event=buyer_event,
-          has_active_offer=local_has_active_offer,
-          is_closed=local_is_closed,
-      )
-      if not local_is_closed and not force_close:
-        self._observe_event(seller_id, buyer_event)
-
-    if not local_is_closed and not force_close:
-      seller_event, should_close_pair = self._execute_player_turn(
-          seller_id,
-          buyer_id=buyer_id,
-          seller_id=seller_id,
-          has_active_offer=local_has_active_offer,
-      )
-      force_close = force_close or should_close_pair
-      if seller_event is not None:
-        pair_events.append({'actor_id': seller_id, 'event': seller_event})
-        self._observe_event(buyer_id, seller_event)
-
-    if pair_events:
-      self._advance_pair_round_for_entity(buyer_id)
-      self._advance_pair_round_for_entity(seller_id)
-
-    return {
-        'buyer_id': buyer_id,
-        'seller_id': seller_id,
-        'force_close': force_close,
-        'events': pair_events,
-    }
-
+  # ------------------------------------------------------------------
   # Weekly execution
+  # ------------------------------------------------------------------
   def run_week(
       self,
       *,
@@ -1649,7 +1879,9 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         }
         for buyer_id, seller_id in open_pairs
     }
+    evaluation_records: list[dict[str, Any]] = []
 
+    # Stage 1: every open pair gets its buyer turn first.
     buyer_turn_specs = [
         {
             'player_id': buyer_id,
@@ -1664,6 +1896,8 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
     ]
     buyer_turns = self._execute_turn_stage(buyer_turn_specs)
 
+    # Stage 2: only schedule seller turns for pairs that stayed open after the
+    # buyer move. Observations are delivered before seller acting.
     seller_turn_specs: list[dict[str, Any]] = []
     seller_observer_ids: list[str] = []
     for buyer_turn in buyer_turns:
@@ -1678,10 +1912,15 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       buyer_event = buyer_turn.get('event')
       if buyer_event is None:
         continue
-      pair_result['events'].append({
-          'actor_id': buyer_id,
-          'event': buyer_event,
-      })
+      pair_result['events'].append(
+          hdb_negotiation_helpers.build_pair_event(
+              actor_id=buyer_id,
+              event=buyer_event,
+              decision_rationale=str(
+                  buyer_turn.get('decision_rationale', '')
+              ).strip(),
+          )
+      )
       local_has_active_offer, local_is_closed = self._advance_pair_local_state(
           actor_id=buyer_id,
           buyer_id=buyer_id,
@@ -1718,15 +1957,22 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       seller_event = seller_turn.get('event')
       if seller_event is None:
         continue
-      pair_result['events'].append({
-          'actor_id': seller_id,
-          'event': seller_event,
-      })
+      pair_result['events'].append(
+          hdb_negotiation_helpers.build_pair_event(
+              actor_id=seller_id,
+              event=seller_event,
+              decision_rationale=str(
+                  seller_turn.get('decision_rationale', '')
+              ).strip(),
+          )
+      )
       self._observe_event(buyer_id, seller_event)
       buyer_observer_ids.append(buyer_id)
 
     self._flush_pending_observation_updates(buyer_observer_ids)
 
+    # Stage 3: fold the per-pair turn outputs back into replay state, offer
+    # tracking, and evaluation records.
     for buyer_id, seller_id in open_pairs:
       pair_key = hdb_negotiation_helpers.pair_key(buyer_id, seller_id)
       pair_result = pair_results[pair_key]
@@ -1749,16 +1995,13 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         continue
       if not pair_events:
         continue
-      self._append_pair_replay_events(
-          pair_key=pair_key,
+      self._append_weekly_pair_outputs(
           buyer_id=buyer_id,
           seller_id=seller_id,
+          pair_key=pair_key,
           week_number=week_number,
-          pair_round_number=self._scheduler.get_pair_round_number(
-              buyer_id,
-              seller_id,
-          ),
           pair_events=pair_events,
+          evaluation_records=evaluation_records,
       )
       number_of_pairs_negotiated += 1
       negotiated_pairs.append((buyer_id, seller_id))
@@ -1807,6 +2050,7 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'week_number': week_number,
         'number_of_pairs_negotiated': number_of_pairs_negotiated,
         'events': events,
+        'evaluation_records': evaluation_records,
         'closed_pairs': closed_records,
         'successful_pairs': successful_pairs,
         'failed_pairs': failed_pairs,
@@ -1838,6 +2082,10 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
         'conversation_replays': {
             key: dict(value, events=list(value.get('events', ())))
             for key, value in self._conversation_replays.items()
+        },
+        'pair_evaluation_records': {
+            key: [dict(record) for record in value]
+            for key, value in self._pair_evaluation_records.items()
         },
         'action_prompt': self._action_prompt,
         'max_weeks_open': self._max_weeks_open,
@@ -1898,6 +2146,19 @@ class NegotiationModule(action_spec_ignored.ActionSpecIgnored):
       self._conversation_replays = restored_replays
     else:
       self._conversation_replays = {}
+    if 'pair_evaluation_records' in state:
+      restored_evaluation_records: dict[str, list[dict[str, Any]]] = {}
+      for key, value in state['pair_evaluation_records'].items():
+        if not isinstance(value, Sequence) or isinstance(value, str):
+          continue
+        restored_evaluation_records[str(key)] = [
+            dict(record)
+            for record in value
+            if isinstance(record, Mapping)
+        ]
+      self._pair_evaluation_records = restored_evaluation_records
+    else:
+      self._pair_evaluation_records = {}
     if 'max_weeks_open' in state:
       self._max_weeks_open = max(0, int(state.get('max_weeks_open', 0) or 0))
     if 'action_prompt' in state:

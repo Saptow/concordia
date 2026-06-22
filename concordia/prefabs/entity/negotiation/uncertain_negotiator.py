@@ -22,11 +22,12 @@ from concordia.language_model import language_model
 from concordia.typing import prefab as prefab_lib
 
 # Import our negotiation components
-from concordia.prefabs.entity.negotiation.components import negotiation_memory
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_instructions
 from concordia.prefabs.entity.negotiation.components import hdb_policy_tool_prompt
 from concordia.prefabs.entity.negotiation.components import hdb_negotiation_strategy
 
+<<<<<<< HEAD
+=======
 DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
     f'HDB RESALE ETHICAL CONSTRAINTS: \n'
     f'- Do NOT fabricate or misrepresent any material fact (offers, deadlines, valuation/COV, approvals, eligibility, defects, inclusions, nearby amenities etc.).\n'
@@ -37,6 +38,7 @@ DEFAULT_ETHICS = ( # TODO: refine this to align more with HDB resale context.
     f'- No coercion/harassment or exploitation of vulnerability; keep a clear written record of offers and key terms.'
 )
 
+>>>>>>> a8a67f205360ef0913cd79f041448ad17a898fb0
 HDB_ACTION_CHOICE_GUARDRAILS = (
     "ACTION-CHOICE GUARDRAILS:\n"
     "- Follow **Negotiation Strategy State and Numeric Facts** guidance on action choice.\n"
@@ -51,6 +53,11 @@ HDB_CONTEXT_ANCHOR = (
     "- TIME RULE: 1 completed negotiation round (buyer turn + seller turn) = 1 week of in-simulation time.\n"
     "- ALL pricing and monetary references in SGD.\n"
 )
+<<<<<<< HEAD
+
+# Engineering Constants
+=======
+>>>>>>> a8a67f205360ef0913cd79f041448ad17a898fb0
 ACTION_REASONING_MEMORY_WINDOW = 4
 MIN_ACTION_REASONING_MEMORY_WINDOW = 4
 MAX_ACTION_REASONING_MEMORY_WINDOW = 8
@@ -179,7 +186,10 @@ class Entity(prefab_lib.Prefab):
         'description': 'Reach a mutually beneficial agreement',
         'reservation_value': '0.0',
         'flat_listing': '',
+<<<<<<< HEAD
+=======
         'ethical_constraints': DEFAULT_ETHICS,
+>>>>>>> a8a67f205360ef0913cd79f041448ad17a898fb0
         'modules': '', # e.g. uncertainty_buyer, uncertainty_seller
         'modules_config': '', # e.g. config parameters for the modules in JSON format
         'negotiation_config': '', # e.g. config parameters for negotiation strategy and instructions in JSON format
@@ -232,8 +242,12 @@ class Entity(prefab_lib.Prefab):
             )
         )
         flat_listing_raw = negotiation_config.get('flat_listing', '')
+<<<<<<< HEAD
+        ethics = self.params.get('ethical_constraints') or None
+=======
         ethics = self.params.get('ethical_constraints', DEFAULT_ETHICS)
         # TODO: revise the ethical constraints based on HDB negotiation context
+>>>>>>> a8a67f205360ef0913cd79f041448ad17a898fb0
         try:
             flat_listing = json.loads(flat_listing_raw) if flat_listing_raw else {}
             if not isinstance(flat_listing, dict):
@@ -365,12 +379,15 @@ class Entity(prefab_lib.Prefab):
                 seller_exploration_threshold=negotiation_config.get(
                     'seller_exploration_threshold'
                 ),
+<<<<<<< HEAD
+=======
                 initial_window_position=negotiation_config.get(
                     'initial_window_position'
                 ),
                 initial_window_size=negotiation_config.get(
                     'initial_window_size'
                 ),
+>>>>>>> a8a67f205360ef0913cd79f041448ad17a898fb0
             )
         # Build a formatting-safe self-description prompt block.
         safe_description = _escape_format_braces(description)
@@ -583,11 +600,16 @@ class Entity(prefab_lib.Prefab):
                         ._build_seller_exploration_threshold_prompt(
                             agent_name=agent_name,
                             description=description,
+<<<<<<< HEAD
+                            weeks_since_listed=negotiation_config.get(
+                                'weeks_since_listed'
+=======
                             initial_window_position=negotiation_config.get(
                                 'initial_window_position'
                             ),
                             initial_window_size=negotiation_config.get(
                                 'initial_window_size'
+>>>>>>> a8a67f205360ef0913cd79f041448ad17a898fb0
                             ),
                         )
                     ),

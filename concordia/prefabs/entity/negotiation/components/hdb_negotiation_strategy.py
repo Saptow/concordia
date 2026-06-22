@@ -6,6 +6,7 @@ import math
 from typing import Any, Dict, List, Union
 from pydantic import BaseModel, Field
 
+from concordia.components import helpers as component_helpers
 from concordia.components.agent import action_spec_ignored
 from concordia.components.agent import memory as memory_component
 from concordia.components.agent import observation as observation_component
@@ -18,13 +19,16 @@ from concordia.prefabs.entity.negotiation.components.uncertain_seller import Unc
 # Calibrated threshold: literature supports a monotonic link between high time
 # pressure and impasse/exit risk, but not a specific numeric cutoff. We use 0.8
 # as the default threshold before buyer-specific inference.
-BUYER_WALK_AWAY_URGENCY_THRESHOLD = 0.8
-SELLER_EXPLORATION_URGENCY_THRESHOLD = 0.7
+BUYER_WALK_AWAY_URGENCY_THRESHOLD = 0.75 # based on the rubric given in the urgency prompt, quarter splits chosen for simplicity and interpretability
+SELLER_EXPLORATION_URGENCY_THRESHOLD = 0.75 # based on the rubric given in the urgency prompt, quarter splits chosen for simplicity and interpretability
 DEFAULT_URGENCY_LEVEL = 0.5
-MIN_WEEKS_BEFORE_WALK_AWAY = 1
+MIN_WEEKS_BEFORE_WALK_AWAY = 1 # This is to ensure agent does not walk away immediately after handoff. 
 SELF_ACTION_TAG = '[self_action]'
 MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS = 360
+PRE_ACT_LABEL = 'Negotiation Strategy State and Numeric Facts'
 
+
+# Structured response schemas used by the LLM-backed urgency helpers.
 class UrgencyLevel(BaseModel):
     """Schema for urgency level output."""
     urgency: float = Field(..., ge=0.0, le=1.0, description="Urgency level from 0 (not urgent) to 1 (extremely urgent)")
@@ -52,6 +56,7 @@ class SellerExplorationThreshold(BaseModel):
         ),
     )
 
+
 # Tracks only the live pair-local values that this prompt layer uses.
 @dataclasses.dataclass
 class SimpleStrategyState:
@@ -63,12 +68,14 @@ class SimpleStrategyState:
 
 class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     """
-    Simple Negotiation Strategy for HDB resale market context to prevent long transactions.
+    Simple Negotiation Strategy for HDB resale market context, with LLM-based urgency inference and structured numeric fact extraction.
     """
     # Parameters
     _OFFER_OPEN_ACTIONS = frozenset({'MAKE_OFFER', 'MAKE_COUNTEROFFER'})
     _OFFER_CLOSE_ACTIONS = frozenset({'REJECT_OFFER', 'ACCEPT_OFFER', 'WALK_AWAY'})
 
+    # Main methods: construction and component entry points.
+    # Initialization and basic coercion helpers.
     def __init__(
         self,
         model,
@@ -78,8 +85,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         uncertain_context: Union[UncertainBuyer, UncertainSeller],
         buyer_walkaway_threshold: float | None = None,
         seller_exploration_threshold: float | None = None,
-        initial_window_position: int | None = None,
-        initial_window_size: int | None = None,
         memory_component_key: str = memory_component.DEFAULT_MEMORY_COMPONENT_KEY,
         max_observations: int = 80,
         verbose: bool = False,
@@ -91,7 +96,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
           agent_name: The name of the agent using this strategy.
           verbose: Whether to enable verbose logging.
         """
-        super().__init__(pre_act_label='Negotiation Strategy State and Numeric Facts')
+        super().__init__(pre_act_label=PRE_ACT_LABEL)
         self._model = model
         self._agent_name = agent_name
         self._role = role
@@ -103,26 +108,14 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self.strategy_summary = ""
         self.fields: Dict[str, str] = {'hasActiveOffer': 'False'}
         self._verbose = verbose
-        self._prefilled_buyer_walkaway_threshold = self._coerce_probability(
-            buyer_walkaway_threshold
-        )
-        self._prefilled_seller_exploration_threshold = self._coerce_probability(
-            seller_exploration_threshold
-        )
-        self._initial_window_position = self._coerce_positive_int(
-            initial_window_position
-        )
-        self._initial_window_size = self._coerce_positive_int(
-            initial_window_size
-        )
         self._buyer_walkaway_threshold = (
-            self._prefilled_buyer_walkaway_threshold
-            if self._prefilled_buyer_walkaway_threshold is not None
+            buyer_walkaway_threshold
+            if buyer_walkaway_threshold is not None
             else BUYER_WALK_AWAY_URGENCY_THRESHOLD
         )
         self._seller_exploration_threshold = (
-            self._prefilled_seller_exploration_threshold
-            if self._prefilled_seller_exploration_threshold is not None
+            seller_exploration_threshold
+            if seller_exploration_threshold is not None
             else SELLER_EXPLORATION_URGENCY_THRESHOLD
         )
         self._state = SimpleStrategyState()
@@ -140,28 +133,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             beliefs['counterpart_reservation'].get_expected_mean
         )
 
-    @staticmethod
-    def _coerce_probability(value: Any) -> float | None:
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(parsed):
-            return None
-        return min(1.0, max(0.0, parsed))
-
-    @staticmethod
-    def _coerce_positive_int(value: Any) -> int | None:
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
-
+    # Urgency inference and structured parsing helpers.
+    # These prompt/parse helpers are shared by both buyer and seller roles.
     def _judge_urgency_level(
         self,
         *,
@@ -185,6 +158,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         number_of_failed_negotiations: int = 0,
         current_situation_summary: str = '',
     ) -> str:
+        """Build the shared buyer/seller urgency-estimation prompt."""
         current_situation_block = (
             "## Current Situation\n"
             f"{current_situation_summary.strip()}\n\n"
@@ -193,24 +167,25 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         )
         prompt = (
             "# Role\n"
-            f"You are estimating negotiation urgency for a {self._role} in an HDB resale negotiation.\n\n"
+            "You are estimating negotiation urgency for an HDB resale negotiator.\n\n"
             "# Task\n"
             f"Estimate how urgent **{self._agent_name}** is to close the negotiation.\n\n"
             "# Input\n"
+            "## Role\n"
+            f"{self._role}\n\n"
             "## Agent Description\n"
             f"{self._description}\n\n"
             f"{current_situation_block}"
             "## Number Of Failed Negotiations\n"
             f"{max(0, int(number_of_failed_negotiations))}\n\n"
             "# Private Reasoning Process\n"
-            "Think step by step **privately** before answering:\n\n"
-            "1. Identify signals of time pressure, financial pressure, relocation needs, family needs, willingness to wait, and persona-driven patience.\n"
-            "2. Treat the current situation as additional evidence: offer state, price anchoring, and repeated failures can all change urgency.\n"
-            "3. For sellers, treat any stated selling context or seller motivations in the description as especially important urgency evidence.\n"
-            "4. Distinguish strong urgency cues from mild preferences.\n"
-            "5. Convert the overall urgency into a score from `0` to `1`.\n"
-            "6. Return only the final JSON object. Do not reveal your reasoning.\n\n"
-            "# Scoring Rubrics\n"
+            "1. Reason briefly in private from the description, current situation, and failed-negotiation count.\n"
+            "2. Focus on time pressure, financial pressure, willingness to wait, and role-specific motivations or constraints.\n"
+            "3. Map the result to a `0` to `1` urgency score based on the provided rubrics and return JSON only. Do not reveal your reasoning.\n\n"
+            "# Interpretation\n"
+            "- Lower values mean the negotiator can wait comfortably and does not need to close soon.\n"
+            "- Higher values mean the negotiator faces stronger pressure or motivation to close quickly.\n\n"
+            "# Rubric\n"
             "The score is continuous between `0` and `1`, where higher values indicate greater urgency to close the deal. For example:\n"
             "- `0.0` = not urgent at all, very patient, can comfortably wait.\n"
             "- `0.25` = low urgency, some preference to close but no real pressure.\n"
@@ -218,8 +193,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "- `0.75` = high urgency, clear pressure or strong need to close soon.\n"
             "- `1.0` = extremely urgent, immediate pressure to close.\n\n"
             "# Rules\n"
-            "- Use only the provided agent description, current situation, and failed-negotiation count.\n"
-            "- The agent description captures persona, and for sellers may also include selling motivations/context.\n"
+            "- Use only the provided role, agent description, current situation, and failed-negotiation count.\n"
+            "- The agent description captures persona and may include role-specific motivations or transaction context.\n"
             "- Do not invent facts that are not stated or strongly implied.\n"
             "- Output a single urgency value between `0` and `1`.\n\n"
             "# Output\n"
@@ -250,26 +225,38 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "You infer how much pressure a buyer tolerates before walking away from an HDB resale negotiation.\n\n"
             "# Task\n"
             f"Estimate a buyer-specific `walkaway_threshold` for **{agent_name}** from `0` to `1`.\n\n"
-            "# Interpretation\n"
-            "- Lower values mean the buyer is quicker to abandon negotiations under pressure.\n"
-            "- Higher values mean the buyer is more patient and willing to keep negotiating.\n\n"
-            "# Few-shot examples\n"
-            "Example 1\n"
-            "Description: Needs to move urgently for a new job, dislikes prolonged uncertainty, is decisive, and will quickly leave deals that feel stalled or overpriced.\n"
-            'Output: {"walkaway_threshold": 0.34}\n\n'
-            "Example 2\n"
-            "Description: Practical and balanced, willing to negotiate for a while if the flat seems promising, but does not want endless back-and-forth.\n"
-            'Output: {"walkaway_threshold": 0.58}\n\n'
-            "Example 3\n"
-            "Description: Very patient, methodical, and comfortable waiting for the right deal. Tolerates uncertainty and prefers exhausting negotiation options before exiting.\n"
-            'Output: {"walkaway_threshold": 0.86}\n\n'
             "# Input\n"
             "## Buyer Description\n"
             f"{description}\n\n"
+            "# Private Reasoning Process\n"
+            "1. Reason briefly in private from the buyer description.\n"
+            "2. Focus on patience, urgency sensitivity, decisiveness, and tolerance for delay or uncertainty.\n"
+            "3. Map the result to a `0` to `1` threshold and return JSON only. Do not reveal your reasoning.\n\n"
+            "# Interpretation\n"
+            "- Lower values mean the buyer is quicker to abandon negotiations under pressure.\n"
+            "- Higher values mean the buyer is more patient and willing to keep negotiating.\n\n"
+            "# Rubric\n"
+            "- `0.0` to `0.25`: very low tolerance for delay or uncertainty; likely to walk away quickly.\n"
+            "- `0.25` to `0.5`: below-average patience; willing to leave if progress stalls.\n"
+            "- `0.5` to `0.75`: moderate to high tolerance; will negotiate for a while but still has limits.\n"
+            "- `0.75` to `1.0`: very high patience; strongly prefers exhausting options before walking away.\n\n"
+            "# Few-shot examples\n"
+            "Example 1\n"
+            "Description: Needs to move urgently for a new job, dislikes prolonged uncertainty, is decisive, and will quickly leave deals that feel stalled or overpriced.\n"
+            "Why: urgent timeline, low tolerance for delay, quick exit style.\n"
+            'Output: {"walkaway_threshold": 0.34}\n\n'
+            "Example 2\n"
+            "Description: Practical and balanced, willing to negotiate for a while if the flat seems promising, but does not want endless back-and-forth.\n"
+            "Why: moderate patience, but clear limit on prolonged negotiation.\n"
+            'Output: {"walkaway_threshold": 0.58}\n\n'
+            "Example 3\n"
+            "Description: Very patient, methodical, and comfortable waiting for the right deal. Tolerates uncertainty and prefers exhausting negotiation options before exiting.\n"
+            "Why: high tolerance for delay and strong preference to keep negotiating.\n"
+            'Output: {"walkaway_threshold": 0.86}\n\n'
             "# Rules\n"
             "- Use only the buyer description.\n"
-            "- Focus on patience, decisiveness, flexibility, and tolerance for prolonged uncertainty.\n"
-            "- Calibrate your answer relative to the examples above.\n"
+            "- Focus on patience, decisiveness, flexibility, urgency sensitivity, and tolerance for prolonged uncertainty.\n"
+            "- Use the rubric and examples together when calibrating the score.\n"
             "- Return JSON only.\n"
             "- Do not explain your reasoning.\n\n"
             "# Output\n"
@@ -281,17 +268,13 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         *,
         agent_name: str,
         description: str,
-        initial_window_position: int | None = None,
-        initial_window_size: int | None = None,
+        weeks_since_listed: int | None = None,
     ) -> str:
-        initial_window_context = "Not provided."
-        if (
-            initial_window_position is not None
-            and initial_window_size is not None
-        ):
-            initial_window_context = (
-                f"Seller entered in initial window position "
-                f"{initial_window_position} of {initial_window_size}."
+        listing_age_context = "Not provided."
+        if weeks_since_listed is not None:
+            listing_age_context = (
+                f"Seller has been listed for {max(0, int(weeks_since_listed))} "
+                "week(s)."
             )
         return (
             "# Role\n"
@@ -299,36 +282,44 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             "toward pricing or closure in an HDB resale negotiation.\n\n"
             "# Task\n"
             f"Estimate a seller-specific `exploration_threshold` for **{agent_name}** from `0` to `1`.\n\n"
-            "# Interpretation\n"
-            "- Lower values mean the seller should stop exploring sooner under urgency.\n"
-            "- Higher values mean the seller can tolerate more urgency before switching from exploration to price-focused action.\n\n"
-            "# Few-shot examples\n"
-            "Example 1\n"
-            "Description: Needs to sell quickly because a new property purchase is already lined up and carrying costs are rising.\n"
-            "Initial window position: 1 of 12.\n"
-            'Output: {"exploration_threshold": 0.24}\n\n'
-            "Example 2\n"
-            "Description: Hopes for a good sale but is not under severe time pressure and can wait a bit for the right buyer.\n"
-            "Initial window position: 3 of 12.\n"
-            'Output: {"exploration_threshold": 0.46}\n\n'
-            "Example 3\n"
-            "Description: Motivated to transact within a reasonable horizon but still open to learning from buyers before locking into price discussions.\n"
-            "Initial window position: 7 of 12.\n"
-            'Output: {"exploration_threshold": 0.63}\n\n'
-            "Example 4\n"
-            "Description: Selling opportunistically, highly patient, and comfortable testing the market before committing.\n"
-            "Initial window position: 11 of 12.\n"
-            'Output: {"exploration_threshold": 0.84}\n\n'
             "# Input\n"
             "## Seller Description\n"
             f"{description}\n\n"
-            "## Initial Window Context\n"
-            f"{initial_window_context}\n\n"
+            "## Listing Age Context\n"
+            f"{listing_age_context}\n\n"
+            "# Private Reasoning Process\n"
+            "1. Reason briefly in private from the seller description and listing age context.\n"
+            "2. Focus on time pressure, urgency to transact, flexibility, and willingness to keep probing before pricing.\n"
+            "3. Map the result to a `0` to `1` threshold and return JSON only. Do not reveal your reasoning.\n\n"
+            "# Interpretation\n"
+            "- Lower values mean the seller should stop exploring sooner under urgency.\n"
+            "- Higher values mean the seller can tolerate more urgency before switching from exploration to price-focused action.\n\n"
+            "# Rubric\n"
+            "- `0.0` to `0.25`: stop exploring quickly; move to pricing or closure early.\n"
+            "- `0.25` to `0.5`: below-average exploration tolerance; ask only limited follow-up questions before acting.\n"
+            "- `0.5` to `0.75`: moderate to high exploration tolerance; still willing to probe before committing.\n"
+            "- `0.75` to `1.0`: very high exploration tolerance; prefers learning from buyers before pushing toward closure.\n\n"
+            "# Few-shot examples\n"
+            "Example 1\n"
+            "Description: Needs to sell quickly because a new property purchase is already lined up and carrying costs are rising.\n"
+            "Weeks since listed: 0.\n"
+            "Why: strong urgency and a freshly listed seller who needs speed should shift out of exploration early.\n"
+            'Output: {"exploration_threshold": 0.24}\n\n'
+            "Example 2\n"
+            "Description: Motivated to transact within a reasonable horizon but still open to learning from buyers before locking into price discussions.\n"
+            "Weeks since listed: 5.\n"
+            "Why: balanced urgency with meaningful willingness to explore before committing.\n"
+            'Output: {"exploration_threshold": 0.63}\n\n'
+            "Example 3\n"
+            "Description: Selling opportunistically, highly patient, and comfortable testing the market before committing.\n"
+            "Weeks since listed: 10.\n"
+            "Why: low urgency and patience support prolonged exploration even after time on market.\n"
+            'Output: {"exploration_threshold": 0.84}\n\n'
             "# Rules\n"
-            "- Use the seller description and initial window context when available.\n"
-            "- Earlier initial-window positions should generally suggest lower exploration thresholds than later ones, all else equal.\n"
+            "- Use the seller description and listing age context when available.\n"
+            "- Treat weeks since listed as supporting context, not as a hard rule by itself.\n"
             "- Focus on time pressure, urgency to transact, flexibility, and willingness to keep probing before pricing.\n"
-            "- Calibrate your answer relative to the examples above.\n"
+            "- Use the rubric and examples together when calibrating the score.\n"
             "- Return JSON only.\n"
             "- Do not explain your reasoning.\n\n"
             "# Output\n"
@@ -347,7 +338,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         label: str,
     ) -> float:
         candidates = [str(response or '').strip()]
-        extracted_json = HDBNegotiationStrategy._extract_first_json_object(
+        extracted_json = component_helpers.extract_first_json_object(
             candidates[0]
         )
         if extracted_json and extracted_json != candidates[0]:
@@ -405,6 +396,19 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             label='seller exploration threshold',
         )
 
+    # Listing handoff and batched urgency setup.
+    def _participant_state_from_listing(
+        self,
+        listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
+    ) -> Any:
+        """Return the buyer or seller state relevant to this component's role."""
+        return (
+            listing_payload.buyer_state
+            if self._role == RoleType.BUYER
+            else listing_payload.seller_state
+        )
+
+    # Main methods: listing handoff and batched urgency setup.
     def apply_listing_handoff(
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
@@ -423,11 +427,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> list[structured_setup_batching.StructuredSetupRequest]:
-        participant_state = (
-            listing_payload.buyer_state
-            if self._role == RoleType.BUYER
-            else listing_payload.seller_state
-        )
+        participant_state = self._participant_state_from_listing(listing_payload)
         return [
             structured_setup_batching.StructuredSetupRequest(
                 component=self,
@@ -455,11 +455,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self._urgency_level = self._parse_urgency_response(
             responses_by_key.get('urgency', '')
         )
-        participant_state = (
-            listing_payload.buyer_state
-            if self._role == RoleType.BUYER
-            else listing_payload.seller_state
-        )
+        participant_state = self._participant_state_from_listing(listing_payload)
         negotiation_history = getattr(participant_state, 'negotiation_history', ())
         self._failed_negotiations_count = len(negotiation_history)
 
@@ -468,9 +464,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     ) -> structured_setup_batching.StructuredSetupRequest:
         self._sync_positions_from_beliefs()
         numeric_fields = self._compute_deterministic_numeric_fields()
-        has_active_offer = (
-            str(numeric_fields.get('HasActiveOffer', '')).strip().lower() == 'true'
-        )
+        has_active_offer = self._has_active_offer(numeric_fields)
         uncertainty_summary = self._get_uncertainty_strategy_summary('')
         self._prefetched_live_strategy_state = {
             'numeric_fields': dict(numeric_fields),
@@ -503,6 +497,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self,
         listing_payload: negotiation_schemas.ListingNegotiationTransferPayload,
     ) -> str:
+        """Summarize the pair's initial listing state for urgency estimation."""
         listing_price = self._format_money(listing_payload.seller_state.current_listing_price)
         if self._role == RoleType.BUYER:
             buyer_state = listing_payload.buyer_state
@@ -522,65 +517,25 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             f"- Pair week at entry: {listing_payload.week_matched}."
         )
 
-    @staticmethod
-    def _extract_first_json_object(text: str) -> str | None:
-        start = text.find('{')
-        if start < 0:
-            return None
-
-        depth = 0
-        in_string = False
-        escaped = False
-        for idx in range(start, len(text)):
-            ch = text[idx]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif ch == '\\':
-                    escaped = True
-                elif ch == '"':
-                    in_string = False
-                continue
-
-            if ch == '"':
-                in_string = True
-            elif ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    return text[start: idx + 1]
-
-        return None
-
+    # Deterministic parsing and numeric fact helpers.
     @staticmethod
     def _coerce_positive_float(value: Any) -> float | None:
-        if value is None or isinstance(value, bool):
-            return None
-        if isinstance(value, (int, float)):
-            parsed = float(value)
-            if math.isfinite(parsed) and parsed > 0.0:
-                return parsed
-            return None
+        """Parse a positive money-like value while tolerating simple formatting."""
         if isinstance(value, str):
-            cleaned = (
+            value = (
                 value.strip()
                 .replace('$', '')
                 .replace('SGD', '')
                 .replace('sgd', '')
                 .replace(',', '')
             )
-            if not cleaned:
-                return None
-            try:
-                parsed = float(cleaned)
-            except ValueError:
-                return None
-            if math.isfinite(parsed) and parsed > 0.0:
-                return parsed
-        return None
+        parsed = component_helpers.coerce_positive_float_or_none(value)
+        if parsed is None or not math.isfinite(parsed):
+            return None
+        return parsed
 
     def _extract_action_price(self, payload: Dict[str, Any]) -> float | None:
+        """Extract the most relevant price field from a structured action payload."""
         for key in ('counteroffer_price', 'offer_price', 'price_settled'):
             parsed = self._coerce_positive_float(payload.get(key))
             if parsed is not None:
@@ -588,6 +543,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         return None
 
     def _parse_observed_action(self, memory_text: str) -> tuple[str, Dict[str, Any]] | None:
+        """Decode one stored observation/self-action into actor and payload JSON."""
         text = memory_text.strip()
         for tag in (observation_component.OBSERVATION_TAG, SELF_ACTION_TAG):
             if text.startswith(f'{tag} '):
@@ -597,7 +553,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         actor, sep, payload = text.partition(':')
         if not sep:
             return None
-        payload_json = self._extract_first_json_object(payload)
+        payload_json = component_helpers.extract_first_json_object(payload)
         if not payload_json:
             return None
         try:
@@ -674,18 +630,19 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 return False, None, None
         return False, None, None
 
-    def _compute_deterministic_numeric_fields(self) -> Dict[str, str]:
-        # Keep these fields deterministic so the prompt has a stable numeric
-        # summary even though the strategy itself is LLM-driven.
-        recent_memories: List[str] = []
+    def _retrieve_recent_memories(self) -> List[str]:
+        """Pull recent observations/actions used to infer offer state."""
         try:
             memory = self.get_entity().get_component(
                 self._memory_component_key, type_=memory_component.Memory
             )
-            recent_memories = memory.retrieve_recent(limit=self._max_observations)
+            return memory.retrieve_recent(limit=self._max_observations)
         except Exception:
-            recent_memories = []
+            return []
 
+    def _compute_deterministic_numeric_fields(self) -> Dict[str, str]:
+        """Build stable numeric facts that anchor the LLM strategy prompt."""
+        recent_memories = self._retrieve_recent_memories()
         has_active_offer, active_offer_price, active_offer_type = (
             self._infer_offer_state(recent_memories)
         )
@@ -730,10 +687,12 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         self.fields = {'hasActiveOffer': fields.get('HasActiveOffer', 'False')}
         return fields
 
+    # Pre-act pipeline.
     def _get_uncertainty_strategy_summary(
         self,
         action_context: str,
     ) -> Dict[str, Any]:
+        """Fetch uncertainty signals from the paired uncertainty component."""
         try:
             return self._uncertainty_context.get_strategy_uncertainty_summary(
                 action_context,
@@ -751,8 +710,8 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     def _should_gather_info(
         self,
         uncertainty_summary: Dict[str, Any],
-        urgency_level: float,
     ) -> bool:
+        """Allow one more question only when uncertainty exceeds tolerance."""
         top_issue_question = str(
             uncertainty_summary.get('top_issue_question', '')
         ).strip()
@@ -772,6 +731,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         has_active_offer: bool,
         numeric_fields: Dict[str, str],
     ) -> str:
+        """Summarize live negotiation state for the urgency prompt."""
         lines = [
             f"- Weeks since negotiation started: {self._state.rounds_elapsed}.",
             f"- Active offer on table: {has_active_offer}.",
@@ -786,6 +746,16 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             lines.append(f"- Active offer price: {active_offer_price}.")
         return '\n'.join(lines)
 
+    @staticmethod
+    def _has_active_offer(fields: Dict[str, str]) -> bool:
+        """Interpret the deterministic offer flag from cached numeric fields."""
+        return str(fields.get('HasActiveOffer', '')).strip().lower() == 'true'
+
+    def _reset_prefetched_live_state(self) -> None:
+        """Clear any batched urgency inputs/results after they are consumed."""
+        self._prefetched_live_strategy_state = None
+        self._prefetched_live_urgency_level = None
+
     def _build_information_focus(
         self,
         uncertainty_summary: Dict[str, Any],
@@ -794,15 +764,38 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         should_close: bool,
         should_walk_away: bool,
     ) -> str:
+        """Convert state gates into one concrete next-step instruction."""
         issue_items = list(uncertainty_summary.get('issue_items', []))
         top_issue_question = str(
             uncertainty_summary.get('top_issue_question', '')
         ).strip()
         no_material_question_left = not top_issue_question
+        first_negotiation_week = (
+            self._state.rounds_elapsed < MIN_WEEKS_BEFORE_WALK_AWAY
+        )
         if should_walk_away:
             return (
                 "[IMPORTANT] Your urgency exceeds your buyer-specific walk-away threshold. "
                 "WALK_AWAY NOW."
+            )
+        if first_negotiation_week:
+            if top_issue_question:
+                return (
+                    "[IMPORTANT] First negotiation week: prefer one exploration "
+                    "round by both parties before closing. Ask at most one "
+                    f"targeted question: \"{top_issue_question}\""
+                )
+            if has_active_offer:
+                return (
+                    "[IMPORTANT] First negotiation week: prefer one exploration "
+                    "round by both parties before closing. If you respond now, "
+                    "keep the move lightweight rather than forcing closure."
+                )
+            return (
+                "[IMPORTANT] First negotiation week: prefer one exploration "
+                "round by both parties before pushing to close. Ask or answer "
+                "one targeted question, or make an opening move that surfaces "
+                "key constraints."
             )
         if should_close:
             if has_active_offer:
@@ -836,7 +829,7 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 f'"{top_issue_question}"'
             )
         return (
-            'Negotiate rather than stall.'
+            'Negotiate rather than stall. '
             'If you ask anything, keep it to one targeted question:\n'
             + issue_items[0]
         )
@@ -884,124 +877,134 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
             return normalized
         return normalized[: MAX_PRE_ACT_STRATEGY_SUMMARY_CHARS - 3].rstrip() + '...'
 
-    def _make_pre_act_value(self) -> str:
-        """Provide simple strategy guidance before each action."""
-        action_context = ''
+    def _resolve_live_strategy_inputs(
+        self,
+    ) -> tuple[Dict[str, str], bool, Dict[str, Any], float]:
+        """Resolve all inputs needed to build the pre-act strategy snapshot."""
         prefetched_state = self._prefetched_live_strategy_state
         prefetched_urgency = self._prefetched_live_urgency_level
         if prefetched_state is not None and prefetched_urgency is not None:
-            numeric_fields = dict(prefetched_state.get('numeric_fields', {}))
-            has_active_offer = bool(prefetched_state.get('has_active_offer', False))
-            uncertainty_summary = dict(
-                prefetched_state.get('uncertainty_summary', {})
+            return (
+                dict(prefetched_state.get('numeric_fields', {})),
+                bool(prefetched_state.get('has_active_offer', False)),
+                dict(prefetched_state.get('uncertainty_summary', {})),
+                prefetched_urgency,
             )
-            current_urgency_level = prefetched_urgency
-        else:
-            self._sync_positions_from_beliefs()
 
-            # The prompt policy is state-gated: unresolved uncertainty permits one
-            # more information-gathering turn; otherwise active offers should move
-            # toward closure, and urgent buyers may walk away after at least one
-            # completed negotiation week.
-            numeric_fields = self._compute_deterministic_numeric_fields()
-            has_active_offer = (
-                str(numeric_fields.get('HasActiveOffer', '')).strip().lower()
-                == 'true'
-            )
-            uncertainty_summary = self._get_uncertainty_strategy_summary(
-                action_context,
-            )
-            current_urgency_level = self._judge_urgency_level(
-                number_of_failed_negotiations=self._failed_negotiations_count,
-                current_situation_summary=self._build_live_urgency_context(
-                    has_active_offer=has_active_offer,
-                    numeric_fields=numeric_fields,
-                ),
-            )
-        self._urgency_level = current_urgency_level
-        should_gather_info = self._should_gather_info(
-            uncertainty_summary,
-            urgency_level=current_urgency_level,
+        self._sync_positions_from_beliefs()
+
+        # The prompt policy is state-gated: unresolved uncertainty permits one
+        # more information-gathering turn; otherwise active offers should move
+        # toward closure, and urgent buyers may walk away after at least one
+        # completed negotiation week.
+        numeric_fields = self._compute_deterministic_numeric_fields()
+        has_active_offer = self._has_active_offer(numeric_fields)
+        uncertainty_summary = self._get_uncertainty_strategy_summary('')
+        current_urgency_level = self._judge_urgency_level(
+            number_of_failed_negotiations=self._failed_negotiations_count,
+            current_situation_summary=self._build_live_urgency_context(
+                has_active_offer=has_active_offer,
+                numeric_fields=numeric_fields,
+            ),
         )
-        should_close = has_active_offer and not should_gather_info
-        can_walk_away = (
-            self._state.rounds_elapsed >= MIN_WEEKS_BEFORE_WALK_AWAY
-        )
-        should_walk_away = (
-            self._role == RoleType.BUYER
-            and can_walk_away
-            and current_urgency_level >= self._buyer_walkaway_threshold
-            and not should_gather_info
-        )
-        numeric_fields['DealScenarios'] = uncertainty_summary.get(
-            'scenario_summary', 'Unknown'
-        )
-        self._last_numeric_fields = dict(numeric_fields)
-        # Get negotiation strategy guidance based on urgency and role
-        information_focus = self._build_information_focus(
-            uncertainty_summary,
+        return (
+            numeric_fields,
             has_active_offer,
-            should_gather_info,
-            should_close,
-            should_walk_away,
+            uncertainty_summary,
+            current_urgency_level,
         )
-        
+
+    def _build_base_strategy(
+        self,
+        *,
+        has_active_offer: bool,
+        information_focus: str,
+    ) -> str:
+        """Build the role-specific default guidance before urgency overrides."""
         if self._role == RoleType.BUYER:
-            base_strategy = (
-                "Base Strategy:\n"
-                "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
-                "- If OfferWithinOwnReservation is True, consider ACCEPT_OFFER.\n"
-                "- If OfferWithinOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
-                "- Use OwnVsOpponentReservation and DealOutlook to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
-                f"- {information_focus}\n"
-            ) if has_active_offer else (
-                "Base Strategy:\n"
-                f"- {information_focus}\n"
-            )
-            if should_walk_away:
-                urgency_rule = (
-                    "[IMPORTANT] Your urgency level is now high enough that "
-                    "you should prefer WALK_AWAY instead of extending the negotiation."
+            if has_active_offer:
+                return (
+                    "Base Strategy:\n"
+                    "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
+                    "- If OfferWithinOwnReservation is True, consider ACCEPT_OFFER.\n"
+                    "- If OfferWithinOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
+                    "- Use OwnVsOpponentReservation and DealOutlook to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
+                    f"- {information_focus}\n"
                 )
-            elif (
-                current_urgency_level >= self._buyer_walkaway_threshold
-                and not can_walk_away
-            ):
-                urgency_rule = (
-                    "[IMPORTANT] Do not choose WALK_AWAY during the first negotiation week. "
-                    "Use this period to gather information or make concrete progress instead.\n"
-                )
-            elif should_close:
-                urgency_rule = (
-                    "[IMPORTANT] An active offer should now be resolved. "
-                    "Choose ACCEPT_OFFER, REJECT_OFFER, or MAKE_COUNTEROFFER based on your reservation value. "
-                    "Do not ask more questions first.\n"
-                )
-            else:
-                urgency_rule = ""
-        else:  # RoleType.SELLER
-            base_strategy = (
+            return "Base Strategy:\n" f"- {information_focus}\n"
+
+        if has_active_offer:
+            return (
                 "Base Strategy:\n"
                 "- Evaluate the offer against your reservation price first; use the opponent position only as supporting context.\n"
                 "- If OfferMeetsOwnReservation is True, consider ACCEPT_OFFER.\n"
                 "- If OfferMeetsOwnReservation is False, consider REJECT_OFFER or MAKE_COUNTEROFFER.\n"
                 "- Use OwnVsOpponentReservation and DealOutlook to judge whether further bargaining is worthwhile, not whether the current offer itself is acceptable.\n"
                 f"- {information_focus}\n"
-            ) if has_active_offer else (
-                "\n Base Strategy:\n"
-                f"- {information_focus}\n"
             )
-            if should_close:
-                urgency_rule = (
-                    "[IMPORTANT] If an offer is active, decide now with "
-                    "ACCEPT_OFFER, REJECT_OFFER."
-                    "If no offer is active, issue MAKE_OFFER now."
+        return "Base Strategy:\n" f"- {information_focus}\n"
+
+    def _build_urgency_rule(
+        self,
+        *,
+        has_active_offer: bool,
+        current_urgency_level: float,
+        should_close: bool,
+        should_walk_away: bool,
+    ) -> str:
+        """Add high-priority urgency gating on top of the base strategy."""
+        can_walk_away = self._state.rounds_elapsed >= MIN_WEEKS_BEFORE_WALK_AWAY
+        first_negotiation_week = not can_walk_away
+        if self._role == RoleType.BUYER:
+            if should_walk_away:
+                return (
+                    "[IMPORTANT] Your urgency level is now high enough that "
+                    "you should prefer WALK_AWAY instead of extending the negotiation."
                 )
-            else:
-                urgency_rule = ""
+            if (
+                current_urgency_level >= self._buyer_walkaway_threshold
+                and not can_walk_away
+            ):
+                return (
+                    "[IMPORTANT] Do not choose WALK_AWAY during the first negotiation week. "
+                    "Use this period to gather information or make concrete progress instead.\n"
+                )
+            if should_close and first_negotiation_week:
+                return (
+                    "[IMPORTANT] First negotiation week: prefer one exploration "
+                    "round by both parties before closing. Close now only if the "
+                    "case is exceptionally clear.\n"
+                )
+            if should_close:
+                return (
+                    "[IMPORTANT] An active offer should now be resolved. "
+                    "Choose ACCEPT_OFFER, REJECT_OFFER, or MAKE_COUNTEROFFER based on your reservation value. "
+                    "Do not ask more questions first.\n"
+                )
+            return ''
 
+        if should_close and first_negotiation_week:
+            return (
+                "[IMPORTANT] First negotiation week: prefer one exploration "
+                "round by both parties before closing. Close now only if the "
+                "case is exceptionally clear.\n"
+            )
+        if should_close:
+            if has_active_offer:
+                return (
+                    "[IMPORTANT] An active offer should now be resolved. "
+                    "Choose ACCEPT_OFFER or REJECT_OFFER based on your reservation value.\n"
+                )
+            return "[IMPORTANT] No active offer is on the table. Issue MAKE_OFFER now.\n"
+        return ''
 
-        self.strategy_summary = base_strategy + urgency_rule
+    def _build_pre_act_lines(
+        self,
+        *,
+        numeric_fields: Dict[str, str],
+        current_urgency_level: float,
+    ) -> list[str]:
+        """Render the compact machine-readable pre-act state block."""
         lines = [
             f"WeeksElapsed={self._state.rounds_elapsed}",
             f"FailedNegotiations={self._failed_negotiations_count}",
@@ -1027,10 +1030,58 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
                 6,
                 f"{offer_key}={numeric_fields.get(offer_key, 'Unknown')}",
             )
-        self._prefetched_live_strategy_state = None
-        self._prefetched_live_urgency_level = None
+        return lines
+
+    def _make_pre_act_value(self) -> str:
+        """Produce the final pre-act state and guidance consumed by acting."""
+        (
+            numeric_fields,
+            has_active_offer,
+            uncertainty_summary,
+            current_urgency_level,
+        ) = self._resolve_live_strategy_inputs()
+        self._urgency_level = current_urgency_level
+        should_gather_info = self._should_gather_info(uncertainty_summary)
+        should_close = has_active_offer and not should_gather_info
+        can_walk_away = self._state.rounds_elapsed >= MIN_WEEKS_BEFORE_WALK_AWAY
+        should_walk_away = (
+            self._role == RoleType.BUYER
+            and can_walk_away
+            and current_urgency_level >= self._buyer_walkaway_threshold
+            and not should_gather_info
+        )
+        numeric_fields['DealScenarios'] = uncertainty_summary.get(
+            'scenario_summary', 'Unknown'
+        )
+        self._last_numeric_fields = dict(numeric_fields)
+        # Get negotiation strategy guidance based on urgency and role
+        information_focus = self._build_information_focus(
+            uncertainty_summary,
+            has_active_offer,
+            should_gather_info,
+            should_close,
+            should_walk_away,
+        )
+        base_strategy = self._build_base_strategy(
+            has_active_offer=has_active_offer,
+            information_focus=information_focus,
+        )
+        urgency_rule = self._build_urgency_rule(
+            has_active_offer=has_active_offer,
+            current_urgency_level=current_urgency_level,
+            should_close=should_close,
+            should_walk_away=should_walk_away,
+        )
+        self.strategy_summary = base_strategy + urgency_rule
+        lines = self._build_pre_act_lines(
+            numeric_fields=numeric_fields,
+            current_urgency_level=current_urgency_level,
+        )
+        self._reset_prefetched_live_state()
         return '\n'.join(lines) + '\n'
 
+    # Main methods: lifecycle hooks and persistence.
+    # Lifecycle hooks and persistence.
     def post_act(self, action_attempt: str) -> str:
         """Update strategy state after each action."""
         action_text = self._normalize_self_action_payload(action_attempt)
@@ -1051,7 +1102,6 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
         """Advance elapsed negotiation time once per completed pair-week."""
         self._state.rounds_elapsed += 1
 
-    # TODO: implement once strategy evolution is being done.
     def pre_observe(self, observation: str) -> str:
         """Process incoming observations."""
         return ""
@@ -1062,11 +1112,12 @@ class HDBNegotiationStrategy(action_spec_ignored.ActionSpecIgnored):
     
     def update(self) -> None:
         """Periodic updates if needed."""
-        self._prefetched_live_strategy_state = None
-        self._prefetched_live_urgency_level = None
+        self._reset_prefetched_live_state()
         super().update()
+
     def get_pre_act_label(self) -> str:
-        return 'Negotiation Strategy State and Numeric Facts'
+        return PRE_ACT_LABEL
+
     def get_pre_act_value(self) -> str:
         return super().get_pre_act_value()
     

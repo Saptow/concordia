@@ -337,12 +337,10 @@ class BuildMarketProfilesTest(unittest.TestCase):
     buyer_profiles_first, _ = hdb_initializer_gm.build_market_profiles(
         bundle,
         town='Choa Chu Kang',
-        model=None,
     )
     buyer_profiles_second, _ = hdb_initializer_gm.build_market_profiles(
         bundle,
         town='Choa Chu Kang',
-        model=None,
     )
 
     generated_name = buyer_profiles_first['buyer_2023_00853']['name']
@@ -401,21 +399,20 @@ class BuildMarketProfilesTest(unittest.TestCase):
 
 class BuildEntityParamsTest(unittest.TestCase):
 
-  def test_seller_initial_window_metadata_is_passed_to_negotiation_config(self):
+  def test_seller_listing_age_is_passed_to_negotiation_config(self):
     early_seller_profile = _seller_profile(name='Early Seller')
-    early_seller_profile['initial_window_position'] = 1
-    early_seller_profile['initial_window_size'] = 8
+    early_seller_profile['listing_release_week'] = 2
 
     _, participant_specs = hdb_initializer_gm.build_entity_params(
         buyer_profiles={},
         seller_profiles={
             'seller_early': early_seller_profile,
         },
+        week_number=5,
     )
 
     negotiation_config = participant_specs['seller_early']['negotiation_config']
-    self.assertEqual(negotiation_config['initial_window_position'], 1)
-    self.assertEqual(negotiation_config['initial_window_size'], 8)
+    self.assertEqual(negotiation_config['weeks_since_listed'], 3)
     self.assertNotIn('seller_exploration_threshold', negotiation_config)
 
 
@@ -770,6 +767,41 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
         ['buyer_002', 'seller_002'],
     )
 
+  def test_prepare_week_skips_pending_pair_when_participant_already_negotiating(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001', 'buyer_002', 'seller_002'},
+    )
+    negotiation_module = _FakeNegotiationModule(
+        open_pairs=[('buyer_001', 'seller_001')],
+    )
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001', 'buyer_002', 'seller_002'),
+        player_names=('Buyer 1', 'Seller 1', 'Buyer 2', 'Seller 2'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+    state = coordinator.get_state()
+    state['pending_matches'] = [{
+        'buyer_id': 'buyer_002',
+        'seller_id': 'seller_001',
+        'buyer_state': {'id': 'buyer_002'},
+        'seller_state': {'id': 'seller_001'},
+    }]
+    coordinator.set_state(state)
+
+    week_context = coordinator.prepare_week()
+
+    self.assertEqual(
+        week_context['open_negotiation_pairs'],
+        [['buyer_001', 'seller_001']],
+    )
+    self.assertEqual(
+        sorted(week_context['listing_player_ids']),
+        ['buyer_002', 'seller_002'],
+    )
+
   def test_listing_match_hands_off_to_negotiation_next_week(self):
     listing_module = _FakeListingModule(
         open_ids={'buyer_001', 'seller_001', 'buyer_002', 'seller_002'},
@@ -881,6 +913,7 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
         summary['reopened_listing_pairs'],
         negotiation_module.relisting_payloads,
     )
+    self.assertEqual(summary['negotiation']['pair_states'], [])
     self.assertEqual(
         negotiation_module.last_archived_pair_records,
         negotiation_outcome['closed_pairs'],
@@ -944,6 +977,54 @@ class WeeklyCoordinatorSchedulingTest(unittest.TestCase):
     self.assertEqual(listing_module.reopened_payloads, [[]])
     self.assertEqual(summary['reopened_listing_pairs'], [])
     self.assertEqual(summary['negotiation']['pair_states'], [])
+
+  def test_completed_week_summary_uses_evaluation_round_for_open_pair_state(self):
+    listing_module = _FakeListingModule(
+        open_ids={'buyer_001', 'seller_001'},
+    )
+    negotiation_module = _FakeNegotiationModule(
+        open_pairs=[('buyer_001', 'seller_001')],
+    )
+    pair_key = hdb_negotiation_helpers.pair_key('buyer_001', 'seller_001')
+    negotiation_module.pair_states = [{
+        'pair_key': pair_key,
+        'buyer_id': 'buyer_001',
+        'seller_id': 'seller_001',
+        'buyer_name': 'Buyer 1',
+        'seller_name': 'Seller 1',
+        'closed': False,
+        'outcome': 'OPEN',
+        'pair_round_number': 2,
+    }]
+    coordinator = hdb_coordinator_helper.WeeklyCoordinator(
+        player_ids=('buyer_001', 'seller_001'),
+        player_names=('Buyer 1', 'Seller 1'),
+    )
+    coordinator.set_entity(_FakeEntity({
+        'listing_module': listing_module,
+        'negotiation_module': negotiation_module,
+    }))
+
+    summary = coordinator.complete_week(
+        listing_outcome=None,
+        negotiation_outcome={
+            'week_number': 1,
+            'number_of_pairs_negotiated': 1,
+            'events': [],
+            'evaluation_records': [{
+                'pair_key': pair_key,
+                'pair_round_number': 1,
+            }],
+            'closed_pairs': [],
+            'successful_pairs': [],
+            'failed_pairs': [],
+        },
+    )
+
+    self.assertEqual(
+        summary['negotiation']['pair_states'][0]['pair_round_number'],
+        1,
+    )
 
   def test_state_round_trip_preserves_pending_matches_for_next_week(self):
     listing_module = _FakeListingModule(
@@ -1020,6 +1101,75 @@ class NegotiationSchedulerTest(unittest.TestCase):
     self.assertEqual(
         scheduler.get_pair_round_number('buyer_002', 'seller_002'),
         2,
+    )
+
+
+class NegotiationModulePairRegistrationTest(unittest.TestCase):
+
+  def test_does_not_register_new_pair_for_successfully_closed_seller(self):
+    module = hdb_negotiation.NegotiationModule(
+        entities=(),
+        participant_specs={
+            'buyer_001': {
+                'role': 'buyer',
+                **_buyer_profile(name='Buyer 1'),
+            },
+            'buyer_002': {
+                'role': 'buyer',
+                **_buyer_profile(name='Buyer 2'),
+            },
+            'seller_001': {
+                'role': 'seller',
+                **_seller_profile(name='Seller 1'),
+            },
+        },
+        negotiation_pairs=(('buyer_001', 'seller_001'),),
+        enabled=False,
+    )
+    module._offer_tracker.close_pair(
+        'buyer_001',
+        'seller_001',
+        outcome=negotiation_schemas.NegotiationOutcome.SUCCESS,
+    )
+
+    module._register_pair('buyer_002', 'seller_001')
+
+    self.assertEqual(
+        module._scheduler.get_pair_queue_ids(),
+        [('buyer_001', 'seller_001')],
+    )
+
+  def test_does_not_register_new_pair_for_successfully_closed_buyer(self):
+    module = hdb_negotiation.NegotiationModule(
+        entities=(),
+        participant_specs={
+            'buyer_001': {
+                'role': 'buyer',
+                **_buyer_profile(name='Buyer 1'),
+            },
+            'seller_001': {
+                'role': 'seller',
+                **_seller_profile(name='Seller 1'),
+            },
+            'seller_002': {
+                'role': 'seller',
+                **_seller_profile(name='Seller 2'),
+            },
+        },
+        negotiation_pairs=(('buyer_001', 'seller_001'),),
+        enabled=False,
+    )
+    module._offer_tracker.close_pair(
+        'buyer_001',
+        'seller_001',
+        outcome=negotiation_schemas.NegotiationOutcome.SUCCESS,
+    )
+
+    module._register_pair('buyer_001', 'seller_002')
+
+    self.assertEqual(
+        module._scheduler.get_pair_queue_ids(),
+        [('buyer_001', 'seller_001')],
     )
 
 
