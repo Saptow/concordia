@@ -416,12 +416,8 @@ class HDBSimulationEngine(engine_lib.Engine):
     )
     current_policy_prompt = getattr(
         policy_layer,
-        'get_compact_current_policy_prompt',
-        getattr(
-            policy_layer,
-            'get_current_policy_prompt',
-            lambda: '',
-        ),
+        'get_current_policy_prompt',
+        lambda: '',
     )()
     active_source_paths = list(
         getattr(policy_layer, 'get_active_source_paths', lambda: [])()
