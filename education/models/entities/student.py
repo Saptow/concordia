@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 import dataclasses
+from pathlib import Path
 
 from concordia.agents import entity_agent_with_logging
 from concordia.associative_memory import basic_associative_memory
@@ -13,6 +14,10 @@ _DEFAULT_OBSERVATION_HISTORY_LENGTH = 1_000_000
 _DEFAULT_SITUATION_PERCEPTION_HISTORY_LENGTH = 25
 _DEFAULT_SELF_PERCEPTION_HISTORY_LENGTH = 1_000_000
 _DEFAULT_PERSON_BY_SITUATION_HISTORY_LENGTH = 5
+_DEFAULT_PROBLEM_BANK_PATH = 'concordia/education/data/sample_problem_bank.json'
+_DEFAULT_STUDENT_TRACE_PATH = (
+    'concordia/education/data/sample_student_traces.json'
+)
 
 
 class StudentProfile:
@@ -56,6 +61,23 @@ class StudentProfile:
 
         return '\n'.join(parts)
 
+
+def _student_profile(params: Mapping[str, object]) -> str:
+  """Formats the student-facing profile block used in prompts."""
+  profile = StudentProfile(
+      name=str(params.get('name', 'Student')),
+      age=str(params.get('age', '16')),
+      grade_level=str(params.get('grade_level', 'Secondary 4')),
+      school=str(params.get('school', 'Not specified')),
+      subjects=str(params.get('subjects', 'General studies')),
+      persona=str(params.get('persona', 'Curious and diligent.')),
+      strengths=str(params.get('strengths', 'Asks questions and tries hard.')),
+      challenges=str(
+          params.get('challenges', 'Can lose confidence when unsure.')
+      ),
+  )
+  return str(profile)
+
 @dataclasses.dataclass
 class Student(prefab_lib.Prefab):
   """A basic Concordia entity specialized to play the role of a student."""
@@ -92,6 +114,7 @@ class Student(prefab_lib.Prefab):
           'person_by_situation_history_length': (
               _DEFAULT_PERSON_BY_SITUATION_HISTORY_LENGTH
           ),
+          'knowledge_tracing': None,
       }
   )
 
@@ -219,6 +242,11 @@ class Student(prefab_lib.Prefab):
         )
     )
 
+    knowledge_tracing_component = _build_knowledge_tracing_component(
+        params=self.params,
+        entity_name=entity_name,
+    )
+
     components_of_agent = {
         instructions_key: instructions,
         student_profile_key: student_profile,
@@ -230,10 +258,13 @@ class Student(prefab_lib.Prefab):
         person_by_situation_key: person_by_situation,
         memory_key: memory,
     }
+    if knowledge_tracing_component is not None:
+      components_of_agent['KnowledgeState'] = knowledge_tracing_component
     component_order = [
         instructions_key,
         student_profile_key,
         goal_key,
+        *(['KnowledgeState'] if knowledge_tracing_component is not None else []),
         observation_key,
         situation_perception_key,
         self_perception_key,
@@ -256,3 +287,61 @@ class Student(prefab_lib.Prefab):
 
 
 Entity = Student
+
+
+def _build_knowledge_tracing_component(
+    *,
+    params: Mapping[str, object],
+    entity_name: str,
+):
+  config = params.get('knowledge_tracing')
+  if not isinstance(config, Mapping):
+    return None
+
+  backend = str(config.get('backend', '')).lower()
+  if backend != 'pybkt':
+    raise ValueError(
+        "Unsupported knowledge_tracing backend. Only 'pybkt' is supported."
+    )
+
+  from concordia.education.knowledge_tracing.pybkt import (
+      KnowledgeStateContextComponent,
+      PyBKTAdapter,
+  )
+
+  problem_bank_path = str(
+      config.get('problem_bank_path', _DEFAULT_PROBLEM_BANK_PATH)
+  )
+  trace_path = str(config.get('trace_path', _DEFAULT_STUDENT_TRACE_PATH))
+  student_id = str(config.get('student_id', entity_name))
+  top_k = int(config.get('top_k', 3))
+  fit_kwargs = {
+      'seed': int(config.get('seed', 42)),
+      'num_fits': int(config.get('num_fits', 1)),
+      'forgets': bool(config.get('forgets', True)),
+      'parallel': bool(config.get('parallel', False)),
+  }
+
+  adapter = PyBKTAdapter.from_json_paths(
+      problem_bank_path=_resolve_repo_path(problem_bank_path),
+      trace_path=_resolve_repo_path(trace_path),
+      fit_kwargs=fit_kwargs,
+  )
+
+  def _attempts_getter() -> list:
+    return PyBKTAdapter.load_student_attempts(
+        _resolve_repo_path(trace_path),
+        student_id,
+    )
+
+  return KnowledgeStateContextComponent(
+      adapter=adapter,
+      student_id=student_id,
+      attempts_getter=_attempts_getter,
+      top_k=top_k,
+  )
+
+
+def _resolve_repo_path(relative_path: str) -> str:
+  root = Path(__file__).resolve().parents[4]
+  return str((root / relative_path).resolve())

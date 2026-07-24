@@ -1,0 +1,71 @@
+{
+  "dataset_name": "kt_dsa_problem_bank",
+  "knowledge_components": [
+    "arrays_iteration",
+    "hashmap_lookup",
+    "two_pointers",
+    "stack_basics",
+    "linked_list_pointers",
+    "binary_search",
+    "tree_traversal",
+    "dp_1d"
+  ],
+  "problems": [
+    {
+      "problem_id": "P001",
+      "title": "Count Positive Numbers",
+      "difficulty": "easy",
+      "knowledge_components": ["arrays_iteration"],
+      "prompt": "Given an array of integers, return how many values are greater than zero."
+    },
+    {
+      "problem_id": "P002",
+      "title": "Two Sum",
+      "difficulty": "easy",
+      "knowledge_components": ["hashmap_lookup"],
+      "prompt": "Given an array of integers and a target, return the indices of two numbers that add up to the target."
+    },
+    {
+      "problem_id": "P003",
+      "title": "Merge Two Sorted Arrays",
+      "difficulty": "easy",
+      "knowledge_components": ["two_pointers"],
+      "prompt": "Given two sorted arrays, merge them into one sorted array."
+    },
+    {
+      "problem_id": "P004",
+      "title": "Valid Parentheses",
+      "difficulty": "easy",
+      "knowledge_components": ["stack_basics"],
+      "prompt": "Given a string of brackets, return whether it is valid."
+    },
+    {
+      "problem_id": "P005",
+      "title": "Reverse Linked List",
+      "difficulty": "easy",
+      "knowledge_components": ["linked_list_pointers"],
+      "prompt": "Given the head of a singly linked list, reverse the list."
+    },
+    {
+      "problem_id": "P006",
+      "title": "Binary Search",
+      "difficulty": "easy",
+      "knowledge_components": ["binary_search"],
+      "prompt": "Given a sorted array and a target, return its index or -1."
+    },
+    {
+      "problem_id": "P007",
+      "title": "Level Order Traversal",
+      "difficulty": "medium",
+      "knowledge_components": ["tree_traversal"],
+      "prompt": "Given the root of a binary tree, return the node values level by level."
+    },
+    {
+      "problem_id": "P008",
+      "title": "Climbing Stairs",
+      "difficulty": "easy",
+      "knowledge_components": ["dp_1d"],
+      "prompt": "Given n steps, return how many distinct ways there are to climb to the top using 1 or 2 steps."
+    }
+  ]
+}
